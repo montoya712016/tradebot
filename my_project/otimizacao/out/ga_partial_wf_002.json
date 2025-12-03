@@ -1,0 +1,117 @@
+{
+  "run_dir": "C:\\Users\\NovoLucas\\programacao\\investimento\\crypto\\otimizacao_com_ia\\sistema dados 1 segundo\\models_classifier\\market_cap_150B_50M\\wf_002",
+  "generation": 2,
+  "total_generations": 15,
+  "best_genome": {
+    "thresh": 0.7386397638154522,
+    "conf_ema_win": 2,
+    "exit_ema_win": 29,
+    "exit_atr_win": 26,
+    "exit_k": 1.5137600114365375,
+    "hold_signal_thresh": 0.32984661265371107,
+    "panic_dd_thresh": 0.21056608895529266,
+    "panic_abandon_thresh": 0.09459628581611476,
+    "panic_abandon_candles": 15,
+    "dca_max_entries": 1,
+    "dca_drop_pct": 0.11644790928801063,
+    "dca_min_p": 0.48189703006457285
+  },
+  "best_fitness": -0.5613804459571838,
+  "best_summary": {
+    "used_symbols": 196,
+    "eq_mean": 1.2282639678035463,
+    "eq_median": 1.1441943645477295,
+    "wr_mean": 0.29891049631465894,
+    "dd_max": 0.5613804459571838,
+    "pf_mean": 1.4270864636160059,
+    "ret_mean": 0.22826396780354635,
+    "trades_sum": 17526
+  },
+  "history": [
+    {
+      "gen": 0,
+      "fitness": -0.5740306377410889,
+      "genome": {
+        "thresh": 0.6677506068090999,
+        "conf_ema_win": 20,
+        "exit_ema_win": 27,
+        "exit_atr_win": 18,
+        "exit_k": 0.8150376274362643,
+        "hold_signal_thresh": 0.464713556652043,
+        "panic_dd_thresh": 0.10812822265566392,
+        "panic_abandon_thresh": 0.35489703913645165,
+        "panic_abandon_candles": 23,
+        "dca_max_entries": 5,
+        "dca_drop_pct": 0.2228885889025094,
+        "dca_min_p": 0.4430263466405253
+      },
+      "summary": {
+        "used_symbols": 196,
+        "eq_mean": 1.0851984285578435,
+        "eq_median": 1.009315013885498,
+        "wr_mean": 0.24095868964973013,
+        "dd_max": 0.5740306377410889,
+        "pf_mean": 1.1245462727658277,
+        "ret_mean": 0.08519842855784358,
+        "trades_sum": 43618
+      }
+    },
+    {
+      "gen": 1,
+      "fitness": -0.5675890445709229,
+      "genome": {
+        "thresh": 0.6668970045521447,
+        "conf_ema_win": 14,
+        "exit_ema_win": 24,
+        "exit_atr_win": 21,
+        "exit_k": 1.3067362903727022,
+        "hold_signal_thresh": 0.6475310418176279,
+        "panic_dd_thresh": 0.11645336761015451,
+        "panic_abandon_thresh": 0.122339791592008,
+        "panic_abandon_candles": 41,
+        "dca_max_entries": 5,
+        "dca_drop_pct": 0.10416923919589974,
+        "dca_min_p": 0.6542143988518204
+      },
+      "summary": {
+        "used_symbols": 196,
+        "eq_mean": 1.14817148234163,
+        "eq_median": 1.0909281373023987,
+        "wr_mean": 0.2816810053983438,
+        "dd_max": 0.5675890445709229,
+        "pf_mean": 1.1944359817888328,
+        "ret_mean": 0.1481714823416301,
+        "trades_sum": 36850
+      }
+    },
+    {
+      "gen": 2,
+      "fitness": -0.5613804459571838,
+      "genome": {
+        "thresh": 0.7386397638154522,
+        "conf_ema_win": 2,
+        "exit_ema_win": 29,
+        "exit_atr_win": 26,
+        "exit_k": 1.5137600114365375,
+        "hold_signal_thresh": 0.32984661265371107,
+        "panic_dd_thresh": 0.21056608895529266,
+        "panic_abandon_thresh": 0.09459628581611476,
+        "panic_abandon_candles": 15,
+        "dca_max_entries": 1,
+        "dca_drop_pct": 0.11644790928801063,
+        "dca_min_p": 0.48189703006457285
+      },
+      "summary": {
+        "used_symbols": 196,
+        "eq_mean": 1.2282639678035463,
+        "eq_median": 1.1441943645477295,
+        "wr_mean": 0.29891049631465894,
+        "dd_max": 0.5613804459571838,
+        "pf_mean": 1.4270864636160059,
+        "ret_mean": 0.22826396780354635,
+        "trades_sum": 17526
+      }
+    }
+  ],
+  "updated_at": "2025-12-02 15:42:51"
+}

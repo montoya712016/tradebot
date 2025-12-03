@@ -1,0 +1,58 @@
+Plano para o novo pipeline “policy trader” (dez/2025)
+====================================================
+
+Objetivo geral
+--------------
+Treinar um único modelo de política (MLP compartilhado entre os símbolos) que decide:
+- abrir/aumentar posição comprada
+- abrir/aumentar posição vendida/short
+- reduzir/encerrar a posição (ou ficar parado)
+
+O modelo aprende direto no horizonte de 1 ano do backtest multi (`my_project/test/teste_multiplo.py`), usando as previsões atuais (p_buy, p_short, u_pred) como features de entrada e respeitando o gerenciamento de portfólio existente (capital_total, leverage_max, capital_per_trade). Nada de thresholds ou heurísticas pós-modelo.
+
+Métricas e fitness
+------------------
+Após rodar o ano completo, coletamos:
+- lucro total (ret_total)
+- menor lucro mensal (min dos retornos mensais)
+- profit factor (pf)
+- hit rate (win_rate)
+- max drawdown (max_dd)
+
+Metas mínimas desejadas:
+- lucro total >= 100%
+- menor lucro mensal >= +5%
+- PF >= 1.5
+- hit >= 50%
+- max DD <= 5%
+
+Cada métrica gera um score normalizado (capado para ninguém dominar). O fitness final é a média geométrica desses scores. Se qualquer métrica cair abaixo do mínimo, o fitness despenca, forçando a política a ser consistente, lucrativa e com DD controlado.
+
+Features que alimentam a política
+---------------------------------
+Serão derivados das colunas já produzidas em `prepare_features` (mantendo a maioria ligada):
+- Manter: atr, rsi, slope, vol, cum_logret, keltner, cci, adx, time_since, zlog, vol_ratio, regime, liquidity, rev_speed, vol_z, shadow, range_ratio, runs, hh_hl, ema_cross, breakout, mom_short, wick_stats, shitidx.
+- Desligar: ci, slope_reserr.
+- Não usar pivots como feature direta nesta fase.
+
+No gym, cada símbolo usarará um vetor compacto (~30 dims) composto por:
+1. Estado local do símbolo (p_buy/p_short, deltas de probabilidade, retornos 1/5/15/60m, posição relativa ao range recente, relaçōes com EMAs, volatilidade/ATR, etc.).
+2. Estado da posição naquele símbolo (lado, tamanho relativo, PnL não realizado, tempo na posição, MFE/MAE).
+3. Estado global da carteira (equity atual, DD atual, nº de trades, exposição long/short).
+
+Treinamento (GA embutido)
+-------------------------
+1. Definir a arquitetura do MLP de política (pequeno, compartilhado entre símbolos).
+2. GA passa a otimizar diretamente os pesos do MLP:
+   - cada indivíduo => carrega pesos => roda o backtest multi completo de 1 ano => obtém métricas => calcula fitness geométrico.
+   - seleção/crossover/mutação até convergir.
+3. Sem TP/SL fixos: o comportamento de entrada/saída emerge da própria política, respeitando apenas as limitações de capital impostas pelo motor do backtest.
+
+Próximos passos imediatos
+-------------------------
+1. Estender `simulate_portfolio_backtest_timestamp_by_timestamp` para calcular retornos mensais e aceitar uma política externa.
+2. Implementar o construtor do vetor de estado (símbolo + carteira) e a interface da política (scores para long/short/idle).
+3. Criar a função de fitness geométrico.
+4. Adaptar `otimizacao/ga.py` para trabalhar com vetores de pesos do MLP ao invés dos parâmetros clássicos.
+5. Validar num subconjunto de símbolos antes de liberar para o universo inteiro.
+
