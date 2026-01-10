@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% set title = "Astra — Dashboard" %}
+
+{% block content %}
+  <div class="row g-3">
+    <div class="col-12">
+      <div class="d-flex flex-wrap align-items-end justify-content-between gap-2">
+        <div>
+          <h1 class="h4 mb-1">Painel em tempo real</h1>
+          <div class="text-secondary small">
+            Posições, PnL, alocação e trades recentes (modo demo por enquanto).
+          </div>
+        </div>
+        <div class="d-flex gap-2">
+          <button id="btn-refresh" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-arrow-repeat me-1"></i>Atualizar
+          </button>
+          <button id="btn-pause" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-pause-circle me-1"></i>Pausar
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- KPI cards -->
+    <div class="col-12 col-md-6 col-xl-3">
+      <div class="card card-glass kpi-card">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start">
+            <div>
+              <div class="text-secondary small">Equity</div>
+              <div class="kpi-value" id="kpi-equity">$—</div>
+            </div>
+            <div class="kpi-icon bg-success-subtle text-success-emphasis">
+              <i class="bi bi-wallet2"></i>
+            </div>
+          </div>
+          <div class="text-secondary small mt-2">
+            Cash: <span class="text-secondary-emphasis" id="kpi-cash">$—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 col-md-6 col-xl-3">
+      <div class="card card-glass kpi-card">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start">
+            <div>
+              <div class="text-secondary small">PnL (unrealized)</div>
+              <div class="kpi-value" id="kpi-unreal">$—</div>
+            </div>
+            <div class="kpi-icon bg-primary-subtle text-primary-emphasis">
+              <i class="bi bi-graph-up"></i>
+            </div>
+          </div>
+          <div class="text-secondary small mt-2">
+            Realizado: <span class="text-secondary-emphasis" id="kpi-real">$—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 col-md-6 col-xl-3">
+      <div class="card card-glass kpi-card">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start">
+            <div>
+              <div class="text-secondary small">Exposição</div>
+              <div class="kpi-value" id="kpi-exposure">$—</div>
+            </div>
+            <div class="kpi-icon bg-warning-subtle text-warning-emphasis">
+              <i class="bi bi-lightning-charge"></i>
+            </div>
+          </div>
+          <div class="text-secondary small mt-2">
+            % Equity: <span class="text-secondary-emphasis" id="kpi-exposure-pct">—%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 col-md-6 col-xl-3">
+      <div class="card card-glass kpi-card">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start">
+            <div>
+              <div class="text-secondary small">Ativos operados</div>
+              <div class="kpi-value" id="kpi-symbols">—</div>
+            </div>
+            <div class="kpi-icon bg-secondary-subtle text-secondary-emphasis">
+              <i class="bi bi-grid-3x3-gap"></i>
+            </div>
+          </div>
+          <div class="text-secondary small mt-2">
+            Posições abertas: <span class="text-secondary-emphasis" id="kpi-positions">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Allocation + Positions -->
+    <div class="col-12 col-xl-5">
+      <div class="card card-glass h-100">
+        <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
+          <div class="d-flex align-items-center justify-content-between">
+            <div class="fw-semibold">Alocação por ativo</div>
+            <span class="badge text-bg-secondary" id="alloc-total">—</span>
+          </div>
+        </div>
+        <div class="card-body p-3">
+          <div class="chart-wrap">
+            <canvas id="allocation-chart"></canvas>
+          </div>
+          <div class="text-secondary small mt-3">
+            Dica: quando plugar o robô, isso vira “capital alocado” real por símbolo/estratégia.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 col-xl-7">
+      <div class="card card-glass h-100">
+        <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
+          <div class="d-flex align-items-center justify-content-between">
+            <div class="fw-semibold">Posições abertas</div>
+            <span class="badge text-bg-secondary" id="positions-badge">—</span>
+          </div>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-head">
+                <tr>
+                  <th>Ativo</th>
+                  <th>Lado</th>
+                  <th class="text-end">Qtd</th>
+                  <th class="text-end">Entrada</th>
+                  <th class="text-end">Mark</th>
+                  <th class="text-end">Notional</th>
+                  <th class="text-end">PnL</th>
+                </tr>
+              </thead>
+              <tbody id="positions-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Trades -->
+    <div class="col-12">
+      <div class="card card-glass">
+        <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
+          <div class="d-flex align-items-center justify-content-between">
+            <div class="fw-semibold">Trades recentes</div>
+            <span class="badge text-bg-secondary" id="trades-badge">—</span>
+          </div>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-head">
+                <tr>
+                  <th>Hora (UTC)</th>
+                  <th>Ativo</th>
+                  <th>Ação</th>
+                  <th class="text-end">Qtd</th>
+                  <th class="text-end">Preço</th>
+                  <th class="text-end">PnL</th>
+                </tr>
+              </thead>
+              <tbody id="trades-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.__INITIAL_STATE__ = {{ initial_state | tojson }};
+  </script>
+{% endblock %}
+
+{% block scripts %}
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+{% endblock %}
+

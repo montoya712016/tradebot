@@ -1,0 +1,108 @@
+.astra-body {
+  background:
+    radial-gradient(1200px 600px at 10% 10%, rgba(97, 87, 255, 0.22), transparent 60%),
+    radial-gradient(900px 500px at 80% 20%, rgba(0, 255, 178, 0.12), transparent 55%),
+    radial-gradient(900px 500px at 80% 85%, rgba(255, 196, 0, 0.10), transparent 55%),
+    linear-gradient(180deg, rgba(15, 18, 25, 1) 0%, rgba(10, 12, 16, 1) 100%);
+  min-height: 100vh;
+}
+
+.navbar-glass {
+  background: rgba(10, 12, 16, 0.55);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.card-glass {
+  background: rgba(16, 19, 26, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+}
+
+.brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #7c5cff, #00ffb3);
+  box-shadow: 0 0 0 4px rgba(124, 92, 255, 0.18);
+  display: inline-block;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+.status-online {
+  background: #00ffb3;
+  box-shadow: 0 0 0 4px rgba(0, 255, 179, 0.18);
+}
+.status-offline {
+  background: #ff5c7a;
+  box-shadow: 0 0 0 4px rgba(255, 92, 122, 0.18);
+}
+
+.kpi-card .kpi-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.kpi-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+.kpi-icon i {
+  font-size: 1.1rem;
+}
+
+.table-head th {
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.75);
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: 0.01em;
+}
+
+.table td,
+.table th {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.pnl-pos {
+  color: #00ffb3 !important;
+}
+.pnl-neg {
+  color: #ff5c7a !important;
+}
+
+.chart-wrap {
+  height: 260px;
+}
+
+[data-bs-theme="light"] .astra-body {
+  background:
+    radial-gradient(1200px 600px at 10% 10%, rgba(97, 87, 255, 0.18), transparent 60%),
+    radial-gradient(900px 500px at 80% 20%, rgba(0, 140, 255, 0.10), transparent 55%),
+    radial-gradient(900px 500px at 80% 85%, rgba(255, 196, 0, 0.10), transparent 55%),
+    linear-gradient(180deg, rgba(248, 250, 255, 1) 0%, rgba(240, 244, 250, 1) 100%);
+}
+
+[data-bs-theme="light"] .navbar-glass {
+  background: rgba(255, 255, 255, 0.75);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+[data-bs-theme="light"] .card-glass {
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+}
+
