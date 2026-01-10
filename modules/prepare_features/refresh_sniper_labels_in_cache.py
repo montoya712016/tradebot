@@ -117,8 +117,6 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
                 "sniper_exit_code",
                 "sniper_exit_wait_bars",
                 "sniper_danger_label",
-                "sniper_mfe_safe_pct",
-                "sniper_mfe_safe_wait_bars",
             ]:
                 if c in df_lab.columns:
                     df[c] = df_lab[c]

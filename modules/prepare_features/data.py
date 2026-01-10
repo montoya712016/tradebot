@@ -21,7 +21,8 @@ DB_CFG_1M = dict(
 # Gap padrão ao costurar base 1s
 DEFAULT_MAX_GAP_SEC = int(os.getenv("PF_MAX_GAP_SEC", str(60*15)))
 
-PREFER_PURE_FOR_THREADS = True
+_prefer = os.getenv("PF_PREFER_PURE_FOR_THREADS", "1").strip().lower()
+PREFER_PURE_FOR_THREADS = _prefer in {"1", "true", "yes", "y", "on"}
 
 
 def _open_conn(db_cfg: dict[str, Any], *, want_c_ext: bool = True, use_compress: bool = False, timeout: int = 8):

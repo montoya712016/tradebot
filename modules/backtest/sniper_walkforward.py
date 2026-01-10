@@ -105,13 +105,6 @@ class PeriodModel:
     tau_exit: float
     tau_add: float
     tau_danger_add: float
-    # regressões auxiliares (podem não existir em runs antigos)
-    profit_model: xgb.Booster | None = None
-    time_model: xgb.Booster | None = None
-    profit_cols: List[str] | None = None
-    time_cols: List[str] | None = None
-    profit_transform: str = "log1p"
-    time_transform: str = "log1p"
 
 
 def _load_booster(path_json: Path) -> xgb.Booster:
@@ -143,20 +136,12 @@ def load_period_models(
         danger_model = _load_booster(pd_dir / "danger_model" / "model_danger.json")
         exit_path = pd_dir / "exit_model" / "model_exit.json"
         exit_model = _load_booster(exit_path) if exit_path.exists() else None
-        profit_path = pd_dir / "profit_model" / "model_profit.json"
-        profit_model = _load_booster(profit_path) if profit_path.exists() else None
-        time_path = pd_dir / "time_model" / "model_time.json"
-        time_model = _load_booster(time_path) if time_path.exists() else None
         entry_cols = list(meta["entry"]["feature_cols"])
         danger_cols = list(meta["danger"]["feature_cols"])
         exit_cols = list((meta.get("exit") or {}).get("feature_cols") or [])
-        profit_cols = list((meta.get("profit") or {}).get("feature_cols") or entry_cols)
-        time_cols = list((meta.get("time") or {}).get("feature_cols") or entry_cols)
         entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
         danger_calib = dict(meta["danger"].get("calibration") or {"type": "identity"})
         exit_calib = dict((meta.get("exit") or {}).get("calibration") or {"type": "identity"})
-        profit_transform = str((meta.get("profit") or {}).get("transform") or "log1p")
-        time_transform = str((meta.get("time") or {}).get("transform") or "log1p")
         tau_entry = float(meta["entry"].get("threshold", 0.5))
         tau_danger = float(meta["danger"].get("threshold", 0.5))
         tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
@@ -173,15 +158,9 @@ def load_period_models(
                 entry_cols=entry_cols,
                 danger_cols=danger_cols,
                 exit_cols=exit_cols,
-                profit_model=profit_model,
-                time_model=time_model,
-                profit_cols=profit_cols,
-                time_cols=time_cols,
                 entry_calib=entry_calib,
                 danger_calib=danger_calib,
                 exit_calib=exit_calib,
-                profit_transform=profit_transform,
-                time_transform=time_transform,
                 tau_entry=tau_entry,
                 tau_danger=tau_danger,
                 tau_exit=tau_exit,
@@ -305,87 +284,6 @@ def predict_scores_walkforward(
     return p_entry, p_danger, p_exit, used_any
 
 
-def _invert_reg_transform(pred: np.ndarray, transform: str) -> np.ndarray:
-    p = np.asarray(pred, dtype=np.float64)
-    if str(transform).lower() == "log1p":
-        p = np.maximum(0.0, p)
-        return np.expm1(p).astype(np.float32, copy=False)
-    return np.maximum(0.0, p).astype(np.float32, copy=False)
-
-
-def predict_scores_walkforward_5(
-    df: pd.DataFrame,
-    *,
-    periods: List[PeriodModel],
-    return_period_id: bool = False,
-) -> (
-    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, PeriodModel]
-    | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, PeriodModel, np.ndarray]
-):
-    """
-    Prediz p_entry/p_danger + (profit_pct, time_bars) em walk-forward.
-    ExitScore permanece NaN (é preenchido no simulador via cycle_*).
-    """
-    idx = pd.to_datetime(df.index)
-    n = len(idx)
-    p_entry = np.full(n, np.nan, dtype=np.float32)
-    p_danger = np.full(n, np.nan, dtype=np.float32)
-    p_exit = np.full(n, np.nan, dtype=np.float32)
-    p_profit = np.full(n, np.nan, dtype=np.float32)
-    p_time = np.full(n, np.nan, dtype=np.float32)
-    period_id = np.full(n, -1, dtype=np.int16)
-
-    used_any: PeriodModel | None = None
-    import xgboost as xgb  # local import
-
-    for pid, pm in enumerate(periods):
-        mask = idx > pm.train_end_utc
-        mask &= ~np.isfinite(p_entry)
-        if not mask.any():
-            continue
-        rows = np.flatnonzero(np.asarray(mask, dtype=bool))
-
-        X_e = _build_matrix_rows(df, pm.entry_cols, rows)
-        X_d = _build_matrix_rows(df, pm.danger_cols, rows)
-        pe = pm.entry_model.predict(xgb.DMatrix(X_e), validate_features=False).astype(np.float32, copy=False)
-        pdg = pm.danger_model.predict(xgb.DMatrix(X_d), validate_features=False).astype(np.float32, copy=False)
-        pe = _apply_calibration(pe.astype(np.float64), pm.entry_calib).astype(np.float32, copy=False)
-        pdg = _apply_calibration(pdg.astype(np.float64), pm.danger_calib).astype(np.float32, copy=False)
-        p_entry[rows] = pe
-        p_danger[rows] = pdg
-
-        # regressões (podem estar ausentes)
-        if getattr(pm, "profit_model", None) is not None:
-            cols = list(getattr(pm, "profit_cols", None) or pm.entry_cols)
-            X_p = _build_matrix_rows(df, cols, rows)
-            pr = pm.profit_model.predict(xgb.DMatrix(X_p), validate_features=False).astype(np.float32, copy=False)
-            p_profit[rows] = _invert_reg_transform(pr, str(getattr(pm, "profit_transform", "log1p")))
-        if getattr(pm, "time_model", None) is not None:
-            cols = list(getattr(pm, "time_cols", None) or pm.entry_cols)
-            X_t = _build_matrix_rows(df, cols, rows)
-            tr = pm.time_model.predict(xgb.DMatrix(X_t), validate_features=False).astype(np.float32, copy=False)
-            p_time[rows] = _invert_reg_transform(tr, str(getattr(pm, "time_transform", "log1p")))
-
-        period_id[rows] = np.int16(pid)
-        if used_any is None:
-            used_any = pm
-
-    if used_any is None:
-        if len(periods) == 0:
-            raise RuntimeError("Nenhum período encontrado (periods vazio).")
-        t0 = pd.to_datetime(idx.min())
-        t1 = pd.to_datetime(idx.max())
-        te_max = max(p.train_end_utc for p in periods)
-        te_min = min(p.train_end_utc for p in periods)
-        raise RuntimeError(
-            "Nenhum período do run_dir é válido para o range de timestamps fornecido. "
-            f"df=[{t0}..{t1}] train_end_range=[{te_min}..{te_max}]"
-        )
-
-    if return_period_id:
-        return p_entry, p_danger, p_exit, p_profit, p_time, used_any, period_id
-    return p_entry, p_danger, p_exit, p_profit, p_time, used_any
-
 
 def _build_row_vector_for_exit(
     df: pd.DataFrame,
@@ -492,8 +390,6 @@ def simulate_sniper_from_scores(
     p_entry: np.ndarray,
     p_danger: np.ndarray,
     p_exit: np.ndarray | None = None,
-    p_profit: np.ndarray | None = None,
-    p_time: np.ndarray | None = None,
     thresholds: PeriodModel,
     periods: List[PeriodModel] | None = None,
     period_id: np.ndarray | None = None,
@@ -503,11 +399,6 @@ def simulate_sniper_from_scores(
     tp_hard_when_exit: bool | None = None,
     exit_min_hold_bars: int = 3,
     exit_confirm_bars: int = 1,
-    # Estratégia 5-modelos (opcional)
-    use_profit_time: bool = False,
-    min_expected_profit_pct: float = 0.0,
-    tp_target_frac_of_expected: float = 0.85,
-    exit_on_expected_time: bool = True,
     exit_on_danger: bool = True,
 ) -> SniperBacktestResult:
     """
@@ -541,8 +432,6 @@ def simulate_sniper_from_scores(
     last_fill = 0.0
     total_size = 0.0
     num_adds = 0
-    exp_profit = 0.0
-    exp_time = -1
     # confirmação simples do exit
     exit_min_hold = int(exit_min_hold_bars)
     exit_confirm = int(exit_confirm_bars)
@@ -579,16 +468,7 @@ def simulate_sniper_from_scores(
 
         if not in_pos:
             exit_streak = 0
-            ok_pt = True
-            if use_profit_time and (p_profit is not None) and (p_time is not None):
-                pr = float(p_profit[i]) if np.isfinite(p_profit[i]) else float("nan")
-                tt = float(p_time[i]) if np.isfinite(p_time[i]) else float("nan")
-                if np.isfinite(pr) and (pr < float(min_expected_profit_pct)):
-                    ok_pt = False
-                if np.isfinite(tt):
-                    ok_pt &= (tt <= float(timeout_bars) + 1e-9)
-
-            if (pe >= pm.tau_entry) and (pdg < pm.tau_danger) and ok_pt:
+            if (pe >= pm.tau_entry) and (pdg < pm.tau_danger):
                 in_pos = True
                 entry_i = i
                 entry_price = px
@@ -596,8 +476,6 @@ def simulate_sniper_from_scores(
                 last_fill = px
                 total_size = size_sched[0]
                 num_adds = 0
-                exp_profit = float(p_profit[i]) if (use_profit_time and p_profit is not None and np.isfinite(p_profit[i])) else 0.0
-                exp_time = int(round(float(p_time[i]))) if (use_profit_time and p_time is not None and np.isfinite(p_time[i])) else -1
             eq_curve[i] = eq
             continue
 
@@ -610,15 +488,6 @@ def simulate_sniper_from_scores(
         if (reason is None) and exit_on_danger and (pdg >= float(pm.tau_danger)) and (time_in_trade >= exit_min_hold):
             reason = "DANGER"
             exit_px = px
-        if (reason is None) and use_profit_time and (exp_profit > 0.0) and (time_in_trade >= exit_min_hold):
-            target = float(exp_profit) * float(tp_target_frac_of_expected)
-            if cur_profit >= target:
-                reason = "TPP"
-                exit_px = px
-        if (reason is None) and use_profit_time and exit_on_expected_time and (int(exp_time) > 0):
-            if (time_in_trade >= int(exp_time)) and (cur_profit > 0.0) and (time_in_trade >= exit_min_hold):
-                reason = "TEXP"
-                exit_px = px
 
         # calcula ExitScore on-the-fly (precisa de cycle_* => depende do estado da posição)
         has_exit = (getattr(pm, "exit_model", None) is not None) and bool(getattr(pm, "exit_cols", []))
@@ -751,8 +620,6 @@ def simulate_sniper_from_scores(
             last_fill = 0.0
             total_size = 0.0
             num_adds = 0
-            exp_profit = 0.0
-            exp_time = -1
             eq_curve[i] = eq
             continue
 
@@ -816,7 +683,6 @@ __all__ = [
     "PeriodModel",
     "load_period_models",
     "predict_scores_walkforward",
-    "predict_scores_walkforward_5",
     "simulate_sniper_from_scores",
 ]
 

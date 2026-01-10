@@ -62,8 +62,6 @@ def _ensure_contract_labels(
         "sniper_exit_code",
         "sniper_exit_wait_bars",
         "sniper_danger_label",
-        "sniper_mfe_safe_pct",
-        "sniper_mfe_safe_wait_bars",
     }
     if not cols_needed.issubset(df.columns):
         apply_trade_contract_labels(df, contract=contract, candle_sec=candle_sec)
@@ -385,9 +383,9 @@ def _collect_exit_snapshots_numba(
                         peak_j = k
 
                 # parâmetros de "proximidade" (em tempo e preço)
-                near_bars = int(max(30, 2 * stride))   # garante ao menos ~2 snapshots
+                near_bars = int(max(60, 3 * stride))   # janela maior para aumentar positivos
                 tol_px = peak_px * (1.0 - exit_margin_pct)
-                profit_floor = max(exit_margin_pct, 0.005)  # evita "exit" no zero-a-zero
+                profit_floor = max(0.003, exit_margin_pct * 0.5)  # lucro mínimo mais permissivo
                 up_seq_len = 3  # "subida em sequência": 3 closes seguidos subindo
 
                 for t in range(out_start, out_cnt):
@@ -710,11 +708,6 @@ def build_sniper_datasets(
     entry_df["cycle_risk_used_pct"] = contract.sl_pct
     entry_df["cycle_risk_if_add_pct"] = contract.sl_pct + contract.add_spacing_pct
     entry_df["label_entry"] = entry_df["sniper_entry_label"].astype(np.uint8)
-    # Labels contínuos (regressão) — usados para treinar modelos auxiliares:
-    # - lucro máximo "seguro" (antes de violar dd_limit)
-    # - tempo até esse lucro
-    entry_df["label_profit"] = entry_df["sniper_mfe_safe_pct"].astype(np.float32)
-    entry_df["label_time"] = entry_df["sniper_mfe_safe_wait_bars"].astype(np.float32)
 
     add_snap = _collect_add_snapshots(df, contract=contract, candle_sec=candle_sec, max_add_starts=int(max_add_starts), seed=int(seed))
     if add_snap["idx"]:
@@ -732,10 +725,6 @@ def build_sniper_datasets(
         add_df["cycle_risk_used_pct"] = np.array(add_snap["risk_used_pct"], dtype=np.float32)
         add_df["cycle_risk_if_add_pct"] = np.array(add_snap["risk_if_add_pct"], dtype=np.float32)
         add_df["label_entry"] = np.array(add_snap["label"], dtype=np.uint8)
-        # Aproximação: usa labels contínuos calculados no timestamp do snapshot
-        # (para um 1º treino é suficiente; depois podemos refinar para avg_entry_price).
-        add_df["label_profit"] = add_df["sniper_mfe_safe_pct"].astype(np.float32)
-        add_df["label_time"] = add_df["sniper_mfe_safe_wait_bars"].astype(np.float32)
         add_df["sniper_exit_code"] = np.array(add_snap["exit_code"], dtype=np.int8)
     else:
         add_df = pd.DataFrame(columns=list(df.columns) + [
@@ -751,8 +740,6 @@ def build_sniper_datasets(
             "cycle_risk_used_pct",
             "cycle_risk_if_add_pct",
             "label_entry",
-            "label_profit",
-            "label_time",
         ])
 
     danger_df = df.copy()

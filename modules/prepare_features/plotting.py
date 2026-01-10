@@ -75,11 +75,9 @@ def plot_all(
             "sniper_entry_label",
             "sniper_exit_code",
             "sniper_danger_label",
-            "sniper_mfe_safe_pct",
-            "sniper_mfe_safe_wait_bars",
         }
         if any(col in df.columns for col in sniper_cols):
-            panels.extend(["sniper_entry", "sniper_profit_time", "sniper_danger"])
+            panels.extend(["sniper_entry", "sniper_danger"])
 
     if max_points is None:
         v = os.getenv("PF_PLOT_MAX_POINTS", "").strip()
@@ -505,47 +503,6 @@ def plot_all(
             ax.set_title("Sniper — Label & Exit Code")
             if plotted:
                 _safe_legend(ax, loc="upper left", ncol=2)
-            ax.grid()
-
-        elif panel == "sniper_profit_time":
-            plotted = False
-            if "sniper_mfe_safe_pct" in df.columns:
-                ax.plot(
-                    x_vals,
-                    df["sniper_mfe_safe_pct"] * 100.0,
-                    color="tab:green",
-                    label="MFE safe (%)",
-                )
-                ax.axhline(0.0, ls="--", c="gray", lw=0.8)
-                plotted = True
-                ax.set_ylabel("MFE safe (%)")
-            if "sniper_mfe_safe_wait_bars" in df.columns:
-                ax2 = ax.twinx()
-                ax2.plot(
-                    x_vals,
-                    df["sniper_mfe_safe_wait_bars"],
-                    color="tab:blue",
-                    alpha=0.6,
-                    label="MFE wait (bars)",
-                )
-                ax2.set_ylabel("Barras até MFE")
-                # criar legenda combinada
-                lines, labels = ax.get_legend_handles_labels()
-                lines2, labels2 = ax2.get_legend_handles_labels()
-                if lines or lines2:
-                    ax2.legend(lines + lines2, labels + labels2, loc="upper left")
-                plotted = True
-            if not plotted:
-                ax.text(
-                    0.5,
-                    0.5,
-                    "Sem colunas sniper_* (profit/time)",
-                    transform=ax.transAxes,
-                    ha="center",
-                    va="center",
-                    color="gray",
-                )
-            ax.set_title("Sniper — Profit/Time (MFE safe)")
             ax.grid()
 
         elif panel == "sniper_danger":

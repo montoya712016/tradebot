@@ -91,9 +91,6 @@ class SniperDataPack:
     exit: SniperBatch
     contract: TradeContract
     symbols: List[str]
-    # modelos auxiliares (regressão) para qualificar trades
-    profit: SniperBatch | None = None
-    time: SniperBatch | None = None
     # símbolos efetivamente usados no pack (após skips)
     symbols_used: List[str] | None = None
     symbols_skipped: List[str] | None = None
@@ -405,15 +402,30 @@ def ensure_feature_cache(
     n_total = int(len(to_build))
     done = 0
 
+    progress_every_s = 0.0
+    try:
+        v = os.getenv("SNIPER_CACHE_PROGRESS_EVERY_S", "").strip()
+        progress_every_s = float(v) if v else 5.0
+    except Exception:
+        progress_every_s = 5.0
+    last_progress_ts = 0.0
+
     def _print_progress(current_sym: str) -> None:
         nonlocal last_len
+        nonlocal last_progress_ts
         elapsed = time.perf_counter() - t_build0
         avg = elapsed / max(1, done)
         eta = avg * max(0, n_total - done)
         pct = 100.0 * done / max(1, n_total)
         line = f"[cache] [{_bar(done, n_total)}] {done:>3}/{n_total:<3} {pct:5.1f}% ETA {_fmt_eta_s(eta)} | {current_sym}"
-        sys.stderr.write("\r" + line + (" " * max(0, last_len - len(line))))
-        sys.stderr.flush()
+        if sys.stderr.isatty():
+            sys.stderr.write("\r" + line + (" " * max(0, last_len - len(line))))
+            sys.stderr.flush()
+        else:
+            now = time.perf_counter()
+            if now - last_progress_ts >= max(1.0, progress_every_s):
+                print(line, flush=True)
+                last_progress_ts = now
         last_len = max(last_len, len(line))
 
     if parallel and n_total > 0:
@@ -544,7 +556,8 @@ def _default_exit_margin_pct(contract: "TradeContract") -> float:
     except Exception:
         sl = 0.03
     # NOTE: tp/sl podem ser 5% dependendo do contrato; usar frações menores pra não inflar demais o label_exit.
-    return float(max(0.004, 0.15 * tp, 0.10 * sl))
+    # Limiar mais permissivo para gerar mais positivos no ExitScore.
+    return float(max(0.008, 0.20 * tp, 0.12 * sl))
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -665,10 +678,6 @@ def prepare_sniper_dataset(
     max_rows_danger: int = 600_000,
     max_rows_exit: int = 600_000,
     # regressões (lucro/tempo)
-    max_rows_profit: int = 600_000,
-    max_rows_time: int = 600_000,
-    bins_profit: int = 12,
-    bins_time: int = 12,
     seed: int = 42,
 ) -> SniperDataPack:
     contract = contract or DEFAULT_TRADE_CONTRACT
@@ -686,115 +695,17 @@ def prepare_sniper_dataset(
     sym_ids_entry: List[np.ndarray] = []
     sym_ids_danger: List[np.ndarray] = []
     sym_ids_exit: List[np.ndarray] = []
-    sym_ids_profit: List[np.ndarray] = []
-    sym_ids_time: List[np.ndarray] = []
     ts_entry_parts: List[np.ndarray] = []
     ts_danger_parts: List[np.ndarray] = []
     ts_exit_parts: List[np.ndarray] = []
-    ts_profit_parts: List[np.ndarray] = []
-    ts_time_parts: List[np.ndarray] = []
     X_entry_parts: List[np.ndarray] = []
     X_danger_parts: List[np.ndarray] = []
     X_exit_parts: List[np.ndarray] = []
-    X_profit_parts: List[np.ndarray] = []
-    X_time_parts: List[np.ndarray] = []
     y_entry_parts: List[np.ndarray] = []
     y_danger_parts: List[np.ndarray] = []
     y_exit_parts: List[np.ndarray] = []
-    y_profit_parts: List[np.ndarray] = []
-    y_time_parts: List[np.ndarray] = []
 
     rng = np.random.default_rng(int(seed) + int(remove_tail_days))
-
-    def _sample_reg_bins(
-        X: np.ndarray,
-        y: np.ndarray,
-        ts: np.ndarray,
-        sym: np.ndarray,
-        *,
-        max_rows: int,
-        bins: int,
-        zero_cap_frac: float = 0.25,
-        log_bins: bool = False,
-        clamp_lo: float = 0.0,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Sampling para regressão, balanceado por bins para evitar concentração em 0.
-        """
-        n = int(y.shape[0]) if y is not None else 0
-        if n <= 0 or max_rows <= 0 or n <= int(max_rows):
-            return X, y, ts, sym
-        yv = np.asarray(y, dtype=np.float64)
-        ok = np.isfinite(yv)
-        if clamp_lo is not None:
-            ok &= (yv >= float(clamp_lo))
-        idx_ok = np.flatnonzero(ok)
-        if idx_ok.size <= int(max_rows):
-            keep = idx_ok
-        else:
-            # separa zeros
-            eps = 1e-12
-            y_ok = yv[idx_ok]
-            z_mask = y_ok <= eps
-            idx_zero = idx_ok[z_mask]
-            idx_pos = idx_ok[~z_mask]
-
-            max_zero = int(max(1, round(float(max_rows) * float(zero_cap_frac))))
-            if idx_zero.size > max_zero:
-                idx_zero = rng.choice(idx_zero, size=int(max_zero), replace=False)
-
-            remain = int(max_rows) - int(idx_zero.size)
-            if remain <= 0 or idx_pos.size == 0:
-                keep = idx_zero
-            else:
-                y_pos = yv[idx_pos]
-                if log_bins:
-                    v = np.log1p(np.maximum(0.0, y_pos))
-                else:
-                    v = y_pos
-                # edges por quantis (robusto)
-                b = int(max(2, min(50, int(bins))))
-                qs = np.linspace(0.0, 1.0, b + 1)
-                edges = np.quantile(v, qs)
-                edges = np.unique(edges)
-                if edges.size < 3:
-                    # fallback: bins lineares no range
-                    vmin = float(np.min(v))
-                    vmax = float(np.max(v))
-                    edges = np.linspace(vmin, vmax + 1e-12, b + 1)
-                # atribui bins
-                # (bin_id em [0..nb-1])
-                nb = int(max(1, int(edges.size - 1)))
-                bin_id = np.searchsorted(edges[1:-1], v, side="right")
-                bin_id = np.clip(bin_id, 0, nb - 1)
-
-                per_bin = int(max(1, round(float(remain) / float(nb))))
-                picks: List[np.ndarray] = []
-                for k in range(nb):
-                    idx_k = idx_pos[np.flatnonzero(bin_id == k)]
-                    if idx_k.size == 0:
-                        continue
-                    take = int(min(idx_k.size, per_bin))
-                    if idx_k.size > take:
-                        idx_k = rng.choice(idx_k, size=int(take), replace=False)
-                    picks.append(idx_k.astype(np.int64, copy=False))
-                if picks:
-                    idx_pick = np.unique(np.concatenate(picks))
-                else:
-                    idx_pick = np.array([], dtype=np.int64)
-                if idx_pick.size > remain:
-                    idx_pick = rng.choice(idx_pick, size=int(remain), replace=False)
-                # se faltar, completa com positivos aleatórios
-                if idx_pick.size < remain and idx_pos.size > idx_pick.size:
-                    extra = int(min(remain - idx_pick.size, idx_pos.size - idx_pick.size))
-                    if extra > 0:
-                        rem2 = np.setdiff1d(idx_pos, idx_pick, assume_unique=False)
-                        if rem2.size > extra:
-                            rem2 = rng.choice(rem2, size=int(extra), replace=False)
-                        idx_pick = np.unique(np.concatenate([idx_pick, rem2]))
-                keep = np.unique(np.concatenate([idx_zero.astype(np.int64, copy=False), idx_pick.astype(np.int64, copy=False)]))
-        keep = np.sort(keep)
-        return X[keep], y[keep], ts[keep], sym[keep]
 
     def _sample_df(df_in: pd.DataFrame, label_col: str, ratio_neg_per_pos: float, max_rows: int) -> pd.DataFrame:
         if df_in.empty or label_col not in df_in.columns:
@@ -954,13 +865,9 @@ def prepare_sniper_dataset(
     feat_cols_exit = list(feat_exit0)
 
     Xe, ye, tse, syme = _to_numpy(entry_df0, feat_cols_entry, "label_entry", 0)
-    Xp, yp, tsp, symp = _to_numpy(entry_df0, feat_cols_entry, "label_profit", 0)
-    Xt, yt, tst, symt = _to_numpy(entry_df0, feat_cols_entry, "label_time", 0)
     Xd, yd, tsd, symd = _to_numpy(danger_df0, feat_cols_danger, "label_danger", 0)
     Xx, yx, tsx, symx = _to_numpy(exit_df0, feat_cols_exit, "label_exit", 0)
     X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme)
-    X_profit_parts.append(Xp); y_profit_parts.append(yp); ts_profit_parts.append(tsp); sym_ids_profit.append(symp)
-    X_time_parts.append(Xt); y_time_parts.append(yt); ts_time_parts.append(tst); sym_ids_time.append(symt)
     X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd)
     X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx)
 
@@ -981,14 +888,12 @@ def prepare_sniper_dataset(
         danger_df = _sample_df(danger_df, "label_danger", danger_ratio_neg_per_pos, per_sym_danger_max)
         exit_df = _sample_df(exit_df, "label_exit", exit_ratio_neg_per_pos, per_sym_exit_max)
         Xe, ye, tse, syme = _to_numpy(entry_df, feat_cols_entry, "label_entry", sym_idx)
-        Xp, yp, tsp, symp = _to_numpy(entry_df, feat_cols_entry, "label_profit", sym_idx)
-        Xt, yt, tst, symt = _to_numpy(entry_df, feat_cols_entry, "label_time", sym_idx)
         Xd, yd, tsd, symd = _to_numpy(danger_df, feat_cols_danger, "label_danger", sym_idx)
         Xx, yx, tsx, symx = _to_numpy(exit_df, feat_cols_exit, "label_exit", sym_idx)
         # ajuda a liberar RAM entre threads
         del entry_df, danger_df, exit_df
         gc.collect()
-        return Xe, ye, tse, syme, Xp, yp, tsp, symp, Xt, yt, tst, symt, Xd, yd, tsd, symd, Xx, yx, tsx, symx
+        return Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx
 
     rest = list(enumerate(symbols[1:], start=1))
     if rest:
@@ -997,26 +902,20 @@ def prepare_sniper_dataset(
                 futs = {ex.submit(_worker, si, sym): (si, sym) for (si, sym) in rest}
                 for fut in as_completed(futs):
                     try:
-                        Xe, ye, tse, syme, Xp, yp, tsp, symp, Xt, yt, tst, symt, Xd, yd, tsd, symd, Xx, yx, tsx, symx = fut.result()
+                        Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx = fut.result()
                     except Exception as e:
                         _si, _sym = futs.get(fut, (-1, "?"))
-                        print(f"[dataflow] SKIP {str(_sym)}: {type(e).__name__}: {e}", flush=True)
                         continue
                     X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme)
-                    X_profit_parts.append(Xp); y_profit_parts.append(yp); ts_profit_parts.append(tsp); sym_ids_profit.append(symp)
-                    X_time_parts.append(Xt); y_time_parts.append(yt); ts_time_parts.append(tst); sym_ids_time.append(symt)
                     X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd)
                     X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx)
         else:
             for si, sym in rest:
                 try:
-                    Xe, ye, tse, syme, Xp, yp, tsp, symp, Xt, yt, tst, symt, Xd, yd, tsd, symd, Xx, yx, tsx, symx = _worker(si, sym)
+                    Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx = _worker(si, sym)
                 except Exception as e:
-                    print(f"[dataflow] SKIP {str(sym)}: {type(e).__name__}: {e}", flush=True)
                     continue
                 X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme)
-                X_profit_parts.append(Xp); y_profit_parts.append(yp); ts_profit_parts.append(tsp); sym_ids_profit.append(symp)
-                X_time_parts.append(Xt); y_time_parts.append(yt); ts_time_parts.append(tst); sym_ids_time.append(symt)
                 X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd)
                 X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx)
 
@@ -1031,16 +930,6 @@ def prepare_sniper_dataset(
     y_entry = _combine(y_entry_parts)
     ts_entry = _combine(ts_entry_parts)
     sym_entry = _combine(sym_ids_entry)
-
-    X_profit = np.vstack(X_profit_parts) if X_profit_parts else np.empty((0, len(feat_cols_entry or [])), dtype=np.float32)
-    y_profit = _combine(y_profit_parts)
-    ts_profit = _combine(ts_profit_parts)
-    sym_profit = _combine(sym_ids_profit)
-
-    X_time = np.vstack(X_time_parts) if X_time_parts else np.empty((0, len(feat_cols_entry or [])), dtype=np.float32)
-    y_time = _combine(y_time_parts)
-    ts_time = _combine(ts_time_parts)
-    sym_time = _combine(sym_ids_time)
 
     X_danger = np.vstack(X_danger_parts) if X_danger_parts else np.empty((0, len(feat_cols_danger or [])), dtype=np.float32)
     y_danger = _combine(y_danger_parts)
@@ -1058,22 +947,6 @@ def prepare_sniper_dataset(
         ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
         max_rows=int(max_rows_entry),
     )
-    X_profit, y_profit, ts_profit, sym_profit = _sample_reg_bins(
-        X_profit, y_profit, ts_profit, sym_profit,
-        max_rows=int(max_rows_profit),
-        bins=int(bins_profit),
-        zero_cap_frac=0.20,
-        log_bins=True,
-        clamp_lo=0.0,
-    )
-    X_time, y_time, ts_time, sym_time = _sample_reg_bins(
-        X_time, y_time, ts_time, sym_time,
-        max_rows=int(max_rows_time),
-        bins=int(bins_time),
-        zero_cap_frac=0.20,
-        log_bins=True,
-        clamp_lo=0.0,
-    )
     X_danger, y_danger, ts_danger, sym_danger = _sample_arrays(
         X_danger, y_danger, ts_danger, sym_danger,
         ratio_neg_per_pos=float(danger_ratio_neg_per_pos),
@@ -1090,20 +963,6 @@ def prepare_sniper_dataset(
         y=y_entry,
         ts=ts_entry,
         sym_id=sym_entry,
-        feature_cols=feat_cols_entry or [],
-    )
-    profit_batch = SniperBatch(
-        X=X_profit,
-        y=y_profit,
-        ts=ts_profit,
-        sym_id=sym_profit,
-        feature_cols=feat_cols_entry or [],
-    )
-    time_batch = SniperBatch(
-        X=X_time,
-        y=y_time,
-        ts=ts_time,
-        sym_id=sym_time,
         feature_cols=feat_cols_entry or [],
     )
     danger_batch = SniperBatch(
@@ -1142,8 +1001,6 @@ def prepare_sniper_dataset(
         entry=entry_batch,
         danger=danger_batch,
         exit=exit_batch,
-        profit=profit_batch,
-        time=time_batch,
         contract=contract,
         symbols=list(symbols),
         train_end_utc=train_end,
@@ -1164,11 +1021,6 @@ def prepare_sniper_dataset_from_cache(
     max_rows_entry: int = 2_000_000,
     max_rows_danger: int = 1_200_000,
     max_rows_exit: int = 1_200_000,
-    # regressões (lucro/tempo)
-    max_rows_profit: int = 1_200_000,
-    max_rows_time: int = 1_200_000,
-    bins_profit: int = 12,
-    bins_time: int = 12,
     seed: int = 42,
 ) -> SniperDataPack:
     """
@@ -1317,110 +1169,6 @@ def prepare_sniper_dataset_from_cache(
         keep = np.sort(keep)
         return X[keep], y[keep], ts[keep], sym[keep]
 
-    def _sample_reg_bins(
-        X: np.ndarray,
-        y: np.ndarray,
-        ts: np.ndarray,
-        sym: np.ndarray,
-        *,
-        max_rows: int,
-        bins: int,
-        zero_cap_frac: float = 0.25,
-        log_bins: bool = False,
-        clamp_lo: float = 0.0,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Sampling para regressão, balanceado por bins para evitar concentração em 0.
-        (Duplicado aqui para o caminho from_cache ser independente.)
-        """
-        n = int(y.shape[0]) if y is not None else 0
-        if n <= 0 or max_rows <= 0 or n <= int(max_rows):
-            return X, y, ts, sym
-        yv = np.asarray(y, dtype=np.float64)
-        ok = np.isfinite(yv)
-        if clamp_lo is not None:
-            ok &= (yv >= float(clamp_lo))
-        idx_ok = np.flatnonzero(ok)
-        if idx_ok.size <= int(max_rows):
-            keep = idx_ok
-        else:
-            eps = 1e-12
-            y_ok = yv[idx_ok]
-            z_mask = y_ok <= eps
-            idx_zero = idx_ok[z_mask]
-            idx_pos = idx_ok[~z_mask]
-
-            max_zero = int(max(1, round(float(max_rows) * float(zero_cap_frac))))
-            if idx_zero.size > max_zero:
-                idx_zero = rng.choice(idx_zero, size=int(max_zero), replace=False)
-
-            remain = int(max_rows) - int(idx_zero.size)
-            if remain <= 0 or idx_pos.size == 0:
-                keep = idx_zero
-            else:
-                y_pos = yv[idx_pos]
-                if log_bins:
-                    v = np.log1p(np.maximum(0.0, y_pos))
-                else:
-                    v = y_pos
-                b = int(max(2, min(50, int(bins))))
-                qs = np.linspace(0.0, 1.0, b + 1)
-                edges = np.quantile(v, qs)
-                edges = np.unique(edges)
-                if edges.size < 3:
-                    vmin = float(np.min(v))
-                    vmax = float(np.max(v))
-                    edges = np.linspace(vmin, vmax + 1e-12, b + 1)
-                nb = int(max(1, int(edges.size - 1)))
-                bin_id = np.searchsorted(edges[1:-1], v, side="right")
-                bin_id = np.clip(bin_id, 0, nb - 1)
-
-                per_bin = int(max(1, round(float(remain) / float(nb))))
-                picks: List[np.ndarray] = []
-                for k in range(nb):
-                    idx_k = idx_pos[np.flatnonzero(bin_id == k)]
-                    if idx_k.size == 0:
-                        continue
-                    take = int(min(idx_k.size, per_bin))
-                    if idx_k.size > take:
-                        idx_k = rng.choice(idx_k, size=int(take), replace=False)
-                    picks.append(idx_k.astype(np.int64, copy=False))
-                if picks:
-                    idx_pick = np.unique(np.concatenate(picks))
-                else:
-                    idx_pick = np.array([], dtype=np.int64)
-                if idx_pick.size > remain:
-                    idx_pick = rng.choice(idx_pick, size=int(remain), replace=False)
-                if idx_pick.size < remain and idx_pos.size > idx_pick.size:
-                    extra = int(min(remain - idx_pick.size, idx_pos.size - idx_pick.size))
-                    if extra > 0:
-                        rem2 = np.setdiff1d(idx_pos, idx_pick, assume_unique=False)
-                        if rem2.size > extra:
-                            rem2 = rng.choice(rem2, size=int(extra), replace=False)
-                        idx_pick = np.unique(np.concatenate([idx_pick, rem2]))
-                keep = np.unique(
-                    np.concatenate([idx_zero.astype(np.int64, copy=False), idx_pick.astype(np.int64, copy=False)])
-                )
-        keep = np.sort(keep)
-        return X[keep], y[keep], ts[keep], sym[keep]
-
-    def _to_numpy(df: pd.DataFrame, feats: List[str], label_col: str, sym_idx: int):
-        mat = df.reindex(columns=feats).replace([np.inf, -np.inf], np.nan)
-        mask = mat.notnull().all(axis=1).to_numpy(dtype=bool, copy=False)
-        if mask.size == 0 or (not bool(np.any(mask))):
-            return (
-                np.empty((0, len(feats)), dtype=np.float32),
-                np.empty((0,), dtype=np.float32),
-                np.empty((0,), dtype="datetime64[ns]"),
-                np.empty((0,), dtype=np.int32),
-            )
-        mat2 = mat.to_numpy(np.float32, copy=True)
-        X = mat2[mask]
-        y = df[label_col].to_numpy(dtype=np.float32, copy=False)[mask]
-        ts = df.index.to_numpy(dtype="datetime64[ns]")[mask]
-        sym_arr = np.full(int(ts.shape[0]), sym_idx, dtype=np.int32)
-        return X, y, ts, sym_arr
-
     def _cut_df(df_pf: pd.DataFrame) -> pd.DataFrame:
         if df_pf.empty:
             return df_pf
@@ -1477,7 +1225,12 @@ def prepare_sniper_dataset_from_cache(
             seed=int(seed_local),
         )
 
-        entry_df = pd.concat([sniper_ds.entry, sniper_ds.add], axis=0, ignore_index=False)
+        frames = [sniper_ds.entry, sniper_ds.add]
+        frames = [f for f in frames if f is not None and (not f.empty)]
+        if frames:
+            entry_df = pd.concat(frames, axis=0, ignore_index=False)
+        else:
+            entry_df = sniper_ds.entry.copy()
         entry_df.sort_index(inplace=True)
         danger_df = sniper_ds.danger
         exit_df = sniper_ds.exit
@@ -1497,8 +1250,6 @@ def prepare_sniper_dataset_from_cache(
         exit_df = _sample_df(exit_df, "label_exit", float(exit_ratio_neg_per_pos), per_sym_exit_max)
 
         Xe, ye, tse, syme = _to_numpy(entry_df, feat_cols_entry_eff, "label_entry", sym_idx)
-        Xp, yp, tsp, symp = _to_numpy(entry_df, feat_cols_entry_eff, "label_profit", sym_idx)
-        Xt, yt, tst, symt = _to_numpy(entry_df, feat_cols_entry_eff, "label_time", sym_idx)
         Xd, yd, tsd, symd = _to_numpy(danger_df, feat_cols_danger_eff, "label_danger", sym_idx)
         Xx, yx, tsx, symx = _to_numpy(exit_df, feat_cols_exit_eff, "label_exit", sym_idx)
 
@@ -1509,14 +1260,6 @@ def prepare_sniper_dataset_from_cache(
             ye,
             tse,
             syme,
-            Xp,
-            yp,
-            tsp,
-            symp,
-            Xt,
-            yt,
-            tst,
-            symt,
             Xd,
             yd,
             tsd,
@@ -1535,6 +1278,36 @@ def prepare_sniper_dataset_from_cache(
     symbols_used: List[str] = []
     symbols_skipped: List[str] = []
 
+    total_syms = int(len(symbols_total))
+    processed = 0
+    progress_every_s = 3.0
+    try:
+        v = os.getenv("SNIPER_DATAFLOW_PROGRESS_EVERY_S", "").strip()
+        progress_every_s = float(v) if v else 3.0
+    except Exception:
+        progress_every_s = 3.0
+    last_progress_ts = 0.0
+
+    def _bar(done: int, total: int, width: int = 26) -> str:
+        total = max(1, int(total))
+        done = int(max(0, min(done, total)))
+        n = int(round(width * (done / total)))
+        return ("#" * n) + ("-" * (width - n))
+
+    def _print_progress(sym: str) -> None:
+        nonlocal last_progress_ts
+        if total_syms <= 0:
+            return
+        line = f"[dataflow] [{_bar(processed, total_syms)}] {processed:>3}/{total_syms:<3} | {sym}"
+        if sys.stderr.isatty():
+            sys.stderr.write("\r" + line)
+            sys.stderr.flush()
+        else:
+            now = time.perf_counter()
+            if now - last_progress_ts >= max(1.0, progress_every_s):
+                print(line, flush=True)
+                last_progress_ts = now
+
     # 1) achar um primeiro símbolo válido para definir feature_cols
     feat_cols_entry: List[str] = []
     feat_cols_danger: List[str] = []
@@ -1546,18 +1319,6 @@ def prepare_sniper_dataset_from_cache(
     ts_entry_parts: List[np.ndarray] = []
     sym_ids_entry: List[np.ndarray] = []
     buf_entry_rows = 0
-
-    X_profit_parts: List[np.ndarray] = []
-    y_profit_parts: List[np.ndarray] = []
-    ts_profit_parts: List[np.ndarray] = []
-    sym_ids_profit: List[np.ndarray] = []
-    buf_profit_rows = 0
-
-    X_time_parts: List[np.ndarray] = []
-    y_time_parts: List[np.ndarray] = []
-    ts_time_parts: List[np.ndarray] = []
-    sym_ids_time: List[np.ndarray] = []
-    buf_time_rows = 0
 
     X_danger_parts: List[np.ndarray] = []
     y_danger_parts: List[np.ndarray] = []
@@ -1576,16 +1337,6 @@ def prepare_sniper_dataset_from_cache(
     y_entry_pool: np.ndarray | None = None
     ts_entry_pool: np.ndarray | None = None
     sym_entry_pool: np.ndarray | None = None
-
-    X_profit_pool: np.ndarray | None = None
-    y_profit_pool: np.ndarray | None = None
-    ts_profit_pool: np.ndarray | None = None
-    sym_profit_pool: np.ndarray | None = None
-
-    X_time_pool: np.ndarray | None = None
-    y_time_pool: np.ndarray | None = None
-    ts_time_pool: np.ndarray | None = None
-    sym_time_pool: np.ndarray | None = None
 
     X_danger_pool: np.ndarray | None = None
     y_danger_pool: np.ndarray | None = None
@@ -1627,39 +1378,6 @@ def prepare_sniper_dataset_from_cache(
         X_parts.clear(); y_parts.clear(); ts_parts.clear(); sym_parts.clear()
         return X_new, y_new, ts_new, sym_new
 
-    def _flush_reg(
-        X_pool: np.ndarray,
-        y_pool: np.ndarray,
-        ts_pool: np.ndarray,
-        sym_pool: np.ndarray,
-        X_parts: List[np.ndarray],
-        y_parts: List[np.ndarray],
-        ts_parts: List[np.ndarray],
-        sym_parts: List[np.ndarray],
-        *,
-        max_rows: int,
-        bins: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        if not X_parts:
-            return X_pool, y_pool, ts_pool, sym_pool
-        X_new = (np.vstack([X_pool] + X_parts) if X_pool.size else np.vstack(X_parts))
-        y_new = (np.concatenate([y_pool] + y_parts) if y_pool.size else np.concatenate(y_parts))
-        ts_new = (np.concatenate([ts_pool] + ts_parts) if ts_pool.size else np.concatenate(ts_parts))
-        sym_new = (np.concatenate([sym_pool] + sym_parts) if sym_pool.size else np.concatenate(sym_parts))
-        X_new, y_new, ts_new, sym_new = _sample_reg_bins(
-            X_new,
-            y_new,
-            ts_new,
-            sym_new,
-            max_rows=int(max_rows),
-            bins=int(bins),
-            zero_cap_frac=0.20,
-            log_bins=True,
-            clamp_lo=0.0,
-        )
-        X_parts.clear(); y_parts.clear(); ts_parts.clear(); sym_parts.clear()
-        return X_new, y_new, ts_new, sym_new
-
     seed_symbol = None
     for sym in symbols_total:
         try:
@@ -1668,14 +1386,6 @@ def prepare_sniper_dataset_from_cache(
                 ye0,
                 tse0,
                 syme0,
-                Xp0,
-                yp0,
-                tsp0,
-                symp0,
-                Xt0,
-                yt0,
-                tst0,
-                symt0,
                 Xd0,
                 yd0,
                 tsd0,
@@ -1699,16 +1409,6 @@ def prepare_sniper_dataset_from_cache(
             ts_entry_pool = np.empty((0,), dtype="datetime64[ns]")
             sym_entry_pool = np.empty((0,), dtype=np.int32)
 
-            X_profit_pool = np.empty((0, len(feat_cols_entry)), dtype=np.float32)
-            y_profit_pool = np.empty((0,), dtype=np.float32)
-            ts_profit_pool = np.empty((0,), dtype="datetime64[ns]")
-            sym_profit_pool = np.empty((0,), dtype=np.int32)
-
-            X_time_pool = np.empty((0, len(feat_cols_entry)), dtype=np.float32)
-            y_time_pool = np.empty((0,), dtype=np.float32)
-            ts_time_pool = np.empty((0,), dtype="datetime64[ns]")
-            sym_time_pool = np.empty((0,), dtype=np.int32)
-
             X_danger_pool = np.empty((0, len(feat_cols_danger)), dtype=np.float32)
             y_danger_pool = np.empty((0,), dtype=np.float32)
             ts_danger_pool = np.empty((0,), dtype="datetime64[ns]")
@@ -1721,8 +1421,6 @@ def prepare_sniper_dataset_from_cache(
 
             # joga o seed nos buffers e dá flush imediato
             X_entry_parts.append(Xe0); y_entry_parts.append(ye0); ts_entry_parts.append(tse0); sym_ids_entry.append(syme0); buf_entry_rows += int(Xe0.shape[0])
-            X_profit_parts.append(Xp0); y_profit_parts.append(yp0); ts_profit_parts.append(tsp0); sym_ids_profit.append(symp0); buf_profit_rows += int(Xp0.shape[0])
-            X_time_parts.append(Xt0); y_time_parts.append(yt0); ts_time_parts.append(tst0); sym_ids_time.append(symt0); buf_time_rows += int(Xt0.shape[0])
             X_danger_parts.append(Xd0); y_danger_parts.append(yd0); ts_danger_parts.append(tsd0); sym_ids_danger.append(symd0); buf_danger_rows += int(Xd0.shape[0])
             X_exit_parts.append(Xx0); y_exit_parts.append(yx0); ts_exit_parts.append(tsx0); sym_ids_exit.append(symx0); buf_exit_rows += int(Xx0.shape[0])
 
@@ -1731,18 +1429,6 @@ def prepare_sniper_dataset_from_cache(
                 X_entry_parts, y_entry_parts, ts_entry_parts, sym_ids_entry,
                 ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
                 max_rows=int(max_rows_entry),
-            )
-            X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool = _flush_reg(
-                X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool,
-                X_profit_parts, y_profit_parts, ts_profit_parts, sym_ids_profit,
-                max_rows=int(max_rows_profit),
-                bins=int(bins_profit),
-            )
-            X_time_pool, y_time_pool, ts_time_pool, sym_time_pool = _flush_reg(
-                X_time_pool, y_time_pool, ts_time_pool, sym_time_pool,
-                X_time_parts, y_time_parts, ts_time_parts, sym_ids_time,
-                max_rows=int(max_rows_time),
-                bins=int(bins_time),
             )
             X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool = _flush_cls(
                 X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
@@ -1756,13 +1442,16 @@ def prepare_sniper_dataset_from_cache(
                 ratio_neg_per_pos=float(exit_ratio_neg_per_pos),
                 max_rows=int(max_rows_exit),
             )
-            buf_entry_rows = buf_profit_rows = buf_time_rows = buf_danger_rows = buf_exit_rows = 0
+            buf_entry_rows = buf_danger_rows = buf_exit_rows = 0
             symbols_used.append(sym)
             seed_symbol = sym
+            processed += 1
+            _print_progress(sym)
             break
         except Exception as e:
             symbols_skipped.append(sym)
-            print(f"[dataflow] SKIP {str(sym)}: {type(e).__name__}: {e}", flush=True)
+            processed += 1
+            _print_progress(sym)
             continue
 
     if seed_symbol is None:
@@ -1773,7 +1462,7 @@ def prepare_sniper_dataset_from_cache(
     max_workers = _env_int("PF_SYMBOL_WORKERS", min(4, int(os.cpu_count() or 4)))
 
     def _worker(si: int, sym: str):
-        Xe, ye, tse, syme, Xp, yp, tsp, symp, Xt, yt, tst, symt, Xd, yd, tsd, symd, Xx, yx, tsx, symx, _f1, _f2, _f3 = _build_symbol(
+        Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx, _f1, _f2, _f3 = _build_symbol(
             si,
             sym,
             feats_entry=feat_cols_entry,
@@ -1787,7 +1476,7 @@ def prepare_sniper_dataset_from_cache(
             raise RuntimeError(f"{sym}: danger features mismatch {Xd.shape[1]} != {len(feat_cols_danger)}")
         if Xx.size and Xx.shape[1] != len(feat_cols_exit):
             raise RuntimeError(f"{sym}: exit features mismatch {Xx.shape[1]} != {len(feat_cols_exit)}")
-        return Xe, ye, tse, syme, Xp, yp, tsp, symp, Xt, yt, tst, symt, Xd, yd, tsd, symd, Xx, yx, tsx, symx
+        return Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx
 
     # 2) restantes (threads) — índices compactos (sym_id não é usado no treino, mas mantemos consistente)
     rest_symbols = [s for s in symbols_total if s != seed_symbol]
@@ -1798,16 +1487,17 @@ def prepare_sniper_dataset_from_cache(
                 futs = {ex.submit(_worker, si, sym): (si, sym) for (si, sym) in rest}
                 for fut in as_completed(futs):
                     try:
-                        Xe, ye, tse, syme, Xp, yp, tsp, symp, Xt, yt, tst, symt, Xd, yd, tsd, symd, Xx, yx, tsx, symx = fut.result()
+                        Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx = fut.result()
                     except Exception as e:
                         _si, _sym = futs.get(fut, (-1, "?"))
-                        print(f"[dataflow] SKIP {str(_sym)}: {type(e).__name__}: {e}", flush=True)
                         symbols_skipped.append(str(_sym))
+                        processed += 1
+                        _print_progress(str(_sym))
                         continue
                     symbols_used.append(str(futs[fut][1]))
+                    processed += 1
+                    _print_progress(str(futs[fut][1]))
                     X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme); buf_entry_rows += int(Xe.shape[0])
-                    X_profit_parts.append(Xp); y_profit_parts.append(yp); ts_profit_parts.append(tsp); sym_ids_profit.append(symp); buf_profit_rows += int(Xp.shape[0])
-                    X_time_parts.append(Xt); y_time_parts.append(yt); ts_time_parts.append(tst); sym_ids_time.append(symt); buf_time_rows += int(Xt.shape[0])
                     X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd); buf_danger_rows += int(Xd.shape[0])
                     X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx); buf_exit_rows += int(Xx.shape[0])
 
@@ -1820,22 +1510,6 @@ def prepare_sniper_dataset_from_cache(
                             max_rows=int(max_rows_entry),
                         )
                         buf_entry_rows = 0
-                    if buf_profit_rows >= int(max(50_000, min(250_000, int(max_rows_profit) // 4))):
-                        X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool = _flush_reg(
-                            X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool,
-                            X_profit_parts, y_profit_parts, ts_profit_parts, sym_ids_profit,
-                            max_rows=int(max_rows_profit),
-                            bins=int(bins_profit),
-                        )
-                        buf_profit_rows = 0
-                    if buf_time_rows >= int(max(50_000, min(250_000, int(max_rows_time) // 4))):
-                        X_time_pool, y_time_pool, ts_time_pool, sym_time_pool = _flush_reg(
-                            X_time_pool, y_time_pool, ts_time_pool, sym_time_pool,
-                            X_time_parts, y_time_parts, ts_time_parts, sym_ids_time,
-                            max_rows=int(max_rows_time),
-                            bins=int(bins_time),
-                        )
-                        buf_time_rows = 0
                     if buf_danger_rows >= int(max(50_000, min(200_000, int(max_rows_danger) // 4))):
                         X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool = _flush_cls(
                             X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
@@ -1855,15 +1529,16 @@ def prepare_sniper_dataset_from_cache(
         else:
             for si, sym in rest:
                 try:
-                    Xe, ye, tse, syme, Xp, yp, tsp, symp, Xt, yt, tst, symt, Xd, yd, tsd, symd, Xx, yx, tsx, symx = _worker(si, sym)
+                    Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx = _worker(si, sym)
                 except Exception as e:
-                    print(f"[dataflow] SKIP {str(sym)}: {type(e).__name__}: {e}", flush=True)
                     symbols_skipped.append(str(sym))
+                    processed += 1
+                    _print_progress(str(sym))
                     continue
                 symbols_used.append(str(sym))
+                processed += 1
+                _print_progress(str(sym))
                 X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme); buf_entry_rows += int(Xe.shape[0])
-                X_profit_parts.append(Xp); y_profit_parts.append(yp); ts_profit_parts.append(tsp); sym_ids_profit.append(symp); buf_profit_rows += int(Xp.shape[0])
-                X_time_parts.append(Xt); y_time_parts.append(yt); ts_time_parts.append(tst); sym_ids_time.append(symt); buf_time_rows += int(Xt.shape[0])
                 X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd); buf_danger_rows += int(Xd.shape[0])
                 X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx); buf_exit_rows += int(Xx.shape[0])
 
@@ -1875,22 +1550,6 @@ def prepare_sniper_dataset_from_cache(
                         max_rows=int(max_rows_entry),
                     )
                     buf_entry_rows = 0
-                if buf_profit_rows >= int(max(50_000, min(250_000, int(max_rows_profit) // 4))):
-                    X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool = _flush_reg(
-                        X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool,
-                        X_profit_parts, y_profit_parts, ts_profit_parts, sym_ids_profit,
-                        max_rows=int(max_rows_profit),
-                        bins=int(bins_profit),
-                    )
-                    buf_profit_rows = 0
-                if buf_time_rows >= int(max(50_000, min(250_000, int(max_rows_time) // 4))):
-                    X_time_pool, y_time_pool, ts_time_pool, sym_time_pool = _flush_reg(
-                        X_time_pool, y_time_pool, ts_time_pool, sym_time_pool,
-                        X_time_parts, y_time_parts, ts_time_parts, sym_ids_time,
-                        max_rows=int(max_rows_time),
-                        bins=int(bins_time),
-                    )
-                    buf_time_rows = 0
                 if buf_danger_rows >= int(max(50_000, min(200_000, int(max_rows_danger) // 4))):
                     X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool = _flush_cls(
                         X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
@@ -1918,18 +1577,6 @@ def prepare_sniper_dataset_from_cache(
         ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
         max_rows=int(max_rows_entry),
     )
-    X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool = _flush_reg(
-        X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool,
-        X_profit_parts, y_profit_parts, ts_profit_parts, sym_ids_profit,
-        max_rows=int(max_rows_profit),
-        bins=int(bins_profit),
-    )
-    X_time_pool, y_time_pool, ts_time_pool, sym_time_pool = _flush_reg(
-        X_time_pool, y_time_pool, ts_time_pool, sym_time_pool,
-        X_time_parts, y_time_parts, ts_time_parts, sym_ids_time,
-        max_rows=int(max_rows_time),
-        bins=int(bins_time),
-    )
     X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool = _flush_cls(
         X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
         X_danger_parts, y_danger_parts, ts_danger_parts, sym_ids_danger,
@@ -1949,22 +1596,6 @@ def prepare_sniper_dataset_from_cache(
         ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
         max_rows=int(max_rows_entry),
     )
-    X_profit, y_profit, ts_profit, sym_profit = _sample_reg_bins(
-        X_profit_pool, y_profit_pool, ts_profit_pool, sym_profit_pool,
-        max_rows=int(max_rows_profit),
-        bins=int(bins_profit),
-        zero_cap_frac=0.20,
-        log_bins=True,
-        clamp_lo=0.0,
-    )
-    X_time, y_time, ts_time, sym_time = _sample_reg_bins(
-        X_time_pool, y_time_pool, ts_time_pool, sym_time_pool,
-        max_rows=int(max_rows_time),
-        bins=int(bins_time),
-        zero_cap_frac=0.20,
-        log_bins=True,
-        clamp_lo=0.0,
-    )
     X_danger, y_danger, ts_danger, sym_danger = _sample_arrays(
         X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
         ratio_neg_per_pos=float(danger_ratio_neg_per_pos),
@@ -1976,9 +1607,19 @@ def prepare_sniper_dataset_from_cache(
         max_rows=int(max_rows_exit),
     )
 
+    if total_syms > 0:
+        try:
+            if sys.stderr.isatty():
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+        except Exception:
+            pass
+        print(
+            f"[dataflow] symbols: processed={processed} ok={len(symbols_used)} skipped={len(symbols_skipped)}",
+            flush=True,
+        )
+
     entry_batch = SniperBatch(X=X_entry, y=y_entry, ts=ts_entry, sym_id=sym_entry, feature_cols=feat_cols_entry)
-    profit_batch = SniperBatch(X=X_profit, y=y_profit, ts=ts_profit, sym_id=sym_profit, feature_cols=feat_cols_entry)
-    time_batch = SniperBatch(X=X_time, y=y_time, ts=ts_time, sym_id=sym_time, feature_cols=feat_cols_entry)
     danger_batch = SniperBatch(X=X_danger, y=y_danger, ts=ts_danger, sym_id=sym_danger, feature_cols=feat_cols_danger)
     exit_batch = SniperBatch(X=X_exit, y=y_exit, ts=ts_exit, sym_id=sym_exit, feature_cols=feat_cols_exit)
     if train_end_det is None:
@@ -2003,8 +1644,6 @@ def prepare_sniper_dataset_from_cache(
         entry=entry_batch,
         danger=danger_batch,
         exit=exit_batch,
-        profit=profit_batch,
-        time=time_batch,
         contract=contract,
         symbols=list(symbols_total),
         symbols_used=sorted(set(symbols_used)),

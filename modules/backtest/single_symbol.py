@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 """
-Backtest single-symbol (5 modelos: Entry + Danger + Exit + ProfitReg + TimeReg) usando cache de features.
+Backtest single-symbol (3 modelos: Entry + Danger + Exit) usando cache de features.
 
 Regras:
 - parâmetros definidos em código (sem ENV)
@@ -13,13 +13,31 @@ Regras:
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 import time
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward_5, simulate_sniper_from_scores
+def _ensure_modules_on_sys_path() -> None:
+    """
+    Permite executar este arquivo direto (ex.: `python modules/backtest/single_symbol.py`)
+    sem depender de PYTHONPATH.
+    """
+    if __package__ not in (None, ""):
+        return
+    here = Path(__file__).resolve()
+    for p in here.parents:
+        if p.name.lower() == "modules":
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
+            return
+
+_ensure_modules_on_sys_path()
+
+from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward, simulate_sniper_from_scores
 from backtest.sniper_walkforward import apply_threshold_overrides
 from dataclasses import replace
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL
@@ -30,7 +48,7 @@ from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 @dataclass
 class SingleSymbolDemoSettings:
     symbol: str = "ADAUSDT"
-    days: int = 2160
+    days: int = 360
     candle_sec: int = 60
     # Se quiser fixar um WF específico, preencha; senão, pega o wf_* mais recente.
     run_dir: str | None = None
@@ -50,10 +68,7 @@ class SingleSymbolDemoSettings:
     override_tau_entry: float | None = None
     override_tau_danger: float | None = None
     override_tau_exit: float | None = None
-    # Estratégia 5-modelos (gating + exit por alvo previsto)
-    min_expected_profit_pct: float = 0.006  # 0.6% (depois de custos ainda pode valer a pena)
-    tp_target_frac_of_expected: float = 0.85
-    exit_on_expected_time: bool = True
+    # Exit sem profit/time (apenas exit_score + regras)
     exit_on_danger: bool = True
 
 
@@ -87,24 +102,23 @@ def _plot_result(
     p_entry: np.ndarray,
     p_danger: np.ndarray,
     p_exit: np.ndarray,
-    p_profit: np.ndarray,
-    p_time: np.ndarray,
+    entry_sig: np.ndarray,
+    danger_sig: np.ndarray,
+    exit_sig: np.ndarray,
     tau_entry: float,
     tau_danger: float,
     tau_exit: float,
-    min_expected_profit_pct: float,
-    timeout_bars: int,
     title: str,
     out_path: str | None,
 ) -> None:
     idx = pd.to_datetime(df.index)
     close = df["close"].to_numpy(np.float64, copy=False)
 
-    fig = plt.figure(figsize=(14, 11))
-    gs = fig.add_gridspec(4, 1, height_ratios=[3, 1.2, 1.2, 1], hspace=0.05)
+    fig = plt.figure(figsize=(14, 11.5))
+    gs = fig.add_gridspec(4, 1, height_ratios=[3, 1.2, 0.9, 1], hspace=0.05)
     ax0 = fig.add_subplot(gs[0, 0])
     axp = fig.add_subplot(gs[1, 0], sharex=ax0)
-    axr = fig.add_subplot(gs[2, 0], sharex=ax0)
+    axs = fig.add_subplot(gs[2, 0], sharex=ax0)
     ax1 = fig.add_subplot(gs[3, 0], sharex=ax0)
 
     ax0.plot(idx, close, linewidth=1.0, color="black", alpha=0.9)
@@ -128,30 +142,6 @@ def _plot_result(
         except Exception:
             pass
 
-        # Se o trade parece "subiu" (exit > entry) mas net < 0, anota (caso que você descreveu)
-        try:
-            entry_px = float(getattr(t, "entry_price", np.nan))
-            exit_px = float(getattr(t, "exit_price", np.nan))
-            gross_entry = (exit_px / entry_px - 1.0) if (np.isfinite(entry_px) and entry_px > 0 and np.isfinite(exit_px)) else np.nan
-            costs = getattr(t, "costs", None)
-            reason = str(getattr(t, "reason", ""))
-            if np.isfinite(gross_entry) and (gross_entry > 0) and (r_net < 0):
-                msg = f"net={r_net:+.2%} (gross(entry)={gross_entry:+.2%})"
-                if costs is not None:
-                    msg += f" costs~{float(costs):.2%}"
-                if reason:
-                    msg += f" {reason}"
-                ax0.annotate(
-                    msg,
-                    xy=(xt, exit_px),
-                    xytext=(5, 10),
-                    textcoords="offset points",
-                    fontsize=8,
-                    color="darkred",
-                    alpha=0.9,
-                )
-        except Exception:
-            pass
 
     # probabilidades + thresholds
     axp.plot(idx, p_entry, color="#1f77b4", alpha=0.9, linewidth=0.9, label="p_entry")
@@ -164,22 +154,13 @@ def _plot_result(
     axp.legend(loc="upper left", ncol=3, fontsize=9)
     axp.grid(True, alpha=0.25)
 
-    # regressões (profit esperado e tempo esperado)
-    # - p_profit: fração (ex.: 0.02 = 2%)
-    # - p_time: barras (1m => 60 barras = 1h)
-    axr.plot(idx, p_profit, color="#9467bd", alpha=0.9, linewidth=0.9, label="profit_expected_pct")
-    axr.axhline(float(min_expected_profit_pct), color="#9467bd", linestyle="--", linewidth=0.8, alpha=0.7)
-    axr.set_ylabel("Profit exp. (frac)")
-    axr.grid(True, alpha=0.25)
-    axr2 = axr.twinx()
-    axr2.plot(idx, p_time, color="#ff7f0e", alpha=0.85, linewidth=0.9, label="time_expected_bars")
-    axr2.axhline(float(timeout_bars), color="#ff7f0e", linestyle="--", linewidth=0.8, alpha=0.55)
-    axr2.set_ylabel("Time exp. (bars)")
-
-    # legenda combinada (axr + axr2)
-    h1, l1 = axr.get_legend_handles_labels()
-    h2, l2 = axr2.get_legend_handles_labels()
-    axr.legend(h1 + h2, l1 + l2, loc="upper left", ncol=2, fontsize=9)
+    axs.step(idx, entry_sig.astype(float), where="mid", color="#1f77b4", lw=0.9, label="entry_ok")
+    axs.step(idx, danger_sig.astype(float), where="mid", color="#d62728", lw=0.9, label="danger_block")
+    axs.step(idx, exit_sig.astype(float), where="mid", color="#2ca02c", lw=0.9, label="exit_score")
+    axs.set_ylim(-0.1, 1.1)
+    axs.set_ylabel("Signals")
+    axs.legend(loc="upper left", ncol=3, fontsize=9)
+    axs.grid(True, alpha=0.25)
 
     ax1.plot(idx, equity, linewidth=1.2, color="#1f77b4")
     ax1.set_ylabel("Equity")
@@ -234,7 +215,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         raise RuntimeError(f"Poucos candles para simular: rows={len(df)}")
 
     # scores WF (sem vazamento)
-    p_entry, p_danger, p_exit, p_profit, p_time, used, pid = predict_scores_walkforward_5(
+    p_entry, p_danger, p_exit, used, pid = predict_scores_walkforward(
         df, periods=periods, return_period_id=True
     )
     tau_entry = float(settings.override_tau_entry) if settings.override_tau_entry is not None else float(used.tau_entry)
@@ -259,19 +240,13 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         pe = np.asarray(p_entry, dtype=np.float64)
         pdg = np.asarray(p_danger, dtype=np.float64)
         pex = np.asarray(p_exit, dtype=np.float64)
-        ppr = np.asarray(p_profit, dtype=np.float64)
-        ptt = np.asarray(p_time, dtype=np.float64)
         pe_q = np.nanquantile(pe, [0.5, 0.9, 0.95, 0.99])
         pd_q = np.nanquantile(pdg, [0.5, 0.9, 0.95, 0.99])
         px_q = np.nanquantile(pex, [0.5, 0.9, 0.95, 0.99])
-        pr_q = np.nanquantile(ppr, [0.5, 0.9, 0.99])
-        tt_q = np.nanquantile(ptt, [0.5, 0.9, 0.99])
         print(f"[diag] tau_entry={tau_entry:.4f} tau_danger={tau_danger:.4f} tau_exit={tau_exit:.4f}")
         print(f"[diag] p_entry q50/q90/q95/q99 = {pe_q}")
         print(f"[diag] p_danger q50/q90/q95/q99 = {pd_q}")
         print(f"[diag] p_exit q50/q90/q95/q99 = {px_q}")
-        print(f"[diag] profit_pred_pct q50/q90/q99 = {pr_q}")
-        print(f"[diag] time_pred_bars q50/q90/q99 = {tt_q}")
         # Importante: a regra é "entra se p_danger < tau_danger" (tau_danger alto = mais permissivo)
         m_valid = np.isfinite(pe) & np.isfinite(pdg)
         m_entry = m_valid & (pe >= float(tau_entry))
@@ -279,13 +254,20 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         pass_when_entry = float(np.mean(pdg[m_entry] < float(tau_danger))) if np.any(m_entry) else float("nan")
         print(f"[diag] danger_pass_rate(all)={pass_all:.2%} | danger_pass_rate(when p_entry>=tau_entry)={pass_when_entry:.2%}")
 
+    # sinais usados pela estrategia (para plot/diagnostico)
+    pe = np.asarray(p_entry, dtype=np.float64)
+    pdg = np.asarray(p_danger, dtype=np.float64)
+    pex = np.asarray(p_exit, dtype=np.float64)
+    entry_sig = (pe >= float(tau_entry))
+    danger_sig = (pdg >= float(tau_danger))
+    entry_ok = entry_sig & (~danger_sig)
+    exit_sig = (pex >= float(tau_exit))
+
     res = simulate_sniper_from_scores(
         df,
         p_entry=p_entry,
         p_danger=p_danger,
         p_exit=p_exit,
-        p_profit=p_profit,
-        p_time=p_time,
         thresholds=thresholds,
         periods=periods,
         period_id=pid,
@@ -294,10 +276,6 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         tp_hard_when_exit=bool(settings.tp_hard_when_exit),
         exit_min_hold_bars=int(settings.exit_min_hold_bars),
         exit_confirm_bars=int(settings.exit_confirm_bars),
-        use_profit_time=True,
-        min_expected_profit_pct=float(settings.min_expected_profit_pct),
-        tp_target_frac_of_expected=float(settings.tp_target_frac_of_expected),
-        exit_on_expected_time=bool(settings.exit_on_expected_time),
         exit_on_danger=bool(settings.exit_on_danger),
     )
 
@@ -310,7 +288,6 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     )
 
     if settings.save_plot:
-        timeout_bars = DEFAULT_TRADE_CONTRACT.timeout_bars(int(settings.candle_sec))
         _plot_result(
             df,
             equity=np.asarray(res.equity_curve, dtype=np.float64),
@@ -318,13 +295,12 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             p_entry=np.asarray(p_entry, dtype=np.float64),
             p_danger=np.asarray(p_danger, dtype=np.float64),
             p_exit=np.asarray(p_exit, dtype=np.float64),
-            p_profit=np.asarray(p_profit, dtype=np.float64),
-            p_time=np.asarray(p_time, dtype=np.float64),
+            entry_sig=np.asarray(entry_ok, dtype=bool),
+            danger_sig=np.asarray(danger_sig, dtype=bool),
+            exit_sig=np.asarray(exit_sig, dtype=bool),
             tau_entry=tau_entry,
             tau_danger=tau_danger,
             tau_exit=tau_exit,
-            min_expected_profit_pct=float(settings.min_expected_profit_pct),
-            timeout_bars=int(timeout_bars),
             title=f"{symbol} | days={settings.days} | ret={ret_total:+.2%} | trades={len(res.trades)}",
             out_path=settings.plot_out,
         )

@@ -9,6 +9,7 @@ Recomendacao: execute via arquivo:
 """
 
 from dataclasses import dataclass, field
+import os
 import sys
 from pathlib import Path
 
@@ -33,14 +34,17 @@ def _ensure_modules_on_sys_path() -> None:
 
 _ensure_modules_on_sys_path()
 
+# Defaults de performance/telemetria para rodar com "Run" sem flags externas.
+os.environ.setdefault("SNIPER_CACHE_PROGRESS_EVERY_S", "3")
+os.environ.setdefault("SNIPER_CACHE_WORKERS", "6")
+os.environ.setdefault("PF_PREFER_PURE_FOR_THREADS", "0")
+
 from train.sniper_trainer import (  # type: ignore[import]
     TrainConfig,
     train_sniper_models,
     DEFAULT_ENTRY_PARAMS,
     DEFAULT_DANGER_PARAMS,
     DEFAULT_EXIT_PARAMS,
-    DEFAULT_PROFIT_PARAMS,
-    DEFAULT_TIME_PARAMS,
 )
 
 
@@ -67,16 +71,12 @@ class TrainSniperWFSettings:
     min_symbols_used_per_period: int = 30
 
     # sizing (use RAM/VRAM)
-    max_rows_entry: int = 4_000_000
-    max_rows_danger: int = 2_000_000
-    max_rows_exit: int = 2_000_000
-    max_rows_profit: int = 2_000_000
-    max_rows_time: int = 2_000_000
-    bins_profit: int = 12
-    bins_time: int = 12
+    max_rows_entry: int = 6_000_000
+    max_rows_danger: int = 3_000_000
+    max_rows_exit: int = 3_000_000
     entry_ratio_neg_per_pos: float = 6.0
     danger_ratio_neg_per_pos: float = 4.0
-    exit_ratio_neg_per_pos: float = 4.0
+    exit_ratio_neg_per_pos: float = 2.0
 
     # device
     xgb_device: str = "cuda:0"  # "cpu" se quiser forÃ§ar
@@ -91,8 +91,6 @@ class TrainSniperWFSettings:
     entry_params: dict = field(default_factory=lambda: dict(DEFAULT_ENTRY_PARAMS))
     danger_params: dict = field(default_factory=lambda: dict(DEFAULT_DANGER_PARAMS))
     exit_params: dict = field(default_factory=lambda: dict(DEFAULT_EXIT_PARAMS))
-    profit_params: dict = field(default_factory=lambda: dict(DEFAULT_PROFIT_PARAMS))
-    time_params: dict = field(default_factory=lambda: dict(DEFAULT_TIME_PARAMS))
 
     def __post_init__(self) -> None:
         # Se o usuÃ¡rio nÃ£o definiu offsets explicitamente, gera automaticamente.
@@ -122,13 +120,9 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
     entry_params = dict(settings.entry_params)
     danger_params = dict(settings.danger_params)
     exit_params = dict(settings.exit_params)
-    profit_params = dict(settings.profit_params)
-    time_params = dict(settings.time_params)
     entry_params["device"] = settings.xgb_device
     danger_params["device"] = settings.xgb_device
     exit_params["device"] = settings.xgb_device
-    profit_params["device"] = settings.xgb_device
-    time_params["device"] = settings.xgb_device
 
     cfg = TrainConfig(
         total_days=int(settings.total_days),
@@ -138,15 +132,9 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         entry_params=entry_params,
         danger_params=danger_params,
         exit_params=exit_params,
-        profit_params=profit_params,
-        time_params=time_params,
         max_rows_entry=int(settings.max_rows_entry),
         max_rows_danger=int(settings.max_rows_danger),
         max_rows_exit=int(settings.max_rows_exit),
-        max_rows_profit=int(settings.max_rows_profit),
-        max_rows_time=int(settings.max_rows_time),
-        bins_profit=int(settings.bins_profit),
-        bins_time=int(settings.bins_time),
         entry_ratio_neg_per_pos=float(settings.entry_ratio_neg_per_pos),
         danger_ratio_neg_per_pos=float(settings.danger_ratio_neg_per_pos),
         exit_ratio_neg_per_pos=float(settings.exit_ratio_neg_per_pos),

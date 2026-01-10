@@ -65,17 +65,11 @@ class TrainConfig:
     entry_params: dict = None
     danger_params: dict = None
     exit_params: dict = None
-    profit_params: dict = None
-    time_params: dict = None
     contract: TradeContract = DEFAULT_TRADE_CONTRACT
     # dataset sizing (VRAM/RAM)
     max_rows_entry: int = 4_000_000
     max_rows_danger: int = 2_000_000
     max_rows_exit: int = 2_000_000
-    max_rows_profit: int = 2_000_000
-    max_rows_time: int = 2_000_000
-    bins_profit: int = 12
-    bins_time: int = 12
     entry_ratio_neg_per_pos: float = 6.0
     danger_ratio_neg_per_pos: float = 4.0
     exit_ratio_neg_per_pos: float = 4.0
@@ -137,33 +131,6 @@ DEFAULT_EXIT_PARAMS = {
     "device": "cuda:0",
 }
 
-DEFAULT_PROFIT_PARAMS = {
-    "objective": "reg:squarederror",
-    "eval_metric": "rmse",
-    "eta": 0.03,
-    "max_depth": 8,
-    "subsample": 0.9,
-    "colsample_bytree": 0.9,
-    "max_bin": 256,
-    "lambda": 1.0,
-    "alpha": 0.0,
-    "tree_method": "hist",
-    "device": "cuda:0",
-}
-
-DEFAULT_TIME_PARAMS = {
-    "objective": "reg:squarederror",
-    "eval_metric": "rmse",
-    "eta": 0.03,
-    "max_depth": 8,
-    "subsample": 0.9,
-    "colsample_bytree": 0.9,
-    "max_bin": 256,
-    "lambda": 1.0,
-    "alpha": 0.0,
-    "tree_method": "hist",
-    "device": "cuda:0",
-}
 
 
 def _select_symbols(cfg: TrainConfig) -> List[str]:
@@ -474,8 +441,6 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
     entry_params = dict(DEFAULT_ENTRY_PARAMS if cfg.entry_params is None else cfg.entry_params)
     danger_params = dict(DEFAULT_DANGER_PARAMS if cfg.danger_params is None else cfg.danger_params)
     exit_params = dict(DEFAULT_EXIT_PARAMS if getattr(cfg, "exit_params", None) is None else cfg.exit_params)
-    profit_params = dict(DEFAULT_PROFIT_PARAMS if getattr(cfg, "profit_params", None) is None else cfg.profit_params)
-    time_params = dict(DEFAULT_TIME_PARAMS if getattr(cfg, "time_params", None) is None else cfg.time_params)
     # threshold estável (sem env vars): target rate no VAL
     entry_params["_target_pred_pos_frac"] = float(getattr(cfg, "entry_target_pred_pos_frac", 0.0) or 0.0)
     exit_params["_target_pred_pos_frac"] = float(getattr(cfg, "exit_target_pred_pos_frac", 0.0) or 0.0)
@@ -515,10 +480,6 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
                 max_rows_danger=int(getattr(cfg, "max_rows_danger", 1_200_000)),
                 max_rows_exit=int(getattr(cfg, "max_rows_exit", 1_200_000)),
-                max_rows_profit=int(getattr(cfg, "max_rows_profit", 1_200_000)),
-                max_rows_time=int(getattr(cfg, "max_rows_time", 1_200_000)),
-                bins_profit=int(getattr(cfg, "bins_profit", 12)),
-                bins_time=int(getattr(cfg, "bins_time", 12)),
                 seed=1337,
             )
         else:
@@ -533,10 +494,6 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
                 max_rows_danger=int(getattr(cfg, "max_rows_danger", 1_200_000)),
                 max_rows_exit=int(getattr(cfg, "max_rows_exit", 1_200_000)),
-                max_rows_profit=int(getattr(cfg, "max_rows_profit", 600_000)),
-                max_rows_time=int(getattr(cfg, "max_rows_time", 600_000)),
-                bins_profit=int(getattr(cfg, "bins_profit", 12)),
-                bins_time=int(getattr(cfg, "bins_time", 12)),
                 seed=1337,
             )
         try:
@@ -594,29 +551,11 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         exit_model, exit_meta = _train_xgb_classifier(pack.exit, exit_params)
         print(f"[sniper-train] ExitScore: tau={exit_meta['threshold']:.3f} best_iter={exit_meta['best_iteration']}", flush=True)
 
-        profit_model = None
-        profit_meta = None
-        if getattr(pack, "profit", None) is not None and getattr(pack.profit, "X", None) is not None and int(pack.profit.X.size) > 0:
-            print("[sniper-train] treinando ProfitReg (label_profit)...", flush=True)
-            profit_model, profit_meta = _train_xgb_regressor(pack.profit, profit_params, y_transform="log1p")
-            print(f"[sniper-train] ProfitReg: best_iter={profit_meta['best_iteration']} rmse={profit_meta['metrics']['rmse']:.4f}", flush=True)
-
-        time_model = None
-        time_meta = None
-        if getattr(pack, "time", None) is not None and getattr(pack.time, "X", None) is not None and int(pack.time.X.size) > 0:
-            print("[sniper-train] treinando TimeReg (label_time)...", flush=True)
-            time_model, time_meta = _train_xgb_regressor(pack.time, time_params, y_transform="log1p")
-            print(f"[sniper-train] TimeReg: best_iter={time_meta['best_iteration']} rmse={time_meta['metrics']['rmse']:.4f}", flush=True)
-
         period_dir = run_dir / f"period_{int(tail)}d"
         (period_dir / "entry_model").mkdir(parents=True, exist_ok=True)
         _save_model(entry_model, period_dir / "entry_model" / "model_entry.json")
         _save_model(danger_model, period_dir / "danger_model" / "model_danger.json")
         _save_model(exit_model, period_dir / "exit_model" / "model_exit.json")
-        if profit_model is not None:
-            _save_model(profit_model, period_dir / "profit_model" / "model_profit.json")
-        if time_model is not None:
-            _save_model(time_model, period_dir / "time_model" / "model_time.json")
 
         meta = {
             "entry": {
@@ -634,26 +573,6 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 "calibration": exit_meta["calibrator"],
                 "threshold": exit_meta["threshold"],
             },
-            "profit": (
-                {
-                    "feature_cols": (pack.profit.feature_cols if getattr(pack, "profit", None) is not None else []),
-                    "transform": (profit_meta["transform"] if profit_meta is not None else "log1p"),
-                    "best_iteration": (profit_meta["best_iteration"] if profit_meta is not None else None),
-                    "metrics": (profit_meta["metrics"] if profit_meta is not None else None),
-                }
-                if profit_model is not None
-                else None
-            ),
-            "time": (
-                {
-                    "feature_cols": (pack.time.feature_cols if getattr(pack, "time", None) is not None else []),
-                    "transform": (time_meta["transform"] if time_meta is not None else "log1p"),
-                    "best_iteration": (time_meta["best_iteration"] if time_meta is not None else None),
-                    "metrics": (time_meta["metrics"] if time_meta is not None else None),
-                }
-                if time_model is not None
-                else None
-            ),
             # Ponto final do treino (auditável): preferimos o valor determinístico vindo do dataflow
             # (cutoff - lookahead). Se não existir, cai no max(ts) do dataset amostrado.
             "train_end_utc": (
