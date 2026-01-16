@@ -17,7 +17,6 @@ from typing import Dict, List, Tuple, Sequence
 
 import numpy as np
 import pandas as pd
-import math
 
 try:
     import xgboost as xgb
@@ -30,49 +29,7 @@ from .sniper_simulator import (
     _apply_calibration,
     _finalize_monthly_returns,
 )
-
-# Numba (opcional): acelera montagem do vetor do ExitScore (hot-loop).
-_NUMBA_OK = False
-try:  # pragma: no cover
-    from numba import njit  # type: ignore
-    from numba.typed import List as NList  # type: ignore
-
-    _NUMBA_OK = True
-except Exception:  # pragma: no cover
-    njit = None  # type: ignore
-    NList = None  # type: ignore
-    _NUMBA_OK = False
-
-
-def _apply_calibration_scalar(x: float, calib: dict) -> float:
-    """
-    Versão escalar da calibração (evita alocar array 1x).
-    """
-    if not isinstance(calib, dict):
-        return float(x)
-    if calib.get("type") != "platt":
-        return float(x)
-    a = float(calib.get("coef", 1.0))
-    b = float(calib.get("intercept", 0.0))
-    z = a * float(x) + b
-    return float(1.0 / (1.0 + math.exp(-z)))
-
-
-if _NUMBA_OK:  # pragma: no cover
-    @njit(cache=True)
-    def _fill_exit_row_nb(out, cycle_vals, data_cols, i, kind, idx):  # type: ignore[no-redef]
-        """
-        kind: 0 -> cycle, 1 -> data, 2 -> zero
-        idx: índice no vetor cycle_vals ou na lista data_cols
-        """
-        for k in range(out.shape[0]):
-            kk = kind[k]
-            if kk == 0:
-                out[k] = cycle_vals[idx[k]]
-            elif kk == 1:
-                out[k] = data_cols[idx[k]][i]
-            else:
-                out[k] = 0.0
+from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 
 
 try:
@@ -142,9 +99,15 @@ def load_period_models(
         entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
         danger_calib = dict(meta["danger"].get("calibration") or {"type": "identity"})
         exit_calib = dict((meta.get("exit") or {}).get("calibration") or {"type": "identity"})
-        tau_entry = float(meta["entry"].get("threshold", 0.5))
-        tau_danger = float(meta["danger"].get("threshold", 0.5))
-        tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
+        tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
+        tau_danger = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
+        tau_exit = DEFAULT_THRESHOLD_OVERRIDES.tau_exit
+        if tau_entry is None:
+            tau_entry = float(meta["entry"].get("threshold", 0.5))
+        if tau_danger is None:
+            tau_danger = float(meta["danger"].get("threshold", 0.5))
+        if tau_exit is None:
+            tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
         tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
         tau_danger_add = float(min(0.99, max(0.01, tau_danger * float(tau_danger_add_multiplier))))
 
@@ -237,9 +200,7 @@ def predict_scores_walkforward(
     n = len(idx)
     p_entry = np.full(n, np.nan, dtype=np.float32)
     p_danger = np.full(n, np.nan, dtype=np.float32)
-    # IMPORTANT: ExitScore depende de features "cycle_*" (estado da posição),
-    # que NÃO existem no cache (df) e precisam ser calculadas durante a simulação.
-    # Então aqui retornamos NaN e o simulador preenche p_exit on-the-fly apenas quando em posição.
+    # p_exit is unused with exit_score; keep NaN for compatibility.
     p_exit = np.full(n, np.nan, dtype=np.float32)
     period_id = np.full(n, -1, dtype=np.int16)
 
@@ -399,7 +360,6 @@ def simulate_sniper_from_scores(
     tp_hard_when_exit: bool | None = None,
     exit_min_hold_bars: int = 3,
     exit_confirm_bars: int = 1,
-    exit_on_danger: bool = True,
 ) -> SniperBacktestResult:
     """
     Simula ciclo Sniper usando scores pré-computados (mais rápido) e thresholds do período selecionado.
@@ -411,14 +371,6 @@ def simulate_sniper_from_scores(
     idx = df.index
     n = len(df)
 
-    # Cache de montagem de row do ExitScore (por pid): evita alocações e pandas no hot-loop
-    exit_cols_by_pid: dict[int, list[str]] = {}
-    exit_cache_by_pid: dict[int, tuple[np.ndarray, np.ndarray, object, np.ndarray]] = {}
-    if periods is not None:
-        for pid, pmx in enumerate(periods):
-            exit_cols_by_pid[int(pid)] = list(getattr(pmx, "exit_cols", None) or [])
-    else:
-        exit_cols_by_pid[0] = list(getattr(thresholds, "exit_cols", None) or [])
 
     timeout_bars = contract.timeout_bars(int(candle_sec))
     eq = 1.0
@@ -438,14 +390,13 @@ def simulate_sniper_from_scores(
     if exit_confirm <= 0:
         exit_confirm = 1
     exit_streak = 0
-    use_numba = bool(_NUMBA_OK)
+    exit_threshold = float(getattr(contract, "exit_score_threshold", 0.0))
+    time_per_bar_hours = float(candle_sec) / 3600.0
 
     size_sched = tuple(float(x) for x in contract.add_sizing) if contract.add_sizing else (1.0,)
     if len(size_sched) < contract.max_adds + 1:
         size_sched = size_sched + (size_sched[-1],) * (contract.max_adds + 1 - len(size_sched))
 
-    # Reusa buffer de cycle_* (evita alocação por barra)
-    cycle_vals = np.empty(10, dtype=np.float32)
 
     for i in range(n):
         pm = thresholds
@@ -484,85 +435,24 @@ def simulate_sniper_from_scores(
         lo = low[i] if np.isfinite(low[i]) else px
         reason = None
         exit_px = None
-        cur_profit = (px / avg_price - 1.0) if (avg_price > 0.0) else 0.0
-        if (reason is None) and exit_on_danger and (pdg >= float(pm.tau_danger)) and (time_in_trade >= exit_min_hold):
-            reason = "DANGER"
-            exit_px = px
+        # exit score (pnl/dd/tempo/danger)
+        exit_score = 0.0
+        if (exit_threshold > 0.0) and (time_in_trade >= exit_min_hold):
+            pnl_pct = ((px / avg_price) - 1.0) * 100.0 if avg_price > 0.0 else 0.0
+            if pnl_pct < 0.0:
+                pnl_pct = 0.0
+            dd_pct_score = ((avg_price - lo) / avg_price) * 100.0 if (avg_price > 0.0 and lo < avg_price) else 0.0
+            time_hours = float(time_in_trade) * time_per_bar_hours
+            danger_hit = bool(pdg >= pm.tau_danger)
+            exit_score = contract.exit_score(
+                pnl_pct=float(pnl_pct),
+                dd_pct=float(dd_pct_score),
+                time_hours=float(time_hours),
+                danger_hit=bool(danger_hit),
+            )
 
-        # calcula ExitScore on-the-fly (precisa de cycle_* => depende do estado da posição)
-        has_exit = (getattr(pm, "exit_model", None) is not None) and bool(getattr(pm, "exit_cols", []))
-        pxit = 0.0
-        # OTIMIZAÇÃO: não faz inferência de exit antes do min_hold (não pode sair)
-        if has_exit and in_pos and (time_in_trade >= exit_min_hold):
-            dd_pct = (px / avg_price - 1.0) if (avg_price > 0.0) else 0.0
-            tp_price = avg_price * (1.0 + contract.tp_min_pct)
-            sl_price = avg_price * (1.0 - contract.sl_pct)
-            dist_to_tp = ((tp_price - px) / tp_price) if tp_price > 0 else 0.0
-            dist_to_sl = ((px - sl_price) / sl_price) if sl_price > 0 else 0.0
-            risk_used = total_size * contract.sl_pct
-            next_size = size_sched[min(num_adds + 1, len(size_sched) - 1)]
-            risk_if_add = (total_size + next_size) * contract.sl_pct
-
-            pid2 = int(pid_i) if (periods is not None and period_id is not None) else 0
-
-            cols = exit_cols_by_pid.get(pid2) or list(getattr(pm, "exit_cols", []) or [])
-            cache = exit_cache_by_pid.get(pid2)
-            if cache is None:
-                cache = _make_exit_row_cache(df, cols)
-                exit_cache_by_pid[pid2] = cache
-            kind, fidx, data_cols, row_buf = cache
-
-            cycle_vals[0] = np.float32(0.0)  # is_add
-            cycle_vals[1] = np.float32(num_adds)
-            cycle_vals[2] = np.float32(time_in_trade)
-            cycle_vals[3] = np.float32(dd_pct)
-            cycle_vals[4] = np.float32(dist_to_tp)
-            cycle_vals[5] = np.float32(dist_to_sl)
-            cycle_vals[6] = np.float32(avg_price)
-            cycle_vals[7] = np.float32(last_fill)
-            cycle_vals[8] = np.float32(risk_used)
-            cycle_vals[9] = np.float32(risk_if_add)
-
-            if _NUMBA_OK:
-                if use_numba:
-                    try:
-                        _fill_exit_row_nb(row_buf, cycle_vals, data_cols, i, kind, fidx)  # type: ignore[misc]
-                    except Exception:
-                        use_numba = False
-            else:
-                # fallback Python (sem alocar row novo)
-                for kk in range(row_buf.shape[0]):
-                    t = int(kind[kk])
-                    if t == 0:
-                        row_buf[kk] = float(cycle_vals[int(fidx[kk])])
-                    elif t == 1:
-                        row_buf[kk] = float(data_cols[int(fidx[kk])][i])  # type: ignore[index]
-                    else:
-                        row_buf[kk] = 0.0
-            if (not _NUMBA_OK) or (not use_numba):
-                # fallback Python (sem alocar row novo)
-                for kk in range(row_buf.shape[0]):
-                    t = int(kind[kk])
-                    if t == 0:
-                        row_buf[kk] = float(cycle_vals[int(fidx[kk])])
-                    elif t == 1:
-                        row_buf[kk] = float(data_cols[int(fidx[kk])][i])  # type: ignore[index]
-                    else:
-                        row_buf[kk] = 0.0
-
-            # IMPORTANT (XGBoost CUDA): evitar warning de mismatched devices
-            dm = xgb.DMatrix(row_buf.reshape(1, -1))
-            pxit = float(pm.exit_model.predict(dm, validate_features=False)[0])
-            pxit = float(_apply_calibration_scalar(float(pxit), pm.exit_calib))
-            # salva para plot/diagnóstico (opcional)
-            if p_exit is not None:
-                try:
-                    p_exit[i] = np.float32(pxit)
-                except Exception:
-                    pass
-
-        # atualiza confirmação do EXIT
-        if has_exit and (time_in_trade >= exit_min_hold) and (pxit >= float(getattr(pm, "tau_exit", 1.0))):
+        has_exit = bool(exit_threshold > 0.0)
+        if has_exit and (time_in_trade >= exit_min_hold) and (exit_score >= exit_threshold):
             exit_streak += 1
         else:
             exit_streak = 0

@@ -27,7 +27,6 @@ import heapq
 
 import numpy as np
 import pandas as pd
-import json
 
 try:
     from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
@@ -85,7 +84,7 @@ class SymbolData:
     df: pd.DataFrame  # precisa ter index + close/high/low
     p_entry: np.ndarray
     p_danger: np.ndarray
-    # ExitScore depende de cycle_* (estado da posição), então p_exit pode ficar NaN e ser calculado on-the-fly.
+    # p_exit unused with exit_score; keep for compatibility.
     p_exit: np.ndarray
     # thresholds (podem ser overrides globais na simulação)
     tau_entry: float
@@ -95,7 +94,7 @@ class SymbolData:
     tau_exit: float
     # walk-forward: qual período usar em cada timestamp (mesma ordem da lista `periods`)
     period_id: np.ndarray | None = None
-    # lista de PeriodModel do wf (para ExitScore on-the-fly)
+    # lista de PeriodModel do wf (para entry/danger on-the-fly)
     periods: list | None = None
     # caches para performance (preenchidos em `simulate_portfolio`)
     idx: pd.DatetimeIndex | None = None
@@ -117,80 +116,6 @@ def _apply_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
     b = float(calib.get("intercept", 0.0))
     z = a * p + b
     return _sigmoid(z)
-
-
-def _predict_exit_on_the_fly(sd: SymbolData, *, j: int, avg_price: float, last_fill: float, total_size: float, num_adds: int, entry_i: int, contract: TradeContract) -> float:
-    """
-    Calcula p_exit no timestamp j usando o modelo do período WF correspondente (sd.period_id).
-    Precisa do estado do ciclo (avg_price/num_adds/etc) para preencher cycle_*.
-    """
-    if sd.periods is None or sd.period_id is None:
-        return 0.0
-    try:
-        pid = int(sd.period_id[j])
-    except Exception:
-        pid = -1
-    if pid < 0 or pid >= len(sd.periods):
-        return 0.0
-    pm = sd.periods[pid]
-    exit_model = getattr(pm, "exit_model", None)
-    exit_cols = list(getattr(pm, "exit_cols", []) or [])
-    if exit_model is None or not exit_cols:
-        return 0.0
-
-    df = sd.df
-    close = sd.close if (sd.close is not None) else df["close"].to_numpy(np.float64, copy=False)
-    px = float(close[j])
-    if not np.isfinite(px) or px <= 0.0 or avg_price <= 0.0:
-        return 0.0
-
-    time_in_trade = int(j - entry_i)
-    dd_pct = (px / float(avg_price)) - 1.0
-    tp_price = float(avg_price) * (1.0 + float(contract.tp_min_pct))
-    sl_price = float(avg_price) * (1.0 - float(contract.sl_pct))
-    dist_to_tp = ((tp_price - px) / tp_price) if tp_price > 0 else 0.0
-    dist_to_sl = ((px - sl_price) / sl_price) if sl_price > 0 else 0.0
-    risk_used = float(total_size) * float(contract.sl_pct)
-    size_sched = tuple(float(x) for x in contract.add_sizing) if contract.add_sizing else (1.0,)
-    if len(size_sched) < int(contract.max_adds) + 1:
-        size_sched = size_sched + (size_sched[-1],) * (int(contract.max_adds) + 1 - len(size_sched))
-    next_size = float(size_sched[min(int(num_adds) + 1, len(size_sched) - 1)])
-    risk_if_add = (float(total_size) + float(next_size)) * float(contract.sl_pct)
-
-    cycle_state = {
-        "cycle_is_add": 0.0,
-        "cycle_num_adds": float(num_adds),
-        "cycle_time_in_trade": float(time_in_trade),
-        "cycle_dd_pct": float(dd_pct),
-        "cycle_dist_to_tp": float(dist_to_tp),
-        "cycle_dist_to_sl": float(dist_to_sl),
-        "cycle_avg_entry_price": float(avg_price),
-        "cycle_last_fill_price": float(last_fill),
-        "cycle_risk_used_pct": float(risk_used),
-        "cycle_risk_if_add_pct": float(risk_if_add),
-    }
-
-    # monta 1 linha (float32)
-    row = np.zeros(len(exit_cols), dtype=np.float32)
-    for k, col in enumerate(exit_cols):
-        if str(col).startswith("cycle_"):
-            row[k] = float(cycle_state.get(col, 0.0))
-            continue
-        try:
-            v = df[col].iat[j]
-            row[k] = float(v) if np.isfinite(v) else 0.0
-        except Exception:
-            row[k] = 0.0
-
-    # IMPORTANT (XGBoost CUDA):
-    # `inplace_predict` com booster em CUDA e input em numpy (CPU) dispara warning
-    # "mismatched devices" e faz fallback interno. Para evitar spam e overhead,
-    # usamos DMatrix diretamente.
-    import xgboost as xgb  # local import para evitar custo/erro em ambientes sem xgb
-    dm = xgb.DMatrix(row.reshape(1, -1))
-    p = float(exit_model.predict(dm, validate_features=False)[0])
-    p = float(_apply_calibration(np.array([p], dtype=np.float64), dict(getattr(pm, "exit_calib", {}) or {"type": "identity"}))[0])
-    return float(p)
 
 
 def _rank_score(p_entry: float, p_danger: float, mode: str) -> float:
@@ -247,6 +172,8 @@ def _simulate_one_trade(
 
     # percorre até fechar
     exit_streak = 0
+    exit_threshold = float(getattr(contract, "exit_score_threshold", 0.0))
+    time_per_bar_hours = float(candle_sec) / 3600.0
     for j in range(entry_i + 1, j_limit + 1):
         px = float(close[j])
         if not np.isfinite(px) or px <= 0.0:
@@ -254,6 +181,7 @@ def _simulate_one_trade(
         hi = float(high[j]) if np.isfinite(high[j]) else px
         lo = float(low[j]) if np.isfinite(low[j]) else px
         time_in_trade = int(j - entry_i)
+        pdg = float(sd.p_danger[j]) if np.isfinite(sd.p_danger[j]) else 1.0
 
         # SL hard
         if lo <= (avg_price * (1.0 - contract.sl_pct)):
@@ -262,35 +190,30 @@ def _simulate_one_trade(
             exit_i = j
             break
 
-        # TP: por padrão NÃO fecha aqui (deixa Exit model decidir)
-        # (isso evita cortar trades bons que continuam subindo)
+        # TP disabled by default; exit_score decides.
 
-        # Exit model (soft) — precisa confirmar
-        pxit = 0.0
-        if sd.periods is not None and sd.period_id is not None:
-            pxit = _predict_exit_on_the_fly(
-                sd,
-                j=int(j),
-                avg_price=float(avg_price),
-                last_fill=float(last_fill),
-                total_size=float(total_size),
-                num_adds=int(num_adds),
-                entry_i=int(entry_i),
-                contract=contract,
+        # Exit score needs confirmation.
+        exit_score = 0.0
+        if (exit_threshold > 0.0) and (time_in_trade >= int(exit_min_hold_bars)):
+            pnl_pct = ((px / avg_price) - 1.0) * 100.0 if avg_price > 0.0 else 0.0
+            if pnl_pct < 0.0:
+                pnl_pct = 0.0
+            dd_pct_score = ((avg_price - lo) / avg_price) * 100.0 if (avg_price > 0.0 and lo < avg_price) else 0.0
+            time_hours = float(time_in_trade) * time_per_bar_hours
+            danger_hit = bool(pdg >= sd.tau_danger)
+            exit_score = contract.exit_score(
+                pnl_pct=float(pnl_pct),
+                dd_pct=float(dd_pct_score),
+                time_hours=float(time_hours),
+                danger_hit=bool(danger_hit),
             )
-            # salva para inspeção (opcional)
-            try:
-                sd.p_exit[j] = float(pxit)
-            except Exception:
-                pass
-        else:
-            pxit = float(sd.p_exit[j]) if np.isfinite(sd.p_exit[j]) else 0.0
 
-        if pxit >= float(sd.tau_exit):
+        has_exit = bool(exit_threshold > 0.0)
+        if has_exit and (time_in_trade >= int(exit_min_hold_bars)) and (exit_score >= exit_threshold):
             exit_streak += 1
         else:
             exit_streak = 0
-        exit_ok = (exit_streak >= int(max(1, exit_confirm_bars))) and (time_in_trade >= int(exit_min_hold_bars))
+        exit_ok = has_exit and (exit_streak >= int(max(1, exit_confirm_bars))) and (time_in_trade >= int(exit_min_hold_bars))
         if exit_ok:
             exit_px = px
             reason = "EXIT"
@@ -308,7 +231,6 @@ def _simulate_one_trade(
             trigger = last_fill * (1.0 - float(contract.add_spacing_pct))
             if trigger > 0.0 and lo <= trigger:
                 pe = float(sd.p_entry[j]) if np.isfinite(sd.p_entry[j]) else 0.0
-                pdg = float(sd.p_danger[j]) if np.isfinite(sd.p_danger[j]) else 1.0
                 next_size = float(size_sched[num_adds + 1])
                 risk_after = (total_size + next_size) * float(contract.sl_pct)
                 if (

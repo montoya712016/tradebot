@@ -1169,9 +1169,44 @@ def prepare_sniper_dataset_from_cache(
         keep = np.sort(keep)
         return X[keep], y[keep], ts[keep], sym[keep]
 
+    def _to_numpy(df: pd.DataFrame, feats: List[str], label_col: str, sym_idx: int):
+        if label_col not in df.columns:
+            return (
+                np.empty((0, len(feats)), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype="datetime64[ns]"),
+                np.empty((0,), dtype=np.int32),
+            )
+        mat = df.reindex(columns=feats).replace([np.inf, -np.inf], np.nan)
+        mat = mat.infer_objects(copy=False)
+        mask = mat.notnull().all(axis=1).to_numpy(dtype=bool, copy=False)
+        if mask.size == 0 or (not bool(np.any(mask))):
+            return (
+                np.empty((0, len(feats)), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype="datetime64[ns]"),
+                np.empty((0,), dtype=np.int32),
+            )
+        mat2 = mat.to_numpy(np.float32, copy=True)
+        X = mat2[mask]
+        y = df[label_col].to_numpy(dtype=np.float32, copy=False)[mask]
+        ts = df.index.to_numpy(dtype="datetime64[ns]")[mask]
+        sym_arr = np.full(int(ts.shape[0]), sym_idx, dtype=np.int32)
+        return X, y, ts, sym_arr
+
     def _cut_df(df_pf: pd.DataFrame) -> pd.DataFrame:
         if df_pf.empty:
             return df_pf
+        # normaliza index para evitar erro com tz-aware vs naive
+        try:
+            idx = pd.to_datetime(df_pf.index)
+            if isinstance(idx, pd.DatetimeIndex) and (idx.tz is not None):
+                idx = idx.tz_localize(None)
+            if not idx.equals(df_pf.index):
+                df_pf = df_pf.copy()
+                df_pf.index = idx
+        except Exception:
+            pass
         end_ts = pd.Timestamp(df_pf.index.max())
         if global_end_ts is not None:
             end_ts = min(end_ts, global_end_ts)
@@ -1379,6 +1414,7 @@ def prepare_sniper_dataset_from_cache(
         return X_new, y_new, ts_new, sym_new
 
     seed_symbol = None
+    first_err: str | None = None
     for sym in symbols_total:
         try:
             (
@@ -1450,12 +1486,15 @@ def prepare_sniper_dataset_from_cache(
             break
         except Exception as e:
             symbols_skipped.append(sym)
+            if first_err is None:
+                first_err = f"{sym}: {e}"
             processed += 1
             _print_progress(sym)
             continue
 
     if seed_symbol is None:
-        raise RuntimeError("Nenhum símbolo válido após corte (todos SKIP)")
+        extra = f" | first_error={first_err}" if first_err else ""
+        raise RuntimeError(f"Nenhum símbolo válido após corte (todos SKIP){extra}")
 
     # 2) restantes (threads)
     use_parallel = _env_bool("PF_SYMBOL_PARALLEL", default=True)

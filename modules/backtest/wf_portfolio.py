@@ -16,40 +16,45 @@ Executar:
   python modules/backtest/wf_portfolio.py --run-dir D:/astra/models_sniper/wf_022 --tau-entry 0.80 --tau-danger 0.40 --tau-exit 0.85
 """
 
-import argparse
-import json
-import os
-import time
-from dataclasses import dataclass
+import sys
 from pathlib import Path
-from typing import Any, Callable
 
-import numpy as np
-import pandas as pd
 
-try:
-    from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward
-    from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio
-    from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL
-    from trade_contract import DEFAULT_TRADE_CONTRACT
-    from config.symbols import load_top_market_cap_symbols
-    from utils.paths import resolve_generated_path
-except Exception:
-    import sys
-
+def _ensure_modules_on_sys_path() -> None:
+    """
+    Permite executar este arquivo direto (ex.: `python modules/backtest/wf_portfolio.py`)
+    sem depender de PYTHONPATH.
+    """
+    if __package__ not in (None, ""):
+        return
     here = Path(__file__).resolve()
     for p in here.parents:
         if p.name.lower() == "modules":
             sp = str(p)
             if sp not in sys.path:
                 sys.path.insert(0, sp)
-            break
-    from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward  # type: ignore[import]
-    from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio  # type: ignore[import]
-    from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL  # type: ignore[import]
-    from trade_contract import DEFAULT_TRADE_CONTRACT  # type: ignore[import]
-    from config.symbols import load_top_market_cap_symbols  # type: ignore[import]
-    from utils.paths import resolve_generated_path  # type: ignore[import]
+            return
+
+
+_ensure_modules_on_sys_path()
+
+import argparse
+import json
+import os
+import time
+from dataclasses import dataclass, fields, replace
+from typing import Any, Callable
+
+import numpy as np
+import pandas as pd
+
+from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward
+from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio
+from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL, _cache_dir, _cache_format
+from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract
+from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
+from config.symbols import load_top_market_cap_symbols
+from utils.paths import resolve_generated_path
 
 try:
     from utils.pushover_notify import load_default as _pushover_load_default, send_pushover as _pushover_send
@@ -125,6 +130,27 @@ def _progress(it, *, total: int | None = None, desc: str = ""):
         return _gen()
 
 
+def _load_contract_from_json(path: str | None) -> TradeContract:
+    if not path:
+        return DEFAULT_TRADE_CONTRACT
+    p = Path(path).expanduser().resolve()
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and isinstance(data.get("contract"), dict):
+        data = data["contract"]
+    if not isinstance(data, dict):
+        raise ValueError("contract-json deve ser um dict")
+    allowed = {f.name for f in fields(TradeContract)}
+    overrides = {k: data[k] for k in data.keys() if k in allowed}
+    if "add_sizing" in overrides:
+        seq = overrides["add_sizing"]
+        if isinstance(seq, (list, tuple)):
+            overrides["add_sizing"] = tuple(float(x) for x in seq)
+    for k in ("max_adds", "danger_stabilize_bars"):
+        if k in overrides:
+            overrides[k] = int(overrides[k])
+    return replace(DEFAULT_TRADE_CONTRACT, **overrides)
+
+
 def _read_parquet_best_effort(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame | None:
     p = Path(path)
     cols = list(columns) if columns else None
@@ -160,6 +186,24 @@ def _read_cache_meta_times(data_path: Path) -> tuple[pd.Timestamp | None, pd.Tim
         return pd.to_datetime(st), pd.to_datetime(en)
     except Exception:
         return None, None
+
+
+def _list_cached_symbols() -> list[str]:
+    cache_dir = _cache_dir()
+    fmt = _cache_format()
+    pat = "*.parquet" if fmt == "parquet" else "*.pkl"
+    out: list[str] = []
+    try:
+        for p in cache_dir.glob(pat):
+            meta = p.with_suffix(".meta.json")
+            if not meta.exists():
+                continue
+            sym = p.stem.strip().upper()
+            if sym:
+                out.append(sym)
+    except Exception:
+        return []
+    return sorted(set(out))
 
 
 def _needed_feature_columns(periods) -> list[str]:
@@ -295,9 +339,9 @@ def main() -> None:
     ap.add_argument("--bar-stride", type=int, default=1)
     ap.add_argument("--refresh-cache", action="store_true")
 
-    ap.add_argument("--tau-entry", type=float, default=0.85)
-    ap.add_argument("--tau-danger", type=float, default=0.40)
-    ap.add_argument("--tau-exit", type=float, default=0.85)
+    ap.add_argument("--tau-entry", type=float, default=DEFAULT_THRESHOLD_OVERRIDES.tau_entry)
+    ap.add_argument("--tau-danger", type=float, default=DEFAULT_THRESHOLD_OVERRIDES.tau_danger)
+    ap.add_argument("--tau-exit", type=float, default=DEFAULT_THRESHOLD_OVERRIDES.tau_exit)
 
     # Universo: usar histÃ³rico ao invÃ©s de sÃ³ o step atual (mais robusto)
     ap.add_argument(
@@ -320,7 +364,7 @@ def main() -> None:
     ap.add_argument(
         "--tau-opt-mode",
         type=str,
-        default="entry_grid",
+        default="none",
         choices=["none", "entry_grid"],
         help="Otimiza thresholds por step para aplicar no step seguinte. "
         "'entry_grid' faz grid search apenas em tau_entry (tau_danger e tau_exit ficam fixos).",
@@ -400,6 +444,13 @@ def main() -> None:
     ap.add_argument("--universe-max-changes", type=int, default=0, help="Se houver teto, limita novas entradas por step (0 => ilimitado).")
 
     ap.add_argument("--jobs", type=int, default=1, help="Apenas para parallelismo de dataset (I/O). SimulaÃ§Ã£o Ã© sequencial.")
+    ap.add_argument(
+        "--step-cache-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "disk", "memory"],
+        help="Como armazenar dataset por step. 'auto' tenta disco e faz fallback para memÃ³ria se faltar espaÃ§o.",
+    )
     ap.add_argument("--xgb-threads", type=int, default=8)
     ap.add_argument("--pushover-user-env", type=str, default="PUSHOVER_USER_KEY")
     ap.add_argument("--pushover-token-env", type=str, default="PUSHOVER_TOKEN_TRADE")
@@ -407,7 +458,11 @@ def main() -> None:
     ap.add_argument("--no-pushover", action="store_true")
     ap.add_argument("--out-dir", type=str, default="wf_backtest_fixed_tau")
     ap.add_argument("--no-plot", action="store_true", help="NÃ£o exibir/salvar grÃ¡fico ao final.")
+    ap.add_argument("--plot-save-only", action="store_true", help="Salva grafico mas nao chama plt.show().")
+    ap.add_argument("--contract-json", type=str, default="", help="JSON com overrides do TradeContract.")
     args = ap.parse_args()
+
+    contract = _load_contract_from_json(getattr(args, "contract_json", "") or "")
 
     _set_thread_limits(int(getattr(args, "xgb_threads", 8) or 8))
 
@@ -457,29 +512,35 @@ def main() -> None:
         raise RuntimeError(f"run_dir invÃ¡lido: {run_dir}")
     print(f"[wf] run_dir={run_dir}", flush=True)
 
-    # SÃ­mbolos
-    syms = [s.strip().upper() for s in str(getattr(args, "symbols", "")).split(",") if s.strip()]
-    if not syms:
-        syms = load_top_market_cap_symbols(limit=int(args.limit) if int(args.limit) > 0 else None)
-        syms = [s.strip().upper() for s in syms if str(s).strip()]
-    if int(args.max_symbols) > 0:
-        syms = syms[: int(args.max_symbols)]
-    if not syms:
-        raise RuntimeError("Sem sÃ­mbolos (top_market_cap.txt vazio?)")
-
     # Cache de features (histÃ³rico suficiente para os steps)
     total_days_cache = int(args.years) * 365 + int(args.step_days) * 2 + 60
+    syms_arg = [s.strip().upper() for s in str(getattr(args, "symbols", "")).split(",") if s.strip()]
+    if not syms_arg:
+        syms_arg = _list_cached_symbols()
+        if syms_arg:
+            print(f"[wf] symbols: cache={len(syms_arg)}", flush=True)
+        else:
+            syms_arg = load_top_market_cap_symbols(limit=int(args.limit) if int(args.limit) > 0 else None)
+            syms_arg = [s.strip().upper() for s in syms_arg if str(s).strip()]
+    if int(args.max_symbols) > 0:
+        syms_arg = syms_arg[: int(args.max_symbols)]
+    if not syms_arg:
+        raise RuntimeError("Sem sÃ­mbolos (top_market_cap.txt vazio?)")
+
     cache_map = ensure_feature_cache(
-        syms,
+        syms_arg,
         total_days=int(total_days_cache),
-        contract=DEFAULT_TRADE_CONTRACT,
+        contract=contract,
         flags=dict(GLOBAL_FLAGS_FULL, **{"_quiet": True}),
         refresh=bool(getattr(args, "refresh_cache", False)),
         strict_total_days=True,
         parallel=True,
         max_workers=32,
     )
-    syms = [s for s in syms if s in cache_map]
+    # Universo final: usa somente sÃ­mbolos que de fato existem no cache.
+    syms = sorted([str(s).upper() for s in cache_map.keys()])
+    if int(args.max_symbols) > 0:
+        syms = syms[: int(args.max_symbols)]
     if not syms:
         raise RuntimeError("Nenhum sÃ­mbolo restou apÃ³s cache")
 
@@ -636,27 +697,35 @@ def main() -> None:
             rows.append({"step_idx": step_idx, "start": str(ws), "end": str(we), "symbols": 0, "eq_end": 1.0})
             continue
 
+        frames: dict[str, pd.DataFrame] = {}
+        frames_mem: dict[str, pd.DataFrame] = {}
+        cache_mode = str(getattr(args, "step_cache_mode", "auto") or "auto").strip().lower()
+        use_disk = cache_mode in {"auto", "disk"}
+        disk_ok = use_disk
+
         ds_dir = cache_root / f"step_{step_idx:03d}"
-        ds_dir.mkdir(parents=True, exist_ok=True)
         meta_p = ds_dir / "_wf_dataset_meta.json"
         need_rebuild = True
-        if meta_p.exists():
-            try:
-                meta = json.loads(meta_p.read_text(encoding="utf-8"))
-                if str(meta.get("format")) == "wf_v1" and str(meta.get("t_start")) == str(ws) and str(meta.get("t_end")) == str(we):
-                    meta_syms = [str(x).upper() for x in (meta.get("symbols") or [])]
-                    if meta_syms == [str(x).upper() for x in syms_build] and any(ds_dir.glob("*.parquet")):
-                        need_rebuild = False
-            except Exception:
-                need_rebuild = True
+        if use_disk:
+            ds_dir.mkdir(parents=True, exist_ok=True)
+            if meta_p.exists():
+                try:
+                    meta = json.loads(meta_p.read_text(encoding="utf-8"))
+                    if str(meta.get("format")) == "wf_v1" and str(meta.get("t_start")) == str(ws) and str(meta.get("t_end")) == str(we):
+                        meta_syms = [str(x).upper() for x in (meta.get("symbols") or [])]
+                        if meta_syms == [str(x).upper() for x in syms_build] and any(ds_dir.glob("*.parquet")):
+                            need_rebuild = False
+                except Exception:
+                    need_rebuild = True
 
-        if need_rebuild:
-            # limpa
-            try:
-                for p in ds_dir.glob("*.parquet"):
-                    p.unlink(missing_ok=True)
-            except Exception:
-                pass
+        if (cache_mode == "memory") or (use_disk and need_rebuild):
+            if use_disk and need_rebuild:
+                # limpa
+                try:
+                    for p in ds_dir.glob("*.parquet"):
+                        p.unlink(missing_ok=True)
+                except Exception:
+                    pass
             print(f"[wf] preparando dataset step (cols={len(need_cols)}) ...", flush=True)
             for sym in _progress(syms_build, total=len(syms_build), desc=f"prep step {step_idx}"):
                 df_full = _read_parquet_best_effort(Path(cache_map[sym]), columns=need_cols)
@@ -671,34 +740,49 @@ def main() -> None:
                 )
                 if df_step is None or df_step.empty or len(df_step) < min_bars:
                     continue
-                df_step.to_parquet(ds_dir / f"{sym}.parquet", index=True)
-            meta_p.write_text(
-                json.dumps({"format": "wf_v1", "t_start": str(ws), "t_end": str(we), "symbols": list(syms_build)}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+                if disk_ok:
+                    try:
+                        df_step.to_parquet(ds_dir / f"{sym}.parquet", index=True)
+                        continue
+                    except OSError as e:
+                        if cache_mode == "auto" and getattr(e, "errno", None) == 28:
+                            disk_ok = False
+                            print("[wf][warn] sem espaco em disco; alternando para cache em memoria.", flush=True)
+                        else:
+                            raise
+                frames_mem[sym] = df_step
+            if use_disk and disk_ok:
+                meta_p.write_text(
+                    json.dumps({"format": "wf_v1", "t_start": str(ws), "t_end": str(we), "symbols": list(syms_build)}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
 
-        # carrega frames
-        frames: dict[str, pd.DataFrame] = {}
-        for p in ds_dir.glob("*.parquet"):
-            sym = p.stem.upper()
-            if sym.startswith("_"):
-                continue
-            try:
-                df = pd.read_parquet(p)
-                # Normaliza Ã­ndice para tz-naive (evita crash tz-aware vs tz-naive na equity).
-                try:
-                    idx = pd.to_datetime(df.index, errors="coerce")
-                    if isinstance(idx, pd.DatetimeIndex) and (idx.tz is not None):
-                        idx = idx.tz_convert(None)
-                    df.index = idx
-                    df = df.loc[df.index.notna()].copy()
-                except Exception:
-                    pass
-                if df is None or df.empty or len(df) < min_bars:
+        # carrega frames do disco (se houver) e mescla com memoria
+        if use_disk and (not need_rebuild or disk_ok):
+            for p in ds_dir.glob("*.parquet"):
+                sym = p.stem.upper()
+                if sym.startswith("_"):
                     continue
-                frames[sym] = df
-            except Exception:
-                continue
+                try:
+                    df = pd.read_parquet(p)
+                    # Normaliza indice para tz-naive (evita crash tz-aware vs tz-naive na equity).
+                    try:
+                        idx = pd.to_datetime(df.index, errors="coerce")
+                        if isinstance(idx, pd.DatetimeIndex) and (idx.tz is not None):
+                            idx = idx.tz_convert(None)
+                        df.index = idx
+                        df = df.loc[df.index.notna()].copy()
+                    except Exception:
+                        pass
+                    if df is None or df.empty or len(df) < min_bars:
+                        continue
+                    frames[sym] = df
+                except Exception:
+                    continue
+
+        if frames_mem:
+            frames.update(frames_mem)
+
         syms_step = sorted(frames.keys())
         print(f"[wf] symbols_step={len(syms_step)}", flush=True)
         if not syms_step:
@@ -773,7 +857,7 @@ def main() -> None:
                 exit_confirm_bars=int(cfg.exit_confirm_bars),
                 rank_mode=str(getattr(cfg, "rank_mode", "p_entry_minus_p_danger")),
             )
-            pres_eval = simulate_portfolio(sym_data, cfg=cfg_eval, contract=DEFAULT_TRADE_CONTRACT, candle_sec=60)  # type: ignore[arg-type]
+            pres_eval = simulate_portfolio(sym_data, cfg=cfg_eval, contract=contract, candle_sec=60)  # type: ignore[arg-type]
             eval_trades = list(getattr(pres_eval, "trades", []) or [])
 
             # acumula trades (eval) para histÃ³rico robusto (seleÃ§Ã£o por PF/WR em janela maior)
@@ -1163,7 +1247,7 @@ def main() -> None:
                                     period_id=pid,
                                     periods=list(periods_base),
                                 )
-                            pres_opt = simulate_portfolio(sym_data_opt, cfg=cfg, contract=DEFAULT_TRADE_CONTRACT, candle_sec=60)  # type: ignore[arg-type]
+                            pres_opt = simulate_portfolio(sym_data_opt, cfg=cfg, contract=contract, candle_sec=60)  # type: ignore[arg-type]
                             eq_ser_opt = getattr(pres_opt, "equity_curve", None)
                             eq_end_opt = float(eq_ser_opt.iloc[-1]) if (eq_ser_opt is not None and len(eq_ser_opt) > 0) else 1.0
                             ntr_opt = int(len(getattr(pres_opt, "trades", []) or []))
@@ -1387,7 +1471,7 @@ def main() -> None:
 
         # simula com callback de progresso (por tempo do step)
         cb = _mk_progress_cb(ws, we)
-        pres = simulate_portfolio(sym_data_active, cfg=cfg, contract=DEFAULT_TRADE_CONTRACT, candle_sec=60, progress_cb=cb)  # type: ignore[arg-type]
+        pres = simulate_portfolio(sym_data_active, cfg=cfg, contract=contract, candle_sec=60, progress_cb=cb)  # type: ignore[arg-type]
         print("")  # quebra a linha depois do \r
 
         eq_ser = getattr(pres, "equity_curve", None)
@@ -1565,6 +1649,8 @@ def main() -> None:
     # Plot final: evoluÃ§Ã£o do capital / profit ao longo do tempo
     if not bool(getattr(args, "no_plot", False)):
         try:
+            if bool(getattr(args, "plot_save_only", False)):
+                os.environ.setdefault("MPLBACKEND", "Agg")
             eq_path = out_dir / "wf_equity_curve.csv"
             if eq_path.exists():
                 eq_df = pd.read_csv(eq_path)
@@ -1579,32 +1665,27 @@ def main() -> None:
                 eq = None
 
             if eq is not None and len(eq) > 1:
-                profit_pct = (eq - 1.0) * 100.0
                 try:
                     import matplotlib.pyplot as plt  # type: ignore
 
-                    fig, ax = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
-                    ax[0].plot(eq.index, eq.values, color="#2E86AB", linewidth=1.6)
-                    ax[0].set_title("EvoluÃ§Ã£o do capital (equity)")
-                    ax[0].set_ylabel("Equity")
-                    ax[0].grid(True, alpha=0.25)
-
-                    ax[1].plot(profit_pct.index, profit_pct.values, color="#18A558", linewidth=1.6)
-                    ax[1].set_title("Profit acumulado (%)")
-                    ax[1].set_ylabel("%")
-                    ax[1].grid(True, alpha=0.25)
+                    fig, ax = plt.subplots(1, 1, figsize=(12, 5))
+                    ax.plot(eq.index, eq.values, color="#2E86AB", linewidth=1.6)
+                    ax.set_title("Evolução do capital (equity)")
+                    ax.set_ylabel("Equity")
+                    ax.grid(True, alpha=0.25)
 
                     fig.tight_layout()
-                    out_png = out_dir / "wf_profit_equity.png"
+                    out_png = out_dir / "wf_equity.png"
                     try:
                         fig.savefig(out_png, dpi=140)
                         print(f"[wf] grÃ¡fico salvo: {out_png}", flush=True)
                     except Exception:
                         pass
-                    try:
-                        plt.show()
-                    except Exception:
-                        pass
+                    if not bool(getattr(args, "plot_save_only", False)):
+                        try:
+                            plt.show()
+                        except Exception:
+                            pass
                 except Exception:
                     print(
                         "[wf][plot][warn] matplotlib nÃ£o estÃ¡ disponÃ­vel; grÃ¡fico nÃ£o foi exibido/salvo. "

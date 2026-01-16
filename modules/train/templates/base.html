@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or "WF Loop Monitor" }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=DM+Mono:wght@300;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='wf_dashboard.css') }}" />
+  </head>
+  <body class="wf-body">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <div>
+          <div class="brand-title">Astra WF Loop</div>
+          <div class="brand-sub">Training and backtest monitor</div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <div class="status">
+          <span id="status-dot" class="status-dot status-offline"></span>
+          <div>
+            <div class="status-label">Last update</div>
+            <div class="status-value" id="last-update">--</div>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="btn-refresh" class="btn ghost">Refresh</button>
+          <button id="btn-pause" class="btn ghost">Pause</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+      <span class="muted">wf_dashboard</span>
+      <span class="dot">•</span>
+      <span class="muted">local monitor</span>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+  </body>
+</html>
+

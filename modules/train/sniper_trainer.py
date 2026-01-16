@@ -64,27 +64,14 @@ class TrainConfig:
     min_symbols_used_per_period: int = 30
     entry_params: dict = None
     danger_params: dict = None
-    exit_params: dict = None
     contract: TradeContract = DEFAULT_TRADE_CONTRACT
     # dataset sizing (VRAM/RAM)
     max_rows_entry: int = 4_000_000
     max_rows_danger: int = 2_000_000
-    max_rows_exit: int = 2_000_000
     entry_ratio_neg_per_pos: float = 6.0
     danger_ratio_neg_per_pos: float = 4.0
-    exit_ratio_neg_per_pos: float = 4.0
     use_feature_cache: bool = True
-    # Thresholding (estável):
-    # Em datasets muito desbalanceados, otimizar tau por F1/precision pode empurrar tau para ~0.95,
-    # matando a taxa de entradas. Para Entry/Exit, usamos uma taxa-alvo de positivos PREDITOS no VAL.
-    # Defaults mais agressivos para não “morrer” em tau_entry muito alto.
-    # Com 1m, 30 dias ≈ 43k barras; 1% no VAL costuma produzir candidatos suficientes
-    # para ao menos 1 entrada/mês (ainda depende do tempo em posição).
-    entry_target_pred_pos_frac: float = 0.010  # 1.0% dos pontos do val viram "entry"
-    exit_target_pred_pos_frac: float = 0.020   # 2.0% dos snapshots do val viram "exit"
-    # piso/teto do tau_entry (evita comprar demais em regimes ruins)
-    entry_tau_min: float = 0.60
-    entry_tau_max: float = 0.90
+    # Thresholds são definidos manualmente em config/thresholds.py (sem calibrar no treino).
 
 
 DEFAULT_ENTRY_PARAMS = {
@@ -116,21 +103,6 @@ DEFAULT_DANGER_PARAMS = {
     "tree_method": "hist",
     "device": "cuda:0",
 }
-
-DEFAULT_EXIT_PARAMS = {
-    "objective": "binary:logistic",
-    "eval_metric": "logloss",
-    "eta": 0.03,
-    "max_depth": 8,
-    "subsample": 0.9,
-    "colsample_bytree": 0.9,
-    "max_bin": 256,
-    "lambda": 1.0,
-    "alpha": 0.0,
-    "tree_method": "hist",
-    "device": "cuda:0",
-}
-
 
 
 def _select_symbols(cfg: TrainConfig) -> List[str]:
@@ -250,15 +222,8 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
     val_pred = booster.predict(dvalid, iteration_range=(0, booster.best_iteration + 1))
     val_true = batch.y[va_idx]
     calib = _fit_platt(val_pred, val_true)
-    preds_cal = calib["transform"](val_pred)
-    target = params.get("_target_pred_pos_frac", None)
-    if target is not None:
-        tau = _choose_threshold_by_target_rate(preds_cal, float(target))
-    else:
-        tau = _find_best_threshold(preds_cal, val_true)
     meta = {
         "calibrator": calib["params"],
-        "threshold": tau,
         "best_iteration": booster.best_iteration,
     }
     return booster, meta
@@ -372,42 +337,6 @@ def _fit_platt(preds: np.ndarray, labels: np.ndarray) -> dict:
         return {"params": {"type": "identity"}, "transform": lambda p: p}
 
 
-def _find_best_threshold(preds: np.ndarray, labels: np.ndarray) -> float:
-    best_tau = 0.5
-    best_score = -1.0
-    labels = labels.astype(np.int32)
-    for tau in np.linspace(0.3, 0.95, 50):
-        mask = preds >= tau
-        tp = int(np.sum(labels[mask] == 1))
-        fp = int(np.sum(labels[mask] == 0))
-        fn = int(np.sum(labels[~mask] == 1))
-        precision = tp / max(1, tp + fp)
-        recall = tp / max(1, tp + fn)
-        f1 = 0.0 if (precision + recall) == 0 else 2 * precision * recall / (precision + recall)
-        score = f1 + precision
-        if score > best_score:
-            best_score = score
-            best_tau = tau
-    return float(best_tau)
-
-
-def _choose_threshold_by_target_rate(preds: np.ndarray, target_pred_pos_frac: float) -> float:
-    """
-    Tau por quantil para obter aproximadamente target_pred_pos_frac de positivos previstos.
-    Usa apenas o conjunto de validação (sem vazamento).
-    """
-    p = np.asarray(preds, dtype=np.float64)
-    p = p[np.isfinite(p)]
-    if p.size == 0:
-        return 0.5
-    frac = float(target_pred_pos_frac)
-    if not np.isfinite(frac) or frac <= 0.0:
-        return 0.5
-    frac = float(min(0.20, max(1e-4, frac)))  # 0.01% .. 20%
-    tau = float(np.quantile(p, 1.0 - frac))
-    return float(min(0.95, max(0.05, tau)))
-
-
 def _next_run_dir(base: Path, prefix: str = "wf_") -> Path:
     base.mkdir(parents=True, exist_ok=True)
     existing = [p for p in base.glob(f"{prefix}*") if p.is_dir()]
@@ -440,10 +369,6 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
     run_dir = _next_run_dir(SAVE_ROOT)
     entry_params = dict(DEFAULT_ENTRY_PARAMS if cfg.entry_params is None else cfg.entry_params)
     danger_params = dict(DEFAULT_DANGER_PARAMS if cfg.danger_params is None else cfg.danger_params)
-    exit_params = dict(DEFAULT_EXIT_PARAMS if getattr(cfg, "exit_params", None) is None else cfg.exit_params)
-    # threshold estável (sem env vars): target rate no VAL
-    entry_params["_target_pred_pos_frac"] = float(getattr(cfg, "entry_target_pred_pos_frac", 0.0) or 0.0)
-    exit_params["_target_pred_pos_frac"] = float(getattr(cfg, "exit_target_pred_pos_frac", 0.0) or 0.0)
 
     cache_map = None
     if bool(getattr(cfg, "use_feature_cache", True)):
@@ -516,7 +441,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             if int(n_used) < int(min_used):
                 print(f"[sniper-train] {tail}d: symbols_used={n_used} < min_symbols_used_per_period={min_used} -> pulando", flush=True)
                 continue
-        if pack.entry.X.size == 0 or pack.danger.X.size == 0 or pack.exit.X.size == 0:
+        if pack.entry.X.size == 0 or pack.danger.X.size == 0:
             print(f"[sniper-train] {tail}d: dataset vazio, pulando")
             continue
         try:
@@ -524,10 +449,8 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             neg_e = int((pack.entry.y < 0.5).sum())
             pos_d = int((pack.danger.y >= 0.5).sum())
             neg_d = int((pack.danger.y < 0.5).sum())
-            pos_x = int((pack.exit.y >= 0.5).sum())
-            neg_x = int((pack.exit.y < 0.5).sum())
             print(
-                (f"[sniper-train] dataset entry: pos={pos_e:,} neg={neg_e:,} | danger: pos={pos_d:,} neg={neg_d:,} | exit: pos={pos_x:,} neg={neg_x:,}").replace(",", "."),
+                (f"[sniper-train] dataset entry: pos={pos_e:,} neg={neg_e:,} | danger: pos={pos_d:,} neg={neg_d:,}").replace(",", "."),
                 flush=True,
             )
         except Exception:
@@ -535,43 +458,25 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
 
         print("[sniper-train] treinando EntryScore...", flush=True)
         entry_model, entry_meta = _train_xgb_classifier(pack.entry, entry_params)
-        try:
-            tmin = float(getattr(cfg, "entry_tau_min", 0.0) or 0.0)
-            tmax = float(getattr(cfg, "entry_tau_max", 1.0) or 1.0)
-            entry_meta["threshold"] = float(min(tmax, max(tmin, float(entry_meta["threshold"]))))
-        except Exception:
-            pass
-        print(f"[sniper-train] EntryScore: tau={entry_meta['threshold']:.3f} best_iter={entry_meta['best_iteration']}", flush=True)
+        print(f"[sniper-train] EntryScore: best_iter={entry_meta['best_iteration']}", flush=True)
 
         print("[sniper-train] treinando DangerScore...", flush=True)
         danger_model, danger_meta = _train_xgb_classifier(pack.danger, danger_params)
-        print(f"[sniper-train] DangerScore: tau={danger_meta['threshold']:.3f} best_iter={danger_meta['best_iteration']}", flush=True)
-
-        print("[sniper-train] treinando ExitScore...", flush=True)
-        exit_model, exit_meta = _train_xgb_classifier(pack.exit, exit_params)
-        print(f"[sniper-train] ExitScore: tau={exit_meta['threshold']:.3f} best_iter={exit_meta['best_iteration']}", flush=True)
+        print(f"[sniper-train] DangerScore: best_iter={danger_meta['best_iteration']}", flush=True)
 
         period_dir = run_dir / f"period_{int(tail)}d"
         (period_dir / "entry_model").mkdir(parents=True, exist_ok=True)
         _save_model(entry_model, period_dir / "entry_model" / "model_entry.json")
         _save_model(danger_model, period_dir / "danger_model" / "model_danger.json")
-        _save_model(exit_model, period_dir / "exit_model" / "model_exit.json")
 
         meta = {
             "entry": {
                 "feature_cols": pack.entry.feature_cols,
                 "calibration": entry_meta["calibrator"],
-                "threshold": entry_meta["threshold"],
             },
             "danger": {
                 "feature_cols": pack.danger.feature_cols,
                 "calibration": danger_meta["calibrator"],
-                "threshold": danger_meta["threshold"],
-            },
-            "exit": {
-                "feature_cols": pack.exit.feature_cols,
-                "calibration": exit_meta["calibrator"],
-                "threshold": exit_meta["threshold"],
             },
             # Ponto final do treino (auditável): preferimos o valor determinístico vindo do dataflow
             # (cutoff - lookahead). Se não existir, cai no max(ts) do dataset amostrado.
@@ -581,14 +486,11 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                     np.datetime_as_string(
                         np.minimum(
                             np.max(pack.entry.ts) if pack.entry.ts.size else np.datetime64("NaT"),
-                            np.minimum(
-                                np.max(pack.danger.ts) if pack.danger.ts.size else np.datetime64("NaT"),
-                                np.max(pack.exit.ts) if pack.exit.ts.size else np.datetime64("NaT"),
-                            ),
+                            np.max(pack.danger.ts) if pack.danger.ts.size else np.datetime64("NaT"),
                         ),
                         unit="s",
                     )
-                    if (pack.entry.ts.size and pack.danger.ts.size and pack.exit.ts.size)
+                    if (pack.entry.ts.size and pack.danger.ts.size)
                     else None
                 )
             ),

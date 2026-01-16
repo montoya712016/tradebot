@@ -88,7 +88,16 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
 
     print(f"[labels-refresh] cache_dir={cache_dir} fmt={fmt} symbols={len(symbols)} candle_sec={s.candle_sec}", flush=True)
     print(
-        f"[labels-refresh] contract: danger_drop_pct={s.contract.danger_drop_pct} danger_timeout_hours={s.contract.danger_timeout_hours} "
+        "[labels-refresh] contract: "
+        f"entry_min_profit_pct={s.contract.entry_min_profit_pct} "
+        f"entry_horizon_hours={s.contract.entry_horizon_hours} "
+        f"min_hold_minutes={s.contract.min_hold_minutes} "
+        f"sl_pct={s.contract.sl_pct} "
+        f"exit_score_threshold={getattr(s.contract, 'exit_score_threshold', 10.0)} "
+        f"danger_drop_pct={s.contract.danger_drop_pct} "
+        f"danger_drop_pct_critical={getattr(s.contract, 'danger_drop_pct_critical', s.contract.danger_drop_pct)} "
+        f"danger_fast_minutes={getattr(s.contract, 'danger_fast_minutes', 60.0)} "
+        f"danger_timeout_hours={s.contract.danger_timeout_hours} "
         f"danger_recovery_pct={s.contract.danger_recovery_pct}",
         flush=True,
     )
@@ -97,7 +106,33 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
     ok = 0
     fail = 0
     total = len(symbols)
+    last_len = 0
+    last_progress_ts = 0.0
+
+    def _bar(done: int, total: int, width: int = 26) -> str:
+        total = max(1, int(total))
+        done = int(max(0, min(done, total)))
+        n = int(round(width * (done / total)))
+        return ("#" * n) + ("-" * (width - n))
+
+    def _print_progress(current_sym: str) -> None:
+        nonlocal last_len
+        nonlocal last_progress_ts
+        done = ok + fail
+        pct = 100.0 * done / max(1, total)
+        line = f"[labels-refresh] [{_bar(done, total)}] {done:>3}/{total:<3} {pct:5.1f}% | {current_sym}"
+        if sys.stderr.isatty():
+            sys.stderr.write("\r" + line + (" " * max(0, last_len - len(line))))
+            sys.stderr.flush()
+        else:
+            now = time.perf_counter()
+            if now - last_progress_ts >= 5.0:
+                print(line, flush=True)
+                last_progress_ts = now
+        last_len = max(last_len, len(line))
     for i, sym in enumerate(symbols, start=1):
+        if s.verbose:
+            _print_progress(sym)
         data_path, meta_path = _symbol_cache_paths(sym, cache_dir, fmt)
         if not data_path.exists():
             continue
@@ -132,19 +167,23 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
                 meta["danger_drop_pct"] = float(s.contract.danger_drop_pct)
                 meta["danger_timeout_hours"] = float(s.contract.danger_timeout_hours)
                 meta["danger_recovery_pct"] = float(s.contract.danger_recovery_pct)
+                meta["danger_drop_pct_critical"] = float(getattr(s.contract, "danger_drop_pct_critical", s.contract.danger_drop_pct))
+                meta["danger_fast_minutes"] = float(getattr(s.contract, "danger_fast_minutes", 60.0))
                 meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             except Exception:
                 pass
 
             ok += 1
             if s.verbose:
-                rate = float(np.mean(df["sniper_danger_label"].to_numpy(dtype=np.float64))) if "sniper_danger_label" in df.columns else float("nan")
-                print(f"[labels-refresh] {i}/{total} OK {sym} danger_rate={rate:.4f}", flush=True)
+                _print_progress(sym)
         except Exception as e:
             fail += 1
-            print(f"[labels-refresh] {i}/{total} FAIL {sym}: {type(e).__name__}: {e}", flush=True)
+            print(f"[labels-refresh] FAIL {sym}: {type(e).__name__}: {e}", flush=True)
 
     dt = time.perf_counter() - t0
+    if s.verbose:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
     print(f"[labels-refresh] done ok={ok} fail={fail} sec={dt:.2f}", flush=True)
     return {
         "ok": int(ok),

@@ -34,6 +34,10 @@ Este repositorio agora usa apenas `modules/`, organizado pelo fluxo principal:
 - `python modules/realtime/realtime_dashboard_ngrok_monolith.py`
 - `python modules/realtime/run_dashboard.py --demo`
 
+7) WF Monitor
+- `python modules/train/wf_dashboard_ngrok_monolith.py`
+- `python modules/train/run_wf_dashboard.py`
+
 ### Observacoes
 
 - `models_sniper/` fica fora do repo (em `d:\astra\models_sniper`).

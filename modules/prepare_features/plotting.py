@@ -482,9 +482,9 @@ def plot_all(
                 mask = np.isfinite(codes) & (codes != 0)
                 if mask.any():
                     code_map = {
-                        1: ("Profit ok", "tab:blue", 1.05),
-                        -1: ("DD limite", "tab:red", -0.15),
-                        -3: ("Sem lucro", "tab:gray", 0.25),
+                        1: ("Exit score", "tab:blue", 1.05),
+                        -1: ("SL", "tab:red", -0.15),
+                        -3: ("Timeout", "tab:gray", 0.25),
                         -4: ("Muito curto", "tab:purple", 0.75),
                     }
                     for code_val, (label, color, yval) in code_map.items():
@@ -513,7 +513,7 @@ def plot_all(
                     where="mid",
                     color="tab:red",
                     lw=1.0,
-                    label="Danger (queda X% antes de recuperar Y%)",
+                    label="Danger (queda forte em pouco tempo)",
                 )
                 ax.set_ylim(-0.2, 1.2)
                 _safe_legend(ax, loc="upper left")
@@ -527,8 +527,9 @@ def plot_all(
                     va="center",
                     color="gray",
                 )
-            ax.set_title("Sniper — Danger label")
+            ax.set_title("Sniper – Danger label")
             ax.grid()
+
 
 
     try:

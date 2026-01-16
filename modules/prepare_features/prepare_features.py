@@ -96,7 +96,7 @@ FLAGS_LABEL_ONLY["plot_candles"] = False
 
 # Parâmetros padrão (somente MySQL)
 DEFAULT_SYMBOL: str = "ADAUSDT"
-DEFAULT_DAYS: int = 30*12*6
+DEFAULT_DAYS: int = 360
 DEFAULT_REMOVE_TAIL_DAYS: int = 0
 DEFAULT_CANDLE_SEC: int = 60
 DEFAULT_U_THRESHOLD: float = 0.0

@@ -455,6 +455,7 @@ def _collect_exit_snapshots(
     contract: TradeContract,
     candle_sec: int,
     max_exit_starts: int = 8_000,
+    exit_neg_frac: float = 0.35,
     exit_stride_bars: int = 15,
     exit_lookahead_bars: int | None = None,
     exit_margin_pct: float = 0.006,
@@ -475,13 +476,22 @@ def _collect_exit_snapshots(
 
     rng = np.random.default_rng(int(seed) + 17)
     starts_pos = np.flatnonzero(entry_label == 1)
+    starts_neg = np.flatnonzero(entry_label == 0)
     max_exit_starts = int(max_exit_starts)
     if max_exit_starts <= 0:
         max_exit_starts = 1
 
-    # IMPORTANT: Exit deve ser treinado em estados "realistas" (após entradas plausíveis).
-    # Usar starts negativos (entry_label==0) polui o dataset com posições que você não teria aberto.
-    if starts_pos.size == 0:
+    exit_neg_frac = float(max(0.0, min(0.9, exit_neg_frac)))
+    want_pos = int(round(max_exit_starts * (1.0 - exit_neg_frac)))
+    want_neg = max_exit_starts - want_pos
+    want_pos = min(starts_pos.size, max(0, want_pos))
+    want_neg = min(starts_neg.size, max(0, want_neg))
+
+    sel_pos = starts_pos if want_pos >= starts_pos.size else rng.choice(starts_pos, size=int(want_pos), replace=False)
+    sel_neg = starts_neg if want_neg >= starts_neg.size else rng.choice(starts_neg, size=int(want_neg), replace=False)
+    if sel_pos.size or sel_neg.size:
+        start_idx = np.unique(np.concatenate([sel_pos, sel_neg]).astype(np.int64, copy=False))
+    else:
         return dict(
             idx=[],
             num_adds=[],
@@ -495,10 +505,6 @@ def _collect_exit_snapshots(
             risk_if_add_pct=[],
             label_exit=[],
         )
-
-    want_pos = min(starts_pos.size, max_exit_starts)
-    start_idx = starts_pos if want_pos >= starts_pos.size else rng.choice(starts_pos, size=int(want_pos), replace=False)
-    start_idx = np.unique(start_idx.astype(np.int64, copy=False))
 
     if exit_lookahead_bars is None:
         # horizonte curto por padrão (evita ensinar o modelo a sair "cedo demais" olhando muito longe)
@@ -676,6 +682,7 @@ def build_sniper_datasets(
     candle_sec: int | None = None,
     max_add_starts: int = 20_000,
     max_exit_starts: int = 8_000,
+    exit_neg_frac: float = 0.35,
     exit_stride_bars: int = 15,
     exit_lookahead_bars: int | None = None,
     # Margem do exit: em 1m, 0.2% costuma ser pequeno demais e gera label_exit quase morto.
@@ -751,6 +758,7 @@ def build_sniper_datasets(
         contract=contract,
         candle_sec=candle_sec,
         max_exit_starts=int(max_exit_starts),
+        exit_neg_frac=float(exit_neg_frac),
         exit_stride_bars=int(exit_stride_bars),
         exit_lookahead_bars=exit_lookahead_bars,
         exit_margin_pct=float(exit_margin_pct),

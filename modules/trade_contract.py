@@ -22,7 +22,15 @@ class TradeContract:
     min_hold_minutes: float = 30.0
     # Entry label: horizonte de media futura (ex.: 2h) e lucro minimo.
     entry_horizon_hours: float = 2.0
+    # Entry label: lucro "rápido" dentro de uma janela curta após a entrada.
+    entry_fast_minutes: float = 30.0
     entry_min_profit_pct: float = 0.03
+    # Exit score (sem modelo): combina pnl, drawdown, tempo e danger
+    exit_score_threshold: float = 10.0
+    exit_score_w_time: float = 1.0   # score por hora em trade
+    exit_score_w_pnl: float = 1.0    # score por 1% de pnl (pnl_pct)
+    exit_score_w_dd: float = 2.0     # score por 1% de drawdown (dd_pct)
+    exit_score_w_danger: float = 4.0 # score extra quando danger >= tau_danger
     fee_pct_per_side: float = 0.0005
     slippage_pct: float = 0.0005
     max_adds: int = 1
@@ -41,6 +49,9 @@ class TradeContract:
     danger_drop_pct: float = 0.04
     danger_recovery_pct: float = 0.02
     danger_timeout_hours: float = 6.0
+    # Danger "critico": queda forte em pouco tempo (label mais restritivo).
+    danger_fast_minutes: float = 60.0
+    danger_drop_pct_critical: float = 0.06
     # Danger "reset" (pós-fundo): se após uma queda o preço estabilizar, queremos danger=0 mais cedo.
     # A estabilização é detectada por:
     # - recuperação mínima a partir do mínimo local, OU
@@ -68,6 +79,24 @@ class TradeContract:
         hours = float(self.entry_horizon_hours or 0.0)
         bars = int(round((hours * 3600.0) / float(max(1, candle_sec))))
         return max(1, bars)
+
+    def entry_fast_bars(self, candle_sec: int) -> int:
+        mins = float(self.entry_fast_minutes or 0.0)
+        bars = int(round((mins * 60.0) / float(max(1, candle_sec))))
+        return max(1, bars)
+
+    def exit_score(
+        self,
+        *,
+        pnl_pct: float,
+        dd_pct: float,
+        time_hours: float,
+        danger_hit: bool,
+    ) -> float:
+        score = (self.exit_score_w_time * float(time_hours)) + (self.exit_score_w_pnl * float(max(0.0, pnl_pct))) + (self.exit_score_w_dd * float(max(0.0, dd_pct)))
+        if danger_hit:
+            score += float(self.exit_score_w_danger)
+        return float(score)
 
 
 DEFAULT_TRADE_CONTRACT = TradeContract()

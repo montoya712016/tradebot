@@ -44,7 +44,6 @@ from train.sniper_trainer import (  # type: ignore[import]
     train_sniper_models,
     DEFAULT_ENTRY_PARAMS,
     DEFAULT_DANGER_PARAMS,
-    DEFAULT_EXIT_PARAMS,
 )
 
 
@@ -73,24 +72,16 @@ class TrainSniperWFSettings:
     # sizing (use RAM/VRAM)
     max_rows_entry: int = 6_000_000
     max_rows_danger: int = 3_000_000
-    max_rows_exit: int = 3_000_000
     entry_ratio_neg_per_pos: float = 6.0
     danger_ratio_neg_per_pos: float = 4.0
-    exit_ratio_neg_per_pos: float = 2.0
 
     # device
     xgb_device: str = "cuda:0"  # "cpu" se quiser forÃ§ar
 
-    # thresholds (taxa alvo no VAL)
-    entry_target_pred_pos_frac: float = 0.010
-    exit_target_pred_pos_frac: float = 0.020
-    entry_tau_min: float = 0.60
-    entry_tau_max: float = 0.90
-
+    # thresholds são definidos manualmente em config/thresholds.py
     # params xgb
     entry_params: dict = field(default_factory=lambda: dict(DEFAULT_ENTRY_PARAMS))
     danger_params: dict = field(default_factory=lambda: dict(DEFAULT_DANGER_PARAMS))
-    exit_params: dict = field(default_factory=lambda: dict(DEFAULT_EXIT_PARAMS))
 
     def __post_init__(self) -> None:
         # Se o usuÃ¡rio nÃ£o definiu offsets explicitamente, gera automaticamente.
@@ -119,10 +110,8 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
 
     entry_params = dict(settings.entry_params)
     danger_params = dict(settings.danger_params)
-    exit_params = dict(settings.exit_params)
     entry_params["device"] = settings.xgb_device
     danger_params["device"] = settings.xgb_device
-    exit_params["device"] = settings.xgb_device
 
     cfg = TrainConfig(
         total_days=int(settings.total_days),
@@ -131,18 +120,11 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         min_symbols_used_per_period=int(settings.min_symbols_used_per_period),
         entry_params=entry_params,
         danger_params=danger_params,
-        exit_params=exit_params,
         max_rows_entry=int(settings.max_rows_entry),
         max_rows_danger=int(settings.max_rows_danger),
-        max_rows_exit=int(settings.max_rows_exit),
         entry_ratio_neg_per_pos=float(settings.entry_ratio_neg_per_pos),
         danger_ratio_neg_per_pos=float(settings.danger_ratio_neg_per_pos),
-        exit_ratio_neg_per_pos=float(settings.exit_ratio_neg_per_pos),
         use_feature_cache=bool(settings.use_feature_cache),
-        entry_target_pred_pos_frac=float(settings.entry_target_pred_pos_frac),
-        exit_target_pred_pos_frac=float(settings.exit_target_pred_pos_frac),
-        entry_tau_min=float(settings.entry_tau_min),
-        entry_tau_max=float(settings.entry_tau_max),
     )
     run_dir = train_sniper_models(cfg)
     return str(run_dir)

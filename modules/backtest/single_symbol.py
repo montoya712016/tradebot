@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 """
-Backtest single-symbol (3 modelos: Entry + Danger + Exit) usando cache de features.
+Backtest single-symbol (Entry + Danger) usando cache de features.
 
 Regras:
 - parâmetros definidos em código (sem ENV)
 - usa cache parquet/pickle (features+labels) para evitar recalcular features
 - simula walk-forward real (modelo escolhido por train_end_utc no WF)
-- salva plot com: preço + faixas de trades, probs (3 modelos) e equity
+- salva plot com: preço + faixas de trades, probs (entry/danger) e equity
 """
 
 from dataclasses import dataclass
@@ -48,7 +48,7 @@ from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 @dataclass
 class SingleSymbolDemoSettings:
     symbol: str = "ADAUSDT"
-    days: int = 360
+    days: int = 4 * 360
     candle_sec: int = 60
     # Se quiser fixar um WF específico, preencha; senão, pega o wf_* mais recente.
     run_dir: str | None = None
@@ -63,13 +63,9 @@ class SingleSymbolDemoSettings:
     plot_out: str = "out_sniper_single.png"
     # Diagnóstico (prints)
     print_signal_diagnostics: bool = True
-    # Por padrão, usa os thresholds treinados em cada período do WF (meta.json).
-    # Se quiser forçar valores fixos, preencha estes overrides.
-    override_tau_entry: float | None = None
-    override_tau_danger: float | None = None
-    override_tau_exit: float | None = None
-    # Exit sem profit/time (apenas exit_score + regras)
-    exit_on_danger: bool = True
+    # Thresholds são definidos manualmente em config/thresholds.py.
+    override_tau_entry: float | None = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
+    override_tau_danger: float | None = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
 
 
 def _find_latest_wf_dir(run_dir: str | None) -> Path:
@@ -101,13 +97,10 @@ def _plot_result(
     trades,
     p_entry: np.ndarray,
     p_danger: np.ndarray,
-    p_exit: np.ndarray,
     entry_sig: np.ndarray,
     danger_sig: np.ndarray,
-    exit_sig: np.ndarray,
     tau_entry: float,
     tau_danger: float,
-    tau_exit: float,
     title: str,
     out_path: str | None,
 ) -> None:
@@ -146,20 +139,17 @@ def _plot_result(
     # probabilidades + thresholds
     axp.plot(idx, p_entry, color="#1f77b4", alpha=0.9, linewidth=0.9, label="p_entry")
     axp.plot(idx, p_danger, color="#d62728", alpha=0.9, linewidth=0.9, label="p_danger")
-    axp.plot(idx, p_exit, color="#2ca02c", alpha=0.9, linewidth=0.9, label="p_exit")
     axp.axhline(float(tau_entry), color="#1f77b4", linestyle="--", linewidth=0.8, alpha=0.7)
     axp.axhline(float(tau_danger), color="#d62728", linestyle="--", linewidth=0.8, alpha=0.7)
-    axp.axhline(float(tau_exit), color="#2ca02c", linestyle="--", linewidth=0.8, alpha=0.7)
     axp.set_ylabel("Prob")
-    axp.legend(loc="upper left", ncol=3, fontsize=9)
+    axp.legend(loc="upper left", ncol=2, fontsize=9)
     axp.grid(True, alpha=0.25)
 
     axs.step(idx, entry_sig.astype(float), where="mid", color="#1f77b4", lw=0.9, label="entry_ok")
     axs.step(idx, danger_sig.astype(float), where="mid", color="#d62728", lw=0.9, label="danger_block")
-    axs.step(idx, exit_sig.astype(float), where="mid", color="#2ca02c", lw=0.9, label="exit_score")
     axs.set_ylim(-0.1, 1.1)
     axs.set_ylabel("Signals")
-    axs.legend(loc="upper left", ncol=3, fontsize=9)
+    axs.legend(loc="upper left", ncol=2, fontsize=9)
     axs.grid(True, alpha=0.25)
 
     ax1.plot(idx, equity, linewidth=1.2, color="#1f77b4")
@@ -190,7 +180,6 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         periods,
         tau_entry=settings.override_tau_entry,
         tau_danger=settings.override_tau_danger,
-        tau_exit=settings.override_tau_exit,
     )
 
     # garante cache do símbolo e carrega df (features+labels+ohlc)
@@ -220,17 +209,15 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     )
     tau_entry = float(settings.override_tau_entry) if settings.override_tau_entry is not None else float(used.tau_entry)
     tau_danger = float(settings.override_tau_danger) if settings.override_tau_danger is not None else float(used.tau_danger)
-    tau_exit = float(settings.override_tau_exit) if settings.override_tau_exit is not None else float(getattr(used, "tau_exit", 1.0))
 
     # `simulate_sniper_from_scores` recebe um `PeriodModel` em `thresholds`.
     # Se houver override, cria uma cópia do período usado com thresholds alterados.
     thresholds = used
-    if (settings.override_tau_entry is not None) or (settings.override_tau_danger is not None) or (settings.override_tau_exit is not None):
+    if (settings.override_tau_entry is not None) or (settings.override_tau_danger is not None):
         thresholds = replace(
             used,
             tau_entry=float(tau_entry),
             tau_danger=float(tau_danger),
-            tau_exit=float(tau_exit),
             # mantém consistência dos thresholds derivados
             tau_add=float(used.tau_add),
             tau_danger_add=float(used.tau_danger_add),
@@ -239,14 +226,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     if settings.print_signal_diagnostics:
         pe = np.asarray(p_entry, dtype=np.float64)
         pdg = np.asarray(p_danger, dtype=np.float64)
-        pex = np.asarray(p_exit, dtype=np.float64)
-        pe_q = np.nanquantile(pe, [0.5, 0.9, 0.95, 0.99])
-        pd_q = np.nanquantile(pdg, [0.5, 0.9, 0.95, 0.99])
-        px_q = np.nanquantile(pex, [0.5, 0.9, 0.95, 0.99])
-        print(f"[diag] tau_entry={tau_entry:.4f} tau_danger={tau_danger:.4f} tau_exit={tau_exit:.4f}")
-        print(f"[diag] p_entry q50/q90/q95/q99 = {pe_q}")
-        print(f"[diag] p_danger q50/q90/q95/q99 = {pd_q}")
-        print(f"[diag] p_exit q50/q90/q95/q99 = {px_q}")
+        print(f"[diag] tau_entry={tau_entry:.4f} tau_danger={tau_danger:.4f}")
         # Importante: a regra é "entra se p_danger < tau_danger" (tau_danger alto = mais permissivo)
         m_valid = np.isfinite(pe) & np.isfinite(pdg)
         m_entry = m_valid & (pe >= float(tau_entry))
@@ -257,17 +237,14 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     # sinais usados pela estrategia (para plot/diagnostico)
     pe = np.asarray(p_entry, dtype=np.float64)
     pdg = np.asarray(p_danger, dtype=np.float64)
-    pex = np.asarray(p_exit, dtype=np.float64)
     entry_sig = (pe >= float(tau_entry))
     danger_sig = (pdg >= float(tau_danger))
     entry_ok = entry_sig & (~danger_sig)
-    exit_sig = (pex >= float(tau_exit))
 
     res = simulate_sniper_from_scores(
         df,
         p_entry=p_entry,
         p_danger=p_danger,
-        p_exit=p_exit,
         thresholds=thresholds,
         periods=periods,
         period_id=pid,
@@ -276,7 +253,6 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         tp_hard_when_exit=bool(settings.tp_hard_when_exit),
         exit_min_hold_bars=int(settings.exit_min_hold_bars),
         exit_confirm_bars=int(settings.exit_confirm_bars),
-        exit_on_danger=bool(settings.exit_on_danger),
     )
 
     eq_end = float(res.equity_curve[-1]) if len(res.equity_curve) else 1.0
@@ -294,13 +270,10 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             trades=res.trades,
             p_entry=np.asarray(p_entry, dtype=np.float64),
             p_danger=np.asarray(p_danger, dtype=np.float64),
-            p_exit=np.asarray(p_exit, dtype=np.float64),
             entry_sig=np.asarray(entry_ok, dtype=bool),
             danger_sig=np.asarray(danger_sig, dtype=bool),
-            exit_sig=np.asarray(exit_sig, dtype=bool),
             tau_entry=tau_entry,
             tau_danger=tau_danger,
-            tau_exit=tau_exit,
             title=f"{symbol} | days={settings.days} | ret={ret_total:+.2%} | trades={len(res.trades)}",
             out_path=settings.plot_out,
         )

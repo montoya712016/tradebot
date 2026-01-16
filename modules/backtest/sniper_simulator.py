@@ -29,6 +29,7 @@ except Exception:
         from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore[import]
     except Exception:
         from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
+from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 
 
 @dataclass
@@ -86,10 +87,10 @@ def load_sniper_models(
     tau_danger_add_multiplier: float = 0.90,
 ) -> SniperModels:
     """
-    Carrega EntryScore e DangerScore + meta (features, calibração, thresholds).
+    Carrega EntryScore e DangerScore + meta (features, calibração).
 
     tau_add e tau_danger_add são derivados do threshold principal por multiplicadores
-    (você pode sobrescrever depois via config).
+    (thresholds definidos manualmente em config/thresholds.py).
     """
     pd_dir = Path(run_dir) / f"period_{int(period_days)}d"
     meta_path = pd_dir / "meta.json"
@@ -109,9 +110,15 @@ def load_sniper_models(
     entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
     danger_calib = dict(meta["danger"].get("calibration") or {"type": "identity"})
     exit_calib = dict((meta.get("exit") or {}).get("calibration") or {"type": "identity"})
-    tau_entry = float(meta["entry"].get("threshold", 0.5))
-    tau_danger = float(meta["danger"].get("threshold", 0.5))
-    tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
+    tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
+    tau_danger = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
+    tau_exit = DEFAULT_THRESHOLD_OVERRIDES.tau_exit
+    if tau_entry is None:
+        tau_entry = float(meta["entry"].get("threshold", 0.5))
+    if tau_danger is None:
+        tau_danger = float(meta["danger"].get("threshold", 0.5))
+    if tau_exit is None:
+        tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
 
     tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
     tau_danger_add = float(min(0.99, max(0.01, tau_danger * float(tau_danger_add_multiplier))))
@@ -270,12 +277,14 @@ def simulate_sniper_cycle(
     if len(size_sched) < contract.max_adds + 1:
         size_sched = size_sched + (size_sched[-1],) * (contract.max_adds + 1 - len(size_sched))
 
-    # Exit model: confirmação simples (evita sair por 1 spike)
+    # Exit score: confirmation to avoid 1-bar spikes
     exit_min_hold = int(exit_min_hold_bars)
     exit_confirm = int(exit_confirm_bars)
     if exit_confirm <= 0:
         exit_confirm = 1
     exit_streak = 0
+    exit_threshold = float(getattr(contract, "exit_score_threshold", 0.0))
+    time_per_bar_hours = float(candle_sec) / 3600.0
 
     for i in range(n):
         px = close[i]
@@ -329,28 +338,36 @@ def simulate_sniper_cycle(
             eq_curve[i] = eq
             continue
 
-        # exit model (apenas em posição; SL sempre tem prioridade)
-        p_x = 0.0
-        if in_pos and (models.exit_model is not None) and models.exit_feature_cols:
-            x_x = _build_row_vector(df, i, models.exit_feature_cols, cycle_state=cycle_state)
-            p_x = _predict_1row(models.exit_model, x_x)
-            p_x = float(_apply_calibration(np.array([p_x], dtype=np.float64), models.exit_calib)[0])
-
-        if (models.exit_model is not None) and models.exit_feature_cols and (p_x >= float(models.tau_exit)):
-            exit_streak += 1
-        else:
-            exit_streak = 0
-
         # in position: checa exits (ordem conservadora SL -> TP -> EXIT -> timeout)
         hi = high[i] if np.isfinite(high[i]) else px
         lo = low[i] if np.isfinite(low[i]) else px
         reason = None
         exit_px = None
+        # exit score (pnl/dd/tempo/danger)
+        exit_score = 0.0
+        if (exit_threshold > 0.0) and (time_in_trade >= exit_min_hold):
+            pnl_pct = ((px / avg_price) - 1.0) * 100.0 if avg_price > 0.0 else 0.0
+            if pnl_pct < 0.0:
+                pnl_pct = 0.0
+            dd_pct_score = ((avg_price - lo) / avg_price) * 100.0 if (avg_price > 0.0 and lo < avg_price) else 0.0
+            time_hours = float(time_in_trade) * time_per_bar_hours
+            danger_hit = bool(p_d >= models.tau_danger)
+            exit_score = contract.exit_score(
+                pnl_pct=float(pnl_pct),
+                dd_pct=float(dd_pct_score),
+                time_hours=float(time_hours),
+                danger_hit=bool(danger_hit),
+            )
+
+        if (exit_threshold > 0.0) and (time_in_trade >= exit_min_hold) and (exit_score >= exit_threshold):
+            exit_streak += 1
+        else:
+            exit_streak = 0
 
         # TP hard:
         # - se existe ExitScore, por padrão desligamos TP hard (deixa o Exit decidir)
         # - se não existe ExitScore, TP hard fica ligado como antes
-        has_exit = (models.exit_model is not None) and bool(models.exit_feature_cols)
+        has_exit = bool(exit_threshold > 0.0)
         if tp_hard_when_exit is None:
             tp_hard = (not has_exit)
         else:
@@ -362,12 +379,7 @@ def simulate_sniper_cycle(
         elif tp_hard and (hi >= (avg_price * (1.0 + contract.tp_min_pct))):
             reason = "TP"
             exit_px = avg_price * (1.0 + contract.tp_min_pct)
-        elif (
-            (models.exit_model is not None)
-            and (models.exit_feature_cols)
-            and (time_in_trade >= exit_min_hold)
-            and (exit_streak >= exit_confirm)
-        ):
+        elif (has_exit) and (time_in_trade >= exit_min_hold) and (exit_streak >= exit_confirm):
             reason = "EXIT"
             exit_px = px
         elif time_in_trade >= timeout_bars:

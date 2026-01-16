@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% set title = "WF Loop Monitor" %}
+
+{% block content %}
+  <section class="hero">
+    <div>
+      <h1 class="hero-title">WF Random Loop</h1>
+      <p class="hero-sub">
+        Live view of train/backtest cycles, metrics, and equity curves.
+      </p>
+      <div class="hero-actions">
+        <a class="btn ghost" href="/csv" target="_blank" rel="noreferrer">Open CSV</a>
+        <a class="btn" href="/download/csv">Download CSV</a>
+      </div>
+    </div>
+    <div class="hero-meta">
+      <div class="meta-block">
+        <div class="meta-label">Rows loaded</div>
+        <div class="meta-value" id="meta-rows">--</div>
+      </div>
+      <div class="meta-block">
+        <div class="meta-label">Last status</div>
+        <div class="meta-value" id="meta-status">--</div>
+      </div>
+      <div class="meta-block">
+        <div class="meta-label">CSV path</div>
+        <div class="meta-value mono" id="meta-csv">--</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="kpi-grid">
+    <div class="card kpi-card">
+      <div class="kpi-label">Total trains</div>
+      <div class="kpi-value" id="kpi-total-trains">--</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">Total backtests</div>
+      <div class="kpi-value" id="kpi-total-backtests">--</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">OK backtests</div>
+      <div class="kpi-value" id="kpi-ok">--</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">Error backtests</div>
+      <div class="kpi-value" id="kpi-err">--</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">Best return</div>
+      <div class="kpi-value" id="kpi-best-ret">--</div>
+      <div class="kpi-sub mono" id="kpi-best-ret-id">--</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">Best PF</div>
+      <div class="kpi-value" id="kpi-best-pf">--</div>
+      <div class="kpi-sub mono" id="kpi-best-pf-id">--</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">Best win rate</div>
+      <div class="kpi-value" id="kpi-best-win">--</div>
+      <div class="kpi-sub mono" id="kpi-best-win-id">--</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">Lowest DD</div>
+      <div class="kpi-value" id="kpi-best-dd">--</div>
+      <div class="kpi-sub mono" id="kpi-best-dd-id">--</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Recent backtests</h2>
+        <div class="panel-sub muted">Latest rows from random_runs.csv</div>
+      </div>
+      <div class="panel-actions">
+        <span class="pill" id="runs-count">--</span>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="runs-table">
+        <thead>
+          <tr>
+            <th>Train</th>
+            <th>BT</th>
+            <th>Status</th>
+            <th class="right">Ret %</th>
+            <th class="right">DD %</th>
+            <th class="right">PF</th>
+            <th class="right">Win %</th>
+            <th class="right">Trades</th>
+            <th class="right">Tau E</th>
+            <th class="right">Tau D</th>
+          </tr>
+        </thead>
+        <tbody id="runs-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Equity curves</h2>
+        <div class="panel-sub muted">Latest saved PNGs</div>
+      </div>
+      <div class="panel-actions">
+        <span class="pill" id="img-count">--</span>
+      </div>
+    </div>
+    <div class="gallery" id="gallery-grid"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Live logs</h2>
+        <div class="panel-sub muted">Tail of loop + dashboard output</div>
+      </div>
+      <div class="panel-actions">
+        <span class="pill" id="log-count">--</span>
+      </div>
+    </div>
+    <div class="log-grid">
+      <div class="log-card">
+        <div class="log-title">Loop</div>
+        <pre id="log-loop" class="log-box"></pre>
+      </div>
+      <div class="log-card">
+        <div class="log-title">Dashboard</div>
+        <pre id="log-dash" class="log-box"></pre>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    window.__INITIAL_STATE__ = {{ initial_state | tojson }};
+    window.__REFRESH_SEC__ = {{ refresh_sec | tojson }};
+  </script>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='wf_dashboard.js') }}"></script>
+{% endblock %}
