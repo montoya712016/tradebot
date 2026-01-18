@@ -294,13 +294,11 @@ def run_monolith() -> None:
     manager = NgrokManager(cfg)
     manager.start()
 
-    auth_url = _auth_url(cfg)
     msg = (
         "WF dashboard online\n"
-        f"URL: https://{cfg.domain}\n"
-        f"Auth: {cfg.username} / {cfg.password}"
+        f"URL: https://{cfg.domain}"
     )
-    _send_pushover(msg, url=auth_url)
+    _send_pushover(msg, url=f"https://{cfg.domain}")
 
     shutdown_evt = threading.Event()
 

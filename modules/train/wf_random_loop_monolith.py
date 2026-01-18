@@ -49,6 +49,12 @@ def _split_args(arg_str: str) -> list[str]:
     return shlex.split(arg_str, posix=(os.name != "nt"))
 
 
+def _set_env_default(env: dict[str, str], key: str, value: str) -> None:
+    if str(env.get(key, "")).strip():
+        return
+    env[key] = value
+
+
 class ProcRunner:
     def __init__(
         self,
@@ -155,19 +161,34 @@ def main() -> None:
     args = ap.parse_args()
 
     root = _repo_root()
+    run_id = time.strftime("%Y%m%d_%H%M%S")
+    out_root = resolve_generated_path(Path("wf_runs") / run_id)
+    out_root.mkdir(parents=True, exist_ok=True)
     loop_script = (root / "modules" / "train" / "wf_random_loop.py").resolve()
     dash_script = (root / "modules" / "train" / "wf_dashboard_ngrok_monolith.py").resolve()
 
     loop_cmd = [sys.executable, "-u", str(loop_script)] + _split_args(str(args.loop_args))
     dash_cmd = [sys.executable, "-u", str(dash_script)] + _split_args(str(args.dash_args))
 
-    log_root = resolve_generated_path("wf_random_loop")
-    loop_log = Path(os.getenv("WF_LOOP_LOG") or (log_root / "loop.log"))
-    dash_log = Path(os.getenv("WF_DASH_LOG") or (log_root / "dash.log"))
+    loop_log = Path(os.getenv("WF_LOOP_LOG") or (out_root / "loop.log"))
+    dash_log = Path(os.getenv("WF_DASH_LOG") or (out_root / "dash.log"))
 
     loop_env = os.environ.copy()
-    loop_env.setdefault("PF_SYMBOL_WORKERS", "2")
-    loop_env.setdefault("SNIPER_CACHE_WORKERS", "2")
+    _set_env_default(loop_env, "PF_SYMBOL_WORKERS", "2")
+    _set_env_default(loop_env, "SNIPER_CACHE_WORKERS", "2")
+    _set_env_default(loop_env, "WF_REBUILD_CACHE_MODE", "off")
+    _set_env_default(loop_env, "WF_REBUILD_CACHE", "0")
+    _set_env_default(loop_env, "WF_SKIP_REFRESH", "0")
+    _set_env_default(loop_env, "WF_FORCE_REFRESH", "1")
+    _set_env_default(loop_env, "WF_MAX_SYMBOLS_TRAIN", "0")
+    _set_env_default(loop_env, "WF_MAX_SYMBOLS_BACKTEST", "0")
+    _set_env_default(loop_env, "WF_MIN_SYMBOLS_USED_PER_PERIOD", "30")
+    loop_env["WF_OUT_ROOT"] = str(out_root)
+    loop_env["WF_RESULTS_CSV"] = "random_runs.csv"
+    _set_env_default(loop_env, "WF_SKIP_TRAIN", "0")
+    _set_env_default(loop_env, "WF_SKIP_TRAIN_MODE", "always")
+    loop_env["WF_LOOP_LOG"] = str(loop_log)
+    loop_env["WF_DASH_LOG"] = str(dash_log)
     loop_runner = ProcRunner(
         "loop",
         loop_cmd,
@@ -176,7 +197,11 @@ def main() -> None:
         log_path=loop_log,
         env=loop_env,
     )
-    dash_runner = ProcRunner("dash", dash_cmd, root, restart_delay=int(args.restart_delay), log_path=dash_log)
+    dash_env = os.environ.copy()
+    dash_env["WF_DASH_OUT_ROOT"] = str(out_root)
+    dash_env["WF_DASH_RESULTS_CSV"] = "random_runs.csv"
+    dash_env["WF_DASH_LOG"] = str(dash_log)
+    dash_runner = ProcRunner("dash", dash_cmd, root, restart_delay=int(args.restart_delay), log_path=dash_log, env=dash_env)
 
     shutdown_evt = threading.Event()
 

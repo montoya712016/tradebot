@@ -29,12 +29,12 @@ import numpy as np
 import pandas as pd
 
 try:
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
+    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 except Exception:
     try:
-        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore[import]
+        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
     except Exception:
-        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
+        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 
 
 @dataclass
@@ -44,7 +44,7 @@ class PortfolioConfig:
     max_trade_exposure: float = 0.25
     min_trade_exposure: float = 0.02
     rank_mode: str = "p_entry_minus_p_danger"
-    exit_min_hold_bars: int = 3
+    exit_min_hold_bars: int = 0
     exit_confirm_bars: int = 1
 
 
@@ -84,7 +84,7 @@ class SymbolData:
     df: pd.DataFrame  # precisa ter index + close/high/low
     p_entry: np.ndarray
     p_danger: np.ndarray
-    # p_exit unused with exit_score; keep for compatibility.
+    # p_exit unused (mantido por compatibilidade).
     p_exit: np.ndarray
     # thresholds (podem ser overrides globais na simulação)
     tau_entry: float
@@ -92,6 +92,7 @@ class SymbolData:
     tau_add: float
     tau_danger_add: float
     tau_exit: float
+    entry_windows_minutes: tuple[int, ...] | None = None
     # walk-forward: qual período usar em cada timestamp (mesma ordem da lista `periods`)
     period_id: np.ndarray | None = None
     # lista de PeriodModel do wf (para entry/danger on-the-fly)
@@ -134,6 +135,9 @@ def _simulate_one_trade(
     candle_sec: int = 60,
     exit_min_hold_bars: int = 3,
     exit_confirm_bars: int = 1,
+    p_entry_override: float | None = None,
+    tau_entry_override: float | None = None,
+    exit_ema_span_override: int | None = None,
 ) -> CandidateTrade | None:
     df = sd.df
     idx = sd.idx if (sd.idx is not None) else pd.to_datetime(df.index)
@@ -150,9 +154,13 @@ def _simulate_one_trade(
         return None
 
     # valida condição de entrada no candle start_i
-    pe0 = float(sd.p_entry[start_i]) if np.isfinite(sd.p_entry[start_i]) else 0.0
+    if p_entry_override is None:
+        pe0 = float(sd.p_entry[start_i]) if np.isfinite(sd.p_entry[start_i]) else 0.0
+    else:
+        pe0 = float(p_entry_override)
     pd0 = float(sd.p_danger[start_i]) if np.isfinite(sd.p_danger[start_i]) else 1.0
-    if not (pe0 >= float(sd.tau_entry) and pd0 < float(sd.tau_danger)):
+    tau_entry_use = float(sd.tau_entry if tau_entry_override is None else tau_entry_override)
+    if not (pe0 >= float(tau_entry_use) and pd0 < float(sd.tau_danger)):
         return None
 
     entry_i = int(start_i)
@@ -167,13 +175,22 @@ def _simulate_one_trade(
     if len(size_sched) < contract.max_adds + 1:
         size_sched = size_sched + (size_sched[-1],) * (contract.max_adds + 1 - len(size_sched))
 
-    timeout_bars = int(contract.timeout_bars(int(candle_sec)))
-    j_limit = min(n - 1, entry_i + timeout_bars)
+    j_limit = int(n - 1)
+    min_exit_i = entry_i + int(max(0, int(exit_min_hold_bars)))
+    if min_exit_i > j_limit:
+        return None
 
     # percorre até fechar
+    ema_span = int(
+        exit_ema_span_override
+        if exit_ema_span_override is not None
+        else exit_ema_span_from_window(contract, int(candle_sec))
+    )
+    use_ema_exit = ema_span > 0
+    ema_alpha = 2.0 / float(ema_span + 1) if use_ema_exit else 0.0
+    ema_offset = float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
+    ema = float(entry_price) * (1.0 - ema_offset) if use_ema_exit else 0.0
     exit_streak = 0
-    exit_threshold = float(getattr(contract, "exit_score_threshold", 0.0))
-    time_per_bar_hours = float(candle_sec) / 3600.0
     for j in range(entry_i + 1, j_limit + 1):
         px = float(close[j])
         if not np.isfinite(px) or px <= 0.0:
@@ -183,48 +200,17 @@ def _simulate_one_trade(
         time_in_trade = int(j - entry_i)
         pdg = float(sd.p_danger[j]) if np.isfinite(sd.p_danger[j]) else 1.0
 
-        # SL hard
-        if lo <= (avg_price * (1.0 - contract.sl_pct)):
-            exit_px = avg_price * (1.0 - contract.sl_pct)
-            reason = "SL"
-            exit_i = j
-            break
-
-        # TP disabled by default; exit_score decides.
-
-        # Exit score needs confirmation.
-        exit_score = 0.0
-        if (exit_threshold > 0.0) and (time_in_trade >= int(exit_min_hold_bars)):
-            pnl_pct = ((px / avg_price) - 1.0) * 100.0 if avg_price > 0.0 else 0.0
-            if pnl_pct < 0.0:
-                pnl_pct = 0.0
-            dd_pct_score = ((avg_price - lo) / avg_price) * 100.0 if (avg_price > 0.0 and lo < avg_price) else 0.0
-            time_hours = float(time_in_trade) * time_per_bar_hours
-            danger_hit = bool(pdg >= sd.tau_danger)
-            exit_score = contract.exit_score(
-                pnl_pct=float(pnl_pct),
-                dd_pct=float(dd_pct_score),
-                time_hours=float(time_hours),
-                danger_hit=bool(danger_hit),
-            )
-
-        has_exit = bool(exit_threshold > 0.0)
-        if has_exit and (time_in_trade >= int(exit_min_hold_bars)) and (exit_score >= exit_threshold):
-            exit_streak += 1
-        else:
-            exit_streak = 0
-        exit_ok = has_exit and (exit_streak >= int(max(1, exit_confirm_bars))) and (time_in_trade >= int(exit_min_hold_bars))
-        if exit_ok:
-            exit_px = px
-            reason = "EXIT"
-            exit_i = j
-            break
-
-        if time_in_trade >= timeout_bars:
-            exit_px = px
-            reason = "TO"
-            exit_i = j
-            break
+        if use_ema_exit:
+            ema = ema + (ema_alpha * (px - ema))
+            if px < ema:
+                exit_streak += 1
+            else:
+                exit_streak = 0
+            if exit_streak >= int(max(1, exit_confirm_bars)):
+                exit_px = px
+                reason = "EMA"
+                exit_i = j
+                break
 
         # adds (se ainda no ciclo)
         if num_adds < int(contract.max_adds):
@@ -284,7 +270,7 @@ def simulate_portfolio(
     contract = contract or DEFAULT_TRADE_CONTRACT
 
     # heap de próximos candidatos: (ts, -score, symbol, idx)
-    entry_heap: list[tuple[pd.Timestamp, float, str, int]] = []
+    entry_heap: list[tuple[pd.Timestamp, float, str, int, str, float, float, int]] = []
 
     # estado por símbolo: ponteiro do scan
     ptr: Dict[str, int] = {s: 0 for s in symbols.keys()}
@@ -300,7 +286,7 @@ def simulate_portfolio(
         if sd.low is None:
             sd.low = sd.df.get("low", sd.df["close"]).to_numpy(np.float64, copy=False)
 
-    def _next_entry(sym: str) -> tuple[pd.Timestamp, float, int] | None:
+    def _next_entry(sym: str) -> tuple[pd.Timestamp, float, int, str, float, float, int] | None:
         sd = symbols[sym]
         df = sd.df
         idx = sd.idx if (sd.idx is not None) else pd.to_datetime(df.index)
@@ -309,10 +295,15 @@ def simulate_portfolio(
         while i < n:
             pe = float(sd.p_entry[i]) if np.isfinite(sd.p_entry[i]) else 0.0
             pdg = float(sd.p_danger[i]) if np.isfinite(sd.p_danger[i]) else 1.0
+            best_win = None
+            if sd.entry_windows_minutes is not None and len(sd.entry_windows_minutes) > 0:
+                best_win = sd.entry_windows_minutes[0]
+            ema_span = int(max(1, round((float(best_win or 0.0) * 60.0) / float(max(1, candle_sec))))) if best_win else 0
+
             if (pe >= float(sd.tau_entry)) and (pdg < float(sd.tau_danger)):
                 sc = _rank_score(pe, pdg, cfg.rank_mode)
                 ptr[sym] = i
-                return pd.to_datetime(idx[i]), float(sc), int(i)
+                return pd.to_datetime(idx[i]), float(sc), int(i), float(pe), float(sd.tau_entry), int(ema_span)
             i += 1
         ptr[sym] = n
         return None
@@ -321,8 +312,8 @@ def simulate_portfolio(
         nxt = _next_entry(sym)
         if nxt is None:
             continue
-        ts, sc, i = nxt
-        heapq.heappush(entry_heap, (ts, -sc, sym, i))
+        ts, sc, i, pe0, te0, ema_span = nxt
+        heapq.heappush(entry_heap, (ts, -sc, sym, i, pe0, te0, ema_span))
 
     # heap de posições abertas: (exit_ts, symbol, entry_ts, weight, r_net, reason, num_adds)
     open_heap: list[tuple[pd.Timestamp, str, pd.Timestamp, float, float, str, int]] = []
@@ -357,7 +348,7 @@ def simulate_portfolio(
     iter_n = 0
     pevery = int(max(1, int(progress_every)))
     while entry_heap:
-        ts, neg_sc, sym, i = heapq.heappop(entry_heap)
+        ts, neg_sc, sym, i, pe0, te0, ema_span = heapq.heappop(entry_heap)
         t = pd.to_datetime(ts)
         iter_n += 1
         if progress_cb is not None and (iter_n % pevery == 0):
@@ -368,21 +359,21 @@ def simulate_portfolio(
         _close_until(t)
 
         # agrupa todos os candidatos no mesmo timestamp
-        batch = [(ts, neg_sc, sym, i)]
+        batch = [(ts, neg_sc, sym, i, pe0, te0, ema_span)]
         while entry_heap and entry_heap[0][0] == ts:
             batch.append(heapq.heappop(entry_heap))
 
         # ordena por score desc (neg_sc asc)
         batch.sort(key=lambda x: x[1])
 
-        for _ts, _neg_sc, _sym, _i in batch:
+        for _ts, _neg_sc, _sym, _i, _pe0, _te0, _ema_span in batch:
             if _sym in open_set:
                 # já em posição
                 ptr[_sym] = int(_i) + 1
                 nxt = _next_entry(_sym)
                 if nxt is not None:
-                    nts, sc, ni = nxt
-                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni))
+                    nts, sc, ni, pe0, te0, ema_span = nxt
+                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
                 continue
 
             if int(cfg.max_positions) > 0 and len(open_set) >= int(cfg.max_positions):
@@ -390,8 +381,8 @@ def simulate_portfolio(
                 ptr[_sym] = int(_i) + 1
                 nxt = _next_entry(_sym)
                 if nxt is not None:
-                    nts, sc, ni = nxt
-                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni))
+                    nts, sc, ni, pe0, te0, ema_span = nxt
+                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
                 continue
 
             remaining = float(cfg.total_exposure) - float(used_exposure)
@@ -399,8 +390,8 @@ def simulate_portfolio(
                 ptr[_sym] = int(_i) + 1
                 nxt = _next_entry(_sym)
                 if nxt is not None:
-                    nts, sc, ni = nxt
-                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni))
+                    nts, sc, ni, pe0, te0, ema_span = nxt
+                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
                 continue
 
             desired = float(cfg.total_exposure) / float(max(1, len(open_set) + 1))
@@ -409,8 +400,8 @@ def simulate_portfolio(
                 ptr[_sym] = int(_i) + 1
                 nxt = _next_entry(_sym)
                 if nxt is not None:
-                    nts, sc, ni = nxt
-                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni))
+                    nts, sc, ni, pe0, te0, ema_span = nxt
+                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
                 continue
 
             # aceita: simula trade deste símbolo a partir de _i
@@ -422,13 +413,16 @@ def simulate_portfolio(
                 candle_sec=int(candle_sec),
                 exit_min_hold_bars=int(cfg.exit_min_hold_bars),
                 exit_confirm_bars=int(cfg.exit_confirm_bars),
+                p_entry_override=float(_pe0),
+                tau_entry_override=float(_te0),
+                exit_ema_span_override=int(_ema_span),
             )
             if tr is None:
                 ptr[_sym] = int(_i) + 1
                 nxt = _next_entry(_sym)
                 if nxt is not None:
-                    nts, sc, ni = nxt
-                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni))
+                    nts, sc, ni, pe0, te0, ema_span = nxt
+                    heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
                 continue
 
             tr.symbol = str(_sym)
@@ -451,8 +445,8 @@ def simulate_portfolio(
             ptr[_sym] = int(tr.exit_i) + 1
             nxt = _next_entry(_sym)
             if nxt is not None:
-                nts, sc, ni = nxt
-                heapq.heappush(entry_heap, (nts, -sc, _sym, ni))
+                nts, sc, ni, pe0, te0, ema_span = nxt
+                heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
 
     # fecha tudo no final do último evento conhecido
     if open_heap:

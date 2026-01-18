@@ -6,7 +6,7 @@ Backtest WALK-FORWARD (portfolio multi-cripto) com taus base e opcional otimizac
 
 Objetivo:
 - Rodar um backtest por passos (step_days) ao longo de um range de anos
-- Usar os modelos wf_* para Entry/Danger/ExitScore (Exit on-the-fly)
+- Usar os modelos wf_* para Entry/Danger (Exit via EMA)
 - Operar portfÃ³lio (capital compartilhado) com taus base: tau_entry/tau_danger/tau_exit
 - Manter universo baseado em top_market_cap.txt, mas filtrar por "tem barras suficientes no step"
 - Mostrar progresso por passo (percentual do tempo do step processado)
@@ -210,9 +210,18 @@ def _needed_feature_columns(periods) -> list[str]:
     cols: set[str] = {"open", "high", "low", "close", "volume"}
     for pm in periods:
         cols.update([str(c) for c in (pm.entry_cols or [])])
+        for v in (pm.entry_cols_map or {}).values():
+            cols.update([str(c) for c in (v or [])])
         cols.update([str(c) for c in (pm.danger_cols or [])])
         cols.update([str(c) for c in (getattr(pm, "exit_cols", None) or [])])
     return sorted(cols)
+
+
+def _entry_specs_from_contract(contract: TradeContract) -> list[tuple[str, int]]:
+    windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
+    if len(windows) < 1:
+        raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
+    return [("mid", int(windows[0]))]
 
 
 def _downsample_df(df: pd.DataFrame, stride: int) -> pd.DataFrame:
@@ -226,6 +235,7 @@ def _prepare_symbol_frame_for_window(
     df_full: pd.DataFrame,
     *,
     periods,
+    contract: TradeContract,
     t_start: pd.Timestamp,
     t_end: pd.Timestamp,
     bar_stride: int,
@@ -239,15 +249,19 @@ def _prepare_symbol_frame_for_window(
     if df.empty:
         return df
     try:
-        pe, pdg, _pex, _used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+        pe_map, pdg, _pex, _used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
     except RuntimeError:
         return df.iloc[0:0].copy()
     df = df.copy()
-    df["__p_entry"] = np.asarray(pe, dtype=np.float32)
+    for name, w in _entry_specs_from_contract(contract):
+        if name in pe_map:
+            df[f"__p_entry_{int(w)}m"] = np.asarray(pe_map[name], dtype=np.float32)
     df["__p_danger"] = np.asarray(pdg, dtype=np.float32)
     df["__period_id"] = np.asarray(pid, dtype=np.int16)
     # MantÃ©m somente OHLCV + colunas nÃ£o-cycle do Exit + colunas internas
-    keep: set[str] = {"open", "high", "low", "close", "volume", "__p_entry", "__p_danger", "__period_id"}
+    keep: set[str] = {"open", "high", "low", "close", "volume", "__p_danger", "__period_id"}
+    for _, w in _entry_specs_from_contract(contract):
+        keep.add(f"__p_entry_{int(w)}m")
     for pm in periods:
         for c in list(getattr(pm, "exit_cols", None) or []):
             cc = str(c)
@@ -382,7 +396,7 @@ def main() -> None:
     ap.add_argument("--total-exposure", type=float, default=0.75)
     ap.add_argument("--max-trade-exposure", type=float, default=0.10)
     ap.add_argument("--min-trade-exposure", type=float, default=0.03)
-    ap.add_argument("--exit-min-hold-bars", type=int, default=3)
+    ap.add_argument("--exit-min-hold-bars", type=int, default=0)
     ap.add_argument("--exit-confirm-bars", type=int, default=2)
 
     # Universo dinÃ¢mico (walk-forward):
@@ -553,10 +567,11 @@ def main() -> None:
                 pm.entry_model.set_param({"nthread": int(getattr(args, "xgb_threads", 8) or 8), "device": "cpu"})
             except Exception:
                 pass
-            try:
-                pm.danger_model.set_param({"nthread": int(getattr(args, "xgb_threads", 8) or 8), "device": "cpu"})
-            except Exception:
-                pass
+            if pm.danger_model is not None:
+                try:
+                    pm.danger_model.set_param({"nthread": int(getattr(args, "xgb_threads", 8) or 8), "device": "cpu"})
+                except Exception:
+                    pass
             try:
                 em = getattr(pm, "exit_model", None)
                 if em is not None:
@@ -734,6 +749,7 @@ def main() -> None:
                 df_step = _prepare_symbol_frame_for_window(
                     df_full,
                     periods=periods_base,
+                    contract=contract,
                     t_start=ws,
                     t_end=we,
                     bar_stride=int(args.bar_stride),
@@ -790,14 +806,22 @@ def main() -> None:
             continue
 
         # monta SymbolData
+        entry_specs = _entry_specs_from_contract(contract)
         sym_data: dict[str, SymbolData] = {}
         for sym, df in frames.items():
             try:
-                pe = df["__p_entry"].to_numpy(np.float32, copy=False)
                 pdg = df["__p_danger"].to_numpy(np.float32, copy=False)
                 pid = df["__period_id"].to_numpy(np.int16, copy=False)
             except Exception:
                 continue
+            pe = None
+            for _name, w in entry_specs:
+                col = f"__p_entry_{int(w)}m"
+                if col in df.columns:
+                    pe = df[col].to_numpy(np.float32, copy=False)
+                    break
+            if pe is None:
+                pe = pdg * 0.0
             n = int(len(df))
             sym_data[sym] = SymbolData(
                 df=df,
@@ -809,6 +833,7 @@ def main() -> None:
                 tau_add=float(tau_add),
                 tau_danger_add=float(tau_dadd),
                 tau_exit=float(tau_x),
+                entry_windows_minutes=(int(entry_specs[0][1]),) if entry_specs else None,
                 period_id=pid,
                 periods=list(periods_base),
             )
@@ -1202,11 +1227,13 @@ def main() -> None:
                             dfh = dfh[~dfh.index.duplicated(keep="last")]
                         except Exception:
                             continue
-                        need_cols = {"close", "__p_entry", "__p_danger", "__period_id"}
+                        entry_specs = _entry_specs_from_contract(contract)
+                        mid_w = int(entry_specs[0][1])
+                        need_cols = {"close", f"__p_entry_{mid_w}m", "__p_danger", "__period_id"}
                         if not need_cols.issubset(set(dfh.columns)):
                             continue
                         try:
-                            pe = dfh["__p_entry"].to_numpy(np.float32, copy=False)
+                            pe = dfh[f"__p_entry_{mid_w}m"].to_numpy(np.float32, copy=False)
                             pdg = dfh["__p_danger"].to_numpy(np.float32, copy=False)
                             pid = dfh["__period_id"].to_numpy(np.int16, copy=False)
                         except Exception:
@@ -1244,6 +1271,7 @@ def main() -> None:
                                     tau_add=float(ta),
                                     tau_danger_add=float(tda),
                                     tau_exit=float(tau_x),
+                                    entry_windows_minutes=(int(entry_specs[0][1]),) if entry_specs else None,
                                     period_id=pid,
                                     periods=list(periods_base),
                                 )
@@ -1488,9 +1516,9 @@ def main() -> None:
             pass
 
         # stitch contÃ­nuo
-        eq_scaled = (eq_ser / float(eq_ser.iloc[0])) * float(eq_scale)
-        equity_all.append(eq_scaled.rename("equity"))
         eq_end = float(eq_ser.iloc[-1]) if len(eq_ser) else 1.0
+        eq_scaled = eq_ser * float(eq_scale)
+        equity_all.append(eq_scaled.rename("equity"))
         eq_scale *= float(eq_end)
 
         trades = list(getattr(pres, "trades", []) or [])
@@ -1604,14 +1632,14 @@ def main() -> None:
         rows.append(row)
 
         print(
-            f"[wf] step={step_idx+1}/{len(windows)} done: ret={row['ret_pct']:+.1f}% dd={row['max_dd']:.1%} "
+            f"[wf] step={step_idx+1}/{len(windows)} done: ret={row['ret_pct']:+.2f}% dd={row['max_dd']:.1%} "
             f"pf={row['profit_factor']:.2f} win={row['win_rate']:.2f} trades={row['trades']} "
             f"syms_active={row['symbols_active']}/{row['symbols_step']}",
             flush=True,
         )
         if pushover_on:
             _notify(
-                f"WF step {step_idx+1}/{len(windows)}: ret={row['ret_pct']:+.1f}% dd={row['max_dd']:.0%} "
+                f"WF step {step_idx+1}/{len(windows)}: ret={row['ret_pct']:+.2f}% dd={row['max_dd']:.0%} "
                 f"pf={row['profit_factor']:.2f} win={row['win_rate']:.2f} "
                 f"tr={row['trades']} syms_active={row['symbols_active']}/{row['symbols_step']} "
                 f"tau=(E{tau_e:.2f},D{tau_d:.2f},X{tau_x:.2f})"

@@ -37,7 +37,7 @@ def _ensure_modules_on_sys_path() -> None:
 
 _ensure_modules_on_sys_path()
 
-from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward, simulate_sniper_from_scores
+from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward, simulate_sniper_from_scores, select_entry_mid
 from backtest.sniper_walkforward import apply_threshold_overrides
 from dataclasses import replace
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL
@@ -55,8 +55,7 @@ class SingleSymbolDemoSettings:
     # Cache (tamanho total que será carregado/garantido em disco)
     total_days_cache: int = 365 * 5
     # Saída/execução
-    tp_hard_when_exit: bool = False
-    exit_min_hold_bars: int = 3
+    exit_min_hold_bars: int = 0
     exit_confirm_bars: int = 1
     # Plot
     save_plot: bool = True
@@ -66,6 +65,8 @@ class SingleSymbolDemoSettings:
     # Thresholds são definidos manualmente em config/thresholds.py.
     override_tau_entry: float | None = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
     override_tau_danger: float | None = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
+    # Danger desativado por enquanto
+    use_danger_model: bool = False
 
 
 def _find_latest_wf_dir(run_dir: str | None) -> Path:
@@ -103,6 +104,8 @@ def _plot_result(
     tau_danger: float,
     title: str,
     out_path: str | None,
+    use_danger_model: bool,
+    ema_exit: np.ndarray | None = None,
 ) -> None:
     idx = pd.to_datetime(df.index)
     close = df["close"].to_numpy(np.float64, copy=False)
@@ -114,9 +117,12 @@ def _plot_result(
     axs = fig.add_subplot(gs[2, 0], sharex=ax0)
     ax1 = fig.add_subplot(gs[3, 0], sharex=ax0)
 
-    ax0.plot(idx, close, linewidth=1.0, color="black", alpha=0.9)
+    ax0.plot(idx, close, linewidth=1.0, color="black", alpha=0.9, label="close")
+    if ema_exit is not None and len(ema_exit) == len(close):
+        ax0.plot(idx, ema_exit, linewidth=1.0, color="tab:orange", alpha=0.8, label="ema_exit")
     ax0.set_title(title)
     ax0.grid(True, alpha=0.25)
+    ax0.legend(loc="upper left")
 
     # faixas dos trades
     for t in trades:
@@ -138,15 +144,17 @@ def _plot_result(
 
     # probabilidades + thresholds
     axp.plot(idx, p_entry, color="#1f77b4", alpha=0.9, linewidth=0.9, label="p_entry")
-    axp.plot(idx, p_danger, color="#d62728", alpha=0.9, linewidth=0.9, label="p_danger")
+    if use_danger_model:
+        axp.plot(idx, p_danger, color="#d62728", alpha=0.9, linewidth=0.9, label="p_danger")
+        axp.axhline(float(tau_danger), color="#d62728", linestyle="--", linewidth=0.8, alpha=0.7)
     axp.axhline(float(tau_entry), color="#1f77b4", linestyle="--", linewidth=0.8, alpha=0.7)
-    axp.axhline(float(tau_danger), color="#d62728", linestyle="--", linewidth=0.8, alpha=0.7)
     axp.set_ylabel("Prob")
     axp.legend(loc="upper left", ncol=2, fontsize=9)
     axp.grid(True, alpha=0.25)
 
     axs.step(idx, entry_sig.astype(float), where="mid", color="#1f77b4", lw=0.9, label="entry_ok")
-    axs.step(idx, danger_sig.astype(float), where="mid", color="#d62728", lw=0.9, label="danger_block")
+    if use_danger_model:
+        axs.step(idx, danger_sig.astype(float), where="mid", color="#d62728", lw=0.9, label="danger_block")
     axs.set_ylim(-0.1, 1.1)
     axs.set_ylabel("Signals")
     axs.legend(loc="upper left", ncol=2, fontsize=9)
@@ -204,11 +212,13 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         raise RuntimeError(f"Poucos candles para simular: rows={len(df)}")
 
     # scores WF (sem vazamento)
-    p_entry, p_danger, p_exit, used, pid = predict_scores_walkforward(
-        df, periods=periods, return_period_id=True
-    )
+    p_entry_map, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+    p_entry = select_entry_mid(p_entry_map)
     tau_entry = float(settings.override_tau_entry) if settings.override_tau_entry is not None else float(used.tau_entry)
     tau_danger = float(settings.override_tau_danger) if settings.override_tau_danger is not None else float(used.tau_danger)
+    if not bool(settings.use_danger_model):
+        p_danger = np.zeros(len(p_entry), dtype=np.float32)
+        tau_danger = 1.0
 
     # `simulate_sniper_from_scores` recebe um `PeriodModel` em `thresholds`.
     # Se houver override, cria uma cópia do período usado com thresholds alterados.
@@ -223,7 +233,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             tau_danger_add=float(used.tau_danger_add),
         )
 
-    if settings.print_signal_diagnostics:
+    if settings.print_signal_diagnostics and bool(settings.use_danger_model):
         pe = np.asarray(p_entry, dtype=np.float64)
         pdg = np.asarray(p_danger, dtype=np.float64)
         print(f"[diag] tau_entry={tau_entry:.4f} tau_danger={tau_danger:.4f}")
@@ -239,7 +249,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     pdg = np.asarray(p_danger, dtype=np.float64)
     entry_sig = (pe >= float(tau_entry))
     danger_sig = (pdg >= float(tau_danger))
-    entry_ok = entry_sig & (~danger_sig)
+    entry_ok = entry_sig if not bool(settings.use_danger_model) else (entry_sig & (~danger_sig))
 
     res = simulate_sniper_from_scores(
         df,
@@ -250,7 +260,6 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         period_id=pid,
         contract=DEFAULT_TRADE_CONTRACT,
         candle_sec=int(settings.candle_sec),
-        tp_hard_when_exit=bool(settings.tp_hard_when_exit),
         exit_min_hold_bars=int(settings.exit_min_hold_bars),
         exit_confirm_bars=int(settings.exit_confirm_bars),
     )
@@ -262,6 +271,33 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         f"SINGLE sym={symbol} days={settings.days} trades={len(res.trades)} "
         f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={float(res.max_dd):.2%} sec={dt:.2f}"
     )
+
+    ema_exit = np.full(len(df), np.nan, dtype=np.float32)
+    try:
+        from trade_contract import exit_ema_span_from_window
+
+        span = exit_ema_span_from_window(DEFAULT_TRADE_CONTRACT, int(settings.candle_sec))
+        alpha = 2.0 / float(span + 1) if span > 0 else 0.0
+        offset = float(getattr(DEFAULT_TRADE_CONTRACT, "exit_ema_init_offset_pct", 0.0) or 0.0)
+        close = df["close"].to_numpy(np.float64, copy=False)
+        idx = pd.to_datetime(df.index)
+        for t in res.trades:
+            try:
+                entry_ts = pd.to_datetime(t.entry_ts)
+                exit_ts = pd.to_datetime(t.exit_ts)
+                entry_i = int(idx.get_indexer([entry_ts], method="nearest")[0])
+                exit_i = int(idx.get_indexer([exit_ts], method="nearest")[0])
+            except Exception:
+                continue
+            if entry_i < 0 or exit_i < entry_i:
+                continue
+            ema = float(close[entry_i]) * (1.0 - offset)
+            ema_exit[entry_i] = ema
+            for i in range(entry_i + 1, exit_i + 1):
+                ema = ema + (alpha * (float(close[i]) - ema))
+                ema_exit[i] = ema
+    except Exception:
+        ema_exit = None
 
     if settings.save_plot:
         _plot_result(
@@ -276,6 +312,8 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             tau_danger=tau_danger,
             title=f"{symbol} | days={settings.days} | ret={ret_total:+.2%} | trades={len(res.trades)}",
             out_path=settings.plot_out,
+            use_danger_model=bool(settings.use_danger_model),
+            ema_exit=ema_exit,
         )
 
 

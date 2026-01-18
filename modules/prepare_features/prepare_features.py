@@ -33,9 +33,9 @@ except Exception:
     from prepare_features.plotting import plot_all  # type: ignore[import]
 
 try:
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
+    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 except Exception:
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore[import]
+    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
 
 # Conjuntos de features reconhecidos
 FEATURE_KEYS = [
@@ -59,39 +59,39 @@ FLAGS_DEFAULT: Dict[str, bool] = default_flags(label=True)
 
 # Exemplo pronto (compatível com o estilo antigo) — pode importar direto como FLAGS
 FLAGS: Dict[str, bool] = {
-    "shitidx":      True,
-    "atr":          True,
-    "rsi":          True,
-    "slope":        True,
-    "vol":          True,
-    "ci":           True,
-    "cum_logret":   True,
-    "keltner":      True,
-    "cci":          True,
-    "adx":          True,
-    "time_since":   True,
-    "zlog":         True,
-    "slope_reserr": True,
-    "vol_ratio":    True,
-    "regime":       True,
-    "liquidity":    True,
-    "rev_speed":    True,
-    "vol_z":        True,
-    "shadow":       True,
-    "range_ratio":  True,
-    "runs":         True,
-    "hh_hl":        True,
-    "ema_cross":    True,
-    "breakout":     True,
-    "mom_short":    True,
-    "wick_stats":   True,
+    "shitidx":      False,
+    "atr":          False,
+    "rsi":          False,
+    "slope":        False,
+    "vol":          False,
+    "ci":           False,
+    "cum_logret":   False,
+    "keltner":      False,
+    "cci":          False,
+    "adx":          False,
+    "time_since":   False,
+    "zlog":         False,
+    "slope_reserr": False,
+    "vol_ratio":    False,
+    "regime":       False,
+    "liquidity":    False,
+    "rev_speed":    False,
+    "vol_z":        False,
+    "shadow":       False,
+    "range_ratio":  False,
+    "runs":         False,
+    "hh_hl":        False,
+    "ema_cross":    False,
+    "breakout":     False,
+    "mom_short":    False,
+    "wick_stats":   False,
     "label":        True,
     "plot_candles": False,
 }
 
 # Flags para rodar somente labels (sem features).
 FLAGS_LABEL_ONLY: Dict[str, bool] = {k: False for k in FEATURE_KEYS}
-FLAGS_LABEL_ONLY["label"] = True
+FLAGS_LABEL_ONLY["label"] = False
 FLAGS_LABEL_ONLY["plot_candles"] = False
 
 # Parâmetros padrão (somente MySQL)
@@ -166,6 +166,7 @@ def run(
     flags: Dict[str, bool] | None = None,
     plot: bool = True,
     plot_candles: bool = False,
+    plot_path: str | None = None,
     u_threshold: float = 0.0,
     grey_zone: float | None = None,
     show: bool = True,
@@ -256,6 +257,7 @@ def run(
             plot_candles=bool(plot_candles),
             grey_zone=grey_zone,
             show=show,
+            save_path=plot_path,
         )
 
     return df_ohlc
@@ -267,6 +269,7 @@ def run_from_flags_dict(
     *,
     plot_candles: bool | None = None,
     plot: bool = True,
+    plot_path: str | None = None,
     u_threshold: float = 0.0,
     grey_zone: float | None = None,
     show: bool = True,
@@ -288,6 +291,7 @@ def run_from_flags_dict(
         flags=flags,
         plot=plot,
         plot_candles=bool(plot_candles),
+        plot_path=plot_path,
         u_threshold=u_threshold,
         grey_zone=grey_zone,
         show=show,
@@ -327,20 +331,23 @@ if __name__ == "__main__":
             c = DEFAULT_TRADE_CONTRACT
             print(
                 "[prepare_features] contrato(label sniper): "
-                f"tp={float(c.tp_min_pct):.3f} sl={float(c.sl_pct):.3f} timeout_h={float(c.timeout_hours):.1f} "
-                f"dd_limit={float(c.dd_intermediate_limit_pct):.3f} add_spacing={float(c.add_spacing_pct):.3f} "
-                f"danger_drop={float(c.danger_drop_pct):.3f} danger_rec={float(c.danger_recovery_pct):.3f} danger_h={float(c.danger_timeout_hours):.1f}",
+                f"entry_windows={tuple(c.entry_label_windows_minutes)} "
+                f"entry_min_profit={tuple(c.entry_label_min_profit_pcts)} "
+                f"entry_weight_alpha={float(getattr(c, 'entry_label_weight_alpha', 1.0)):.3f} "
+                f"ema_span={int(exit_ema_span_from_window(c, int(getattr(c, 'timeframe_sec', 60) or 60)))} "
+                f"ema_init_offset={float(c.exit_ema_init_offset_pct):.4f}",
                 flush=True,
             )
         except Exception:
             pass
-        label_only = True
+        label_only = False
         df = run_from_flags_dict(
             df_ohlc,
-            FLAGS_LABEL_ONLY if label_only else FLAGS,
+            FLAGS,
             plot=True,
             u_threshold=float(DEFAULT_U_THRESHOLD),
             grey_zone=DEFAULT_GREY_ZONE,
+            show=True,
         )
         try:
             print(f"OK: rows={len(df):,} | cols={len(df.columns):,}".replace(',', '.'), flush=True)

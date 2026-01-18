@@ -50,7 +50,6 @@
       const win = toFloat(row.win_rate);
       const trades = row.trades || "0";
       const tauE = row.tau_entry || "--";
-      const tauD = row.tau_danger || "--";
       const status = (row.status || "").toLowerCase();
 
       const tr = document.createElement("tr");
@@ -70,14 +69,13 @@
         <td class="right">${fmtPct((win || 0) * 100.0)}</td>
         <td class="right">${trades}</td>
         <td class="right">${tauE}</td>
-        <td class="right">${tauD}</td>
       `;
       tbody.appendChild(tr);
     }
 
     if (!rows.length) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td colspan="10" class="muted">No data yet.</td>`;
+      tr.innerHTML = `<td colspan="9" class="muted">No data yet.</td>`;
       tbody.appendChild(tr);
     }
   }

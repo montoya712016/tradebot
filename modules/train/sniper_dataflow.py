@@ -2,7 +2,7 @@
 """
 Dataflow específico do Sniper:
 - calcula features completos via prepare_features
-- gera datasets Entry/Add e Danger usando build_sniper_datasets
+- gera dataset de Entry usando build_sniper_datasets
 - concatena símbolos e entrega arrays prontos para treino
 """
 from __future__ import annotations
@@ -60,6 +60,7 @@ DROP_COLS_EXACT = {
     "gap_after",
     # colunas de suporte
     "ts",
+    "sym_id",
 }
 
 
@@ -75,10 +76,32 @@ def _list_feature_columns(df: pd.DataFrame) -> List[str]:
     return cols
 
 
+def _entry_label_specs(contract: TradeContract) -> list[dict[str, str]]:
+    windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
+    if len(windows) < 1:
+        raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
+    windows = windows[:1]
+    names = ["mid"]
+    specs: list[dict[str, str]] = []
+    for name, w in zip(names, windows):
+        suf = f"{int(w)}m"
+        specs.append(
+            {
+                "name": name,
+                "label_col": f"sniper_entry_label_{suf}",
+                "weight_col": f"sniper_entry_weight_{suf}",
+                "exit_code_col": f"sniper_exit_code_{suf}",
+                "suffix": suf,
+            }
+        )
+    return specs
+
+
 @dataclass
 class SniperBatch:
     X: np.ndarray
     y: np.ndarray
+    w: np.ndarray
     ts: np.ndarray
     sym_id: np.ndarray
     feature_cols: List[str]
@@ -87,6 +110,9 @@ class SniperBatch:
 @dataclass
 class SniperDataPack:
     entry: SniperBatch
+    entry_short: SniperBatch
+    entry_mid: SniperBatch
+    entry_long: SniperBatch
     danger: SniperBatch
     exit: SniperBatch
     contract: TradeContract
@@ -574,7 +600,8 @@ def _prepare_symbol(
     remove_tail_days: int,
     flags: Dict[str, bool],
     contract: TradeContract,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str], List[str], List[str]]:
+    entry_label_name: str | None = None,
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame, dict[str, List[str]], List[str], List[str]]:
     raw = load_ohlc_1m_series(symbol, int(total_days), remove_tail_days=0)
     if raw.empty:
         raise RuntimeError(f"{symbol}: sem dados 1m no intervalo solicitado")
@@ -595,42 +622,41 @@ def _prepare_symbol(
         plot=False,
         trade_contract=contract,
     )
-    # Limita geração de ADD contexts (evita O(N*timeout) em séries enormes)
-    max_add_starts = _env_int("SNIPER_MAX_ADD_STARTS", 20_000)
     seed = _env_int("SNIPER_SEED", 1337)
-    # Snapshots para EXIT model (mais barato que features, mas pode crescer se o stride for pequeno)
-    max_exit_starts = _env_int("SNIPER_MAX_EXIT_STARTS", 8_000)
-    exit_stride_bars = _env_int("SNIPER_EXIT_STRIDE_BARS", 15)
-    exit_lookahead_bars = _env_int("SNIPER_EXIT_LOOKAHEAD_BARS", 0)
-    try:
-        env_exit_margin = os.getenv("SNIPER_EXIT_MARGIN_PCT")
-        if env_exit_margin is None or str(env_exit_margin).strip() == "":
-            exit_margin_pct = _default_exit_margin_pct(contract)
-        else:
-            exit_margin_pct = float(env_exit_margin)
-    except Exception:
-        exit_margin_pct = _default_exit_margin_pct(contract)
-    sniper_ds = build_sniper_datasets(
-        df_pf,
-        contract=contract,
-        max_add_starts=int(max_add_starts),
-        max_exit_starts=int(max_exit_starts),
-        exit_stride_bars=int(exit_stride_bars),
-        exit_lookahead_bars=(int(exit_lookahead_bars) if int(exit_lookahead_bars) > 0 else None),
-        exit_margin_pct=float(exit_margin_pct),
-        seed=int(seed),
-    )
-    entry_df = pd.concat([sniper_ds.entry, sniper_ds.add], axis=0, ignore_index=False)
-    entry_df.sort_index(inplace=True)
-    danger_df = sniper_ds.danger
-    exit_df = sniper_ds.exit
+    entry_specs = _entry_label_specs(contract)
+    if entry_label_name:
+        want = str(entry_label_name).strip().lower()
+        entry_specs = [s for s in entry_specs if str(s.get("name", "")).lower() == want]
+        if not entry_specs:
+            raise ValueError(f"entry_label_name inv\u00e1lido: {entry_label_name}")
+    entry_map: dict[str, pd.DataFrame] = {}
+    feat_cols_entry_map: dict[str, List[str]] = {}
+    danger_df: pd.DataFrame | None = None
+    exit_df: pd.DataFrame | None = None
+    for spec in entry_specs:
+        sniper_ds = build_sniper_datasets(
+            df_pf,
+            contract=contract,
+            entry_label_col=str(spec["label_col"]),
+            exit_code_col=str(spec["exit_code_col"]),
+            seed=int(seed),
+        )
+        entry_df = sniper_ds.entry
+        entry_map[str(spec["name"])] = entry_df
+        feat_cols_entry_map[str(spec["name"])] = _list_feature_columns(entry_df)
+        if danger_df is None:
+            danger_df = sniper_ds.danger
+            exit_df = sniper_ds.exit
 
-    feat_cols_entry = _list_feature_columns(entry_df)
+    if danger_df is None or exit_df is None:
+        danger_df = pd.DataFrame()
+        exit_df = pd.DataFrame()
+
     feat_cols_danger = _list_feature_columns(danger_df)
     feat_cols_exit = _list_feature_columns(exit_df)
     # df_pf é enorme e não é necessário fora desta função -> libera cedo
     del df_pf
-    return entry_df, danger_df, exit_df, feat_cols_entry, feat_cols_danger, feat_cols_exit
+    return entry_map, danger_df, exit_df, feat_cols_entry_map, feat_cols_danger, feat_cols_exit
 
 
 def _stack_batches(
@@ -670,170 +696,197 @@ def prepare_sniper_dataset(
     total_days: int,
     remove_tail_days: int,
     contract: TradeContract | None = None,
+    entry_label_name: str | None = None,
     # controle de tamanho (VRAM / tempo)
     entry_ratio_neg_per_pos: float = 6.0,
-    danger_ratio_neg_per_pos: float = 4.0,
-    exit_ratio_neg_per_pos: float = 4.0,
     max_rows_entry: int = 600_000,
-    max_rows_danger: int = 600_000,
-    max_rows_exit: int = 600_000,
-    # regressões (lucro/tempo)
     seed: int = 42,
 ) -> SniperDataPack:
     contract = contract or DEFAULT_TRADE_CONTRACT
-    # Warmup do Numba (evita aparência de travamento na 1a compilação do kernel de ADD)
-    try:
-        warmup_sniper_dataset_numba()
-    except Exception:
-        pass
-    entry_frames: List[pd.DataFrame] = []
-    danger_frames: List[pd.DataFrame] = []
-    exit_frames: List[pd.DataFrame] = []
-    feat_cols_entry: List[str] | None = None
-    feat_cols_danger: List[str] | None = None
-    feat_cols_exit: List[str] | None = None
-    sym_ids_entry: List[np.ndarray] = []
-    sym_ids_danger: List[np.ndarray] = []
-    sym_ids_exit: List[np.ndarray] = []
-    ts_entry_parts: List[np.ndarray] = []
-    ts_danger_parts: List[np.ndarray] = []
-    ts_exit_parts: List[np.ndarray] = []
-    X_entry_parts: List[np.ndarray] = []
-    X_danger_parts: List[np.ndarray] = []
-    X_exit_parts: List[np.ndarray] = []
-    y_entry_parts: List[np.ndarray] = []
-    y_danger_parts: List[np.ndarray] = []
-    y_exit_parts: List[np.ndarray] = []
+    symbols = list(symbols)
+    if not symbols:
+        raise RuntimeError("symbols vazio")
 
     rng = np.random.default_rng(int(seed) + int(remove_tail_days))
+    # cap por simbolo: proporcional ao tamanho total para reduzir custo
+    per_sym = int(max_rows_entry // max(1, len(symbols))) if max_rows_entry > 0 else 0
+    symbol_cap = max(20_000, min(100_000, per_sym if per_sym > 0 else 100_000))
+    entry_specs = _entry_label_specs(contract)
+    if entry_label_name:
+        want = str(entry_label_name).strip().lower()
+        entry_specs = [s for s in entry_specs if str(s.get("name", "")).lower() == want]
+        if not entry_specs:
+            raise ValueError(f"entry_label_name invalido: {entry_label_name}")
+    entry_pool_map: dict[str, pd.DataFrame] = {str(s["name"]): pd.DataFrame() for s in entry_specs}
+    entry_buf_map: dict[str, list[pd.DataFrame]] = {str(s["name"]): [] for s in entry_specs}
+    feat_cols_entry_map: dict[str, List[str]] = {}
+    symbols_used: List[str] = []
+    symbols_skipped: List[str] = []
+    total_syms = len(symbols)
 
-    def _sample_df(df_in: pd.DataFrame, label_col: str, ratio_neg_per_pos: float, max_rows: int) -> pd.DataFrame:
+    def _fmt_eta(seconds: float) -> str:
+        if seconds < 0:
+            seconds = 0.0
+        m, s = divmod(int(seconds + 0.5), 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h:d}h{m:02d}m"
+        if m:
+            return f"{m:d}m{s:02d}s"
+        return f"{s:d}s"
+
+    start_time = time.time()
+
+    last_len = 0
+
+    def _print_progress(
+        i: int,
+        sym: str,
+        *,
+        pos_n: int | None = None,
+        neg_n: int | None = None,
+        pos_total: int | None = None,
+        neg_total: int | None = None,
+    ) -> None:
+        nonlocal last_len
+        w = 24
+        done = min(max(int(round(w * (i / total_syms))), 0), w)
+        bar = "#" * done + "-" * (w - done)
+        elapsed = max(time.time() - start_time, 0.0)
+        eta_sec = ((elapsed / i) * (total_syms - i)) if i > 0 else 0.0
+        eta = _fmt_eta(eta_sec)
+        if pos_n is None or neg_n is None:
+            counts = "p- n-"
+        else:
+            counts = f"p{pos_n} n{neg_n}"
+        if pos_total is None or neg_total is None:
+            totals = "pt- nt-"
+        else:
+            totals = f"pt{pos_total} nt{neg_total}"
+        line = f"[sniper-ds] [{bar}] {i}/{total_syms} | {sym} | eta {eta} | {counts} | {totals}"
+        if len(line) < last_len:
+            line = line + (" " * (last_len - len(line)))
+        last_len = max(last_len, len(line))
+        print(line, end="\r", flush=True)
+
+    def _sample_df(
+        df_in: pd.DataFrame,
+        label_col: str,
+        ratio_neg_per_pos: float,
+        max_rows: int,
+        weight_col: str | None = None,
+    ) -> pd.DataFrame:
         if df_in.empty or label_col not in df_in.columns:
             return df_in
         y = df_in[label_col].to_numpy()
         pos_idx = np.flatnonzero(y >= 0.5)
         neg_idx = np.flatnonzero(y < 0.5)
         max_rows = int(max_rows)
-        if max_rows <= 0:
+        if max_rows <= 0 or (pos_idx.size + neg_idx.size) <= max_rows:
             return df_in
-
-        # Estratégia robusta:
-        # - tenta aproximar a proporção neg:pos (ratio_neg_per_pos) dentro de max_rows
-        # - se pos for muito maior que max_rows, também faz downsample de positivos
         if pos_idx.size == 0:
             keep = neg_idx
             if keep.size > max_rows:
                 keep = rng.choice(keep, size=max_rows, replace=False)
             return df_in.iloc[np.sort(keep)].copy()
-
-        # alvo de positivos para caber no orçamento total (ex.: ratio=6 => ~1/7 do total)
         denom = 1.0 + float(max(0.0, ratio_neg_per_pos))
         pos_target = int(max(1, round(max_rows / denom)))
         pos_keep_n = int(min(pos_idx.size, pos_target))
+        # sampling sempre pelo label para evitar viés por pesos
+        vals = y.astype(np.float32, copy=False)
 
-        if pos_idx.size > pos_keep_n:
-            pos_keep = rng.choice(pos_idx, size=pos_keep_n, replace=False)
-        else:
-            pos_keep = pos_idx
+        def _sample_by_bins(idx: np.ndarray, v: np.ndarray, target: int) -> np.ndarray:
+            if target <= 0 or idx.size == 0:
+                return np.array([], dtype=idx.dtype)
+            if idx.size <= target:
+                return idx
+            vv = v.astype(np.float32, copy=False)
+            mask = np.isfinite(vv)
+            if not bool(np.any(mask)):
+                return rng.choice(idx, size=target, replace=False)
+            idx = idx[mask]
+            vv = vv[mask]
+            if idx.size <= target:
+                return idx
+            vmin = float(np.min(vv))
+            vmax = float(np.max(vv))
+            if vmin == vmax:
+                return rng.choice(idx, size=target, replace=False)
+            n_bins = 12
+            edges = np.linspace(vmin, vmax, n_bins + 1, dtype=np.float32)
+            bin_ids = np.digitize(vv, edges, right=False) - 1
+            bin_ids = np.clip(bin_ids, 0, n_bins - 1)
+            keep = []
+            extreme_bins = {0, n_bins - 1}
+            for b in extreme_bins:
+                b_idx = idx[bin_ids == b]
+                if b_idx.size:
+                    keep.append(b_idx)
+            keep_idx = np.concatenate(keep) if keep else np.array([], dtype=idx.dtype)
+            if keep_idx.size >= target:
+                return rng.choice(keep_idx, size=target, replace=False)
+            remaining = int(target - keep_idx.size)
+            mid_bins = [b for b in range(1, n_bins - 1)]
+            counts = np.array([int(np.sum(bin_ids == b)) for b in mid_bins], dtype=np.int64)
+            total_mid = int(np.sum(counts))
+            if total_mid <= 0:
+                return keep_idx
+            alloc = np.floor(remaining * (counts / total_mid)).astype(np.int64)
+            while int(np.sum(alloc)) < remaining:
+                b = int(np.argmax(counts - alloc))
+                alloc[b] += 1
+            while int(np.sum(alloc)) > remaining:
+                b = int(np.argmax(alloc))
+                if alloc[b] <= 0:
+                    break
+                alloc[b] -= 1
+            mid_keep = []
+            for b, take in zip(mid_bins, alloc):
+                if take <= 0:
+                    continue
+                b_idx = idx[bin_ids == b]
+                if b_idx.size <= take:
+                    mid_keep.append(b_idx)
+                else:
+                    mid_keep.append(rng.choice(b_idx, size=int(take), replace=False))
+            if mid_keep:
+                keep_idx = np.concatenate([keep_idx] + mid_keep)
+            return keep_idx
 
+        pos_keep = _sample_by_bins(pos_idx, vals[pos_idx], pos_keep_n)
         remain = int(max_rows - pos_keep.size)
         if remain <= 0:
             return df_in.iloc[np.sort(pos_keep)].copy()
-
-        # tenta preencher o resto com negativos (até remain)
         neg_target = int(min(neg_idx.size, remain))
         if neg_target > 0:
-            if neg_idx.size > neg_target:
-                neg_keep = rng.choice(neg_idx, size=neg_target, replace=False)
-            else:
-                neg_keep = neg_idx
+            neg_keep = _sample_by_bins(neg_idx, vals[neg_idx], neg_target)
             keep = np.unique(np.concatenate([pos_keep, neg_keep]))
         else:
             keep = pos_keep
-
-        # se ainda sobrar espaço (poucos negativos), completa com mais positivos
-        if keep.size < max_rows and pos_idx.size > keep.size:
-            extra = int(min(max_rows - keep.size, pos_idx.size - pos_keep.size))
-            if extra > 0:
-                remaining_pos = np.setdiff1d(pos_idx, pos_keep, assume_unique=False)
-                if remaining_pos.size > extra:
-                    extra_pos = rng.choice(remaining_pos, size=extra, replace=False)
-                else:
-                    extra_pos = remaining_pos
-                keep = np.unique(np.concatenate([keep, extra_pos]))
-
         if keep.size > max_rows:
             keep = rng.choice(keep, size=max_rows, replace=False)
         return df_in.iloc[np.sort(keep)].copy()
 
-    def _sample_arrays(
-        X: np.ndarray,
-        y: np.ndarray,
-        ts: np.ndarray,
-        sym: np.ndarray,
-        *,
-        ratio_neg_per_pos: float,
-        max_rows: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        if X.size == 0 or y.size == 0:
-            return X, y, ts, sym
-        n = int(y.shape[0])
-        if max_rows <= 0 or n <= max_rows:
-            return X, y, ts, sym
-        pos = np.flatnonzero(y >= 0.5)
-        neg = np.flatnonzero(y < 0.5)
-        max_rows = int(max_rows)
-
-        if pos.size == 0:
-            keep = neg
-            if keep.size > max_rows:
-                keep = rng.choice(keep, size=max_rows, replace=False)
-            keep = np.sort(keep)
-            return X[keep], y[keep], ts[keep], sym[keep]
-
-        denom = 1.0 + float(max(0.0, ratio_neg_per_pos))
-        pos_target = int(max(1, round(max_rows / denom)))
-        pos_keep_n = int(min(pos.size, pos_target))
-        pos_keep = rng.choice(pos, size=pos_keep_n, replace=False) if pos.size > pos_keep_n else pos
-
-        remain = int(max_rows - pos_keep.size)
-        if remain <= 0:
-            keep = np.sort(pos_keep)
-            return X[keep], y[keep], ts[keep], sym[keep]
-
-        neg_keep_n = int(min(neg.size, remain))
-        if neg_keep_n > 0:
-            neg_keep = rng.choice(neg, size=neg_keep_n, replace=False) if neg.size > neg_keep_n else neg
-            keep = np.unique(np.concatenate([pos_keep, neg_keep]))
-        else:
-            keep = pos_keep
-
-        # completa com mais positivos se faltar (poucos negativos)
-        if keep.size < max_rows and pos.size > pos_keep.size:
-            extra = int(min(max_rows - keep.size, pos.size - pos_keep.size))
-            if extra > 0:
-                remaining_pos = np.setdiff1d(pos, pos_keep, assume_unique=False)
-                extra_pos = rng.choice(remaining_pos, size=extra, replace=False) if remaining_pos.size > extra else remaining_pos
-                keep = np.unique(np.concatenate([keep, extra_pos]))
-
-        if keep.size > max_rows:
-            keep = rng.choice(keep, size=max_rows, replace=False)
-
-        keep = np.sort(keep)
-        return X[keep], y[keep], ts[keep], sym[keep]
-
-    symbols = list(symbols)
-    if not symbols:
-        raise RuntimeError("symbols vazio")
-
-    def _to_numpy(df: pd.DataFrame, feats: List[str], label_col: str, sym_idx: int):
-        # IMPORTANTE: df pode ter index duplicado (especialmente em ADD contexts).
-        # Então NÃO use df.loc[idx] (pode duplicar linhas). Use máscara posicional.
+    def _to_numpy(
+        df: pd.DataFrame,
+        feats: List[str],
+        label_col: str,
+        weight_col: str | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if df.empty:
+            return (
+                np.empty((0, len(feats)), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype="datetime64[ns]"),
+                np.empty((0,), dtype=np.int32),
+            )
         mat = df.reindex(columns=feats).replace([np.inf, -np.inf], np.nan)
         mask = mat.notnull().all(axis=1).to_numpy(dtype=bool, copy=False)
         if mask.size == 0 or (not bool(np.any(mask))):
             return (
                 np.empty((0, len(feats)), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
                 np.empty((0,), dtype=np.float32),
                 np.empty((0,), dtype="datetime64[ns]"),
                 np.empty((0,), dtype=np.int32),
@@ -841,168 +894,199 @@ def prepare_sniper_dataset(
         mat2 = mat.to_numpy(np.float32, copy=True)
         X = mat2[mask]
         y = df[label_col].to_numpy(dtype=np.float32, copy=False)[mask]
-        ts = df.index.to_numpy(dtype="datetime64[ns]")[mask]
-        sym_arr = np.full(int(ts.shape[0]), sym_idx, dtype=np.int32)
-        return X, y, ts, sym_arr
-
-    # 1) primeiro símbolo sequencial para fixar feature_cols
-    entry_df0, danger_df0, exit_df0, feat_entry0, feat_danger0, feat_exit0 = _prepare_symbol(
-        symbols[0],
-        total_days=total_days,
-        remove_tail_days=remove_tail_days,
-        flags=GLOBAL_FLAGS_FULL,
-        contract=contract,
-    )
-    # IMPORTANTE: sampling é GLOBAL (por período), então aqui limitamos por símbolo só para evitar RAM explodir
-    per_sym_entry_max = int(min(int(max_rows_entry), max(50_000, (int(max_rows_entry) // max(1, len(symbols))) * 2)))
-    per_sym_danger_max = int(min(int(max_rows_danger), max(50_000, (int(max_rows_danger) // max(1, len(symbols))) * 2)))
-    per_sym_exit_max = int(min(int(max_rows_exit), max(50_000, (int(max_rows_exit) // max(1, len(symbols))) * 2)))
-    entry_df0 = _sample_df(entry_df0, "label_entry", entry_ratio_neg_per_pos, per_sym_entry_max)
-    danger_df0 = _sample_df(danger_df0, "label_danger", danger_ratio_neg_per_pos, per_sym_danger_max)
-    exit_df0 = _sample_df(exit_df0, "label_exit", exit_ratio_neg_per_pos, per_sym_exit_max)
-    feat_cols_entry = list(feat_entry0)
-    feat_cols_danger = list(feat_danger0)
-    feat_cols_exit = list(feat_exit0)
-
-    Xe, ye, tse, syme = _to_numpy(entry_df0, feat_cols_entry, "label_entry", 0)
-    Xd, yd, tsd, symd = _to_numpy(danger_df0, feat_cols_danger, "label_danger", 0)
-    Xx, yx, tsx, symx = _to_numpy(exit_df0, feat_cols_exit, "label_exit", 0)
-    X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme)
-    X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd)
-    X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx)
-
-    # 2) demais símbolos em paralelo (threads) — usa 32 threads da CPU sem cópia entre processos
-    use_parallel = _env_bool("PF_SYMBOL_PARALLEL", default=True)
-    # default conservador em RAM (cada símbolo pode ter milhões de linhas)
-    max_workers = _env_int("PF_SYMBOL_WORKERS", min(4, int(os.cpu_count() or 4)))
-
-    def _worker(sym_idx: int, symbol: str):
-        entry_df, danger_df, exit_df, _feat_entry, _feat_danger, _feat_exit = _prepare_symbol(
-            symbol,
-            total_days=total_days,
-            remove_tail_days=remove_tail_days,
-            flags=GLOBAL_FLAGS_FULL,
-            contract=contract,
-        )
-        entry_df = _sample_df(entry_df, "label_entry", entry_ratio_neg_per_pos, per_sym_entry_max)
-        danger_df = _sample_df(danger_df, "label_danger", danger_ratio_neg_per_pos, per_sym_danger_max)
-        exit_df = _sample_df(exit_df, "label_exit", exit_ratio_neg_per_pos, per_sym_exit_max)
-        Xe, ye, tse, syme = _to_numpy(entry_df, feat_cols_entry, "label_entry", sym_idx)
-        Xd, yd, tsd, symd = _to_numpy(danger_df, feat_cols_danger, "label_danger", sym_idx)
-        Xx, yx, tsx, symx = _to_numpy(exit_df, feat_cols_exit, "label_exit", sym_idx)
-        # ajuda a liberar RAM entre threads
-        del entry_df, danger_df, exit_df
-        gc.collect()
-        return Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx
-
-    rest = list(enumerate(symbols[1:], start=1))
-    if rest:
-        if use_parallel and max_workers > 1:
-            with ThreadPoolExecutor(max_workers=min(max_workers, len(rest))) as ex:
-                futs = {ex.submit(_worker, si, sym): (si, sym) for (si, sym) in rest}
-                for fut in as_completed(futs):
-                    try:
-                        Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx = fut.result()
-                    except Exception as e:
-                        _si, _sym = futs.get(fut, (-1, "?"))
-                        continue
-                    X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme)
-                    X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd)
-                    X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx)
+        if weight_col and weight_col in df.columns:
+            w = df[weight_col].to_numpy(dtype=np.float32, copy=False)[mask]
         else:
-            for si, sym in rest:
-                try:
-                    Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx = _worker(si, sym)
-                except Exception as e:
+            w = np.ones(int(y.shape[0]), dtype=np.float32)
+        ts = df.index.to_numpy(dtype="datetime64[ns]")[mask]
+        if "sym_id" in df.columns:
+            sym_arr = df["sym_id"].to_numpy(dtype=np.int32, copy=False)[mask]
+        else:
+            sym_arr = np.zeros(int(ts.shape[0]), dtype=np.int32)
+        return X, y, w, ts, sym_arr
+
+    preferred_name = "mid" if any(str(s["name"]) == "mid" for s in entry_specs) else str(entry_specs[0]["name"])
+
+    total_pos = 0
+    total_neg = 0
+    batch_flush_n = 8
+    for sym_idx, symbol in enumerate(symbols):
+        df_pf = None
+        pos_n = None
+        neg_n = None
+        fallback_pos = None
+        fallback_neg = None
+        try:
+            raw = load_ohlc_1m_series(symbol, int(total_days), remove_tail_days=0)
+            if raw.empty:
+                raise RuntimeError(f"{symbol}: sem dados 1m no intervalo solicitado")
+            df_all = to_ohlc_from_1m(raw, 60)
+            if remove_tail_days > 0:
+                cutoff = df_all.index[-1] - pd.Timedelta(days=int(remove_tail_days))
+                df_all = df_all[df_all.index < cutoff]
+            if df_all.empty or int(len(df_all)) < 500:
+                raise RuntimeError(f"{symbol}: sem OHLC suficiente apos corte (rows={len(df_all)})")
+            if df_all[["open", "high", "low", "close"]].isna().all(axis=None):
+                raise RuntimeError(f"{symbol}: OHLC invalido (todos NaN) apos corte")
+
+            df_all = _try_downcast_df(df_all)
+            df_pf = pf_run(
+                df_all,
+                flags=GLOBAL_FLAGS_FULL,
+                plot=False,
+                trade_contract=contract,
+            )
+            for spec in entry_specs:
+                name = str(spec["name"])
+                weight_col = str(spec.get("weight_col") or "")
+                sniper_ds = build_sniper_datasets(
+                    df_pf,
+                    contract=contract,
+                    entry_label_col=str(spec["label_col"]),
+                    exit_code_col=str(spec["exit_code_col"]),
+                    seed=int(seed),
+                )
+                entry_df = sniper_ds.entry
+                if entry_df.empty:
                     continue
-                X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme)
-                X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd)
-                X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx)
+                entry_df = _try_downcast_df(entry_df)
+                entry_df["sym_id"] = int(sym_idx)
+                feat_cols = feat_cols_entry_map.get(name)
+                if not feat_cols:
+                    feat_cols = _list_feature_columns(entry_df)
+                    feat_cols_entry_map[name] = list(feat_cols)
+                cols_keep = list(feat_cols) + ["label_entry", "sym_id"]
+                if weight_col and weight_col in entry_df.columns:
+                    cols_keep.append(weight_col)
+                entry_df = entry_df.reindex(columns=cols_keep)
+                entry_df = _sample_df(
+                    entry_df,
+                    "label_entry",
+                    float(entry_ratio_neg_per_pos),
+                    int(symbol_cap),
+                    weight_col=weight_col,
+                )
+                if not entry_df.empty and "label_entry" in entry_df.columns:
+                    y = entry_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                    if name == preferred_name:
+                        pos_n = int(np.sum(y >= 0.5))
+                        neg_n = int(np.sum(y < 0.5))
+                    if fallback_pos is None:
+                        fallback_pos = int(np.sum(y >= 0.5))
+                        fallback_neg = int(np.sum(y < 0.5))
+                buf = entry_buf_map.get(name)
+                if buf is not None:
+                    buf.append(entry_df)
+                    if len(buf) >= batch_flush_n:
+                        pool_df = entry_pool_map.get(name)
+                        combined = pd.concat(([pool_df] if pool_df is not None and not pool_df.empty else []) + buf, axis=0, ignore_index=False)
+                        pool_df = _sample_df(
+                            combined,
+                            "label_entry",
+                            float(entry_ratio_neg_per_pos),
+                            int(max_rows_entry),
+                            weight_col=weight_col,
+                        )
+                        entry_pool_map[name] = pool_df
+                        buf.clear()
+                        del combined
+            symbols_used.append(symbol)
+        except Exception:
+            symbols_skipped.append(symbol)
+            continue
+        finally:
+            try:
+                del df_pf
+            except Exception:
+                pass
+        if pos_n is None and fallback_pos is not None:
+            pos_n, neg_n = fallback_pos, (fallback_neg if fallback_neg is not None else 0)
+        if pos_n is None or neg_n is None:
+            pos_n, neg_n = 0, 0
+        total_pos += int(pos_n)
+        total_neg += int(neg_n)
+        _print_progress(
+            sym_idx + 1,
+            symbol,
+            pos_n=pos_n,
+            neg_n=neg_n,
+            pos_total=total_pos,
+            neg_total=total_neg,
+        )
+        if (sym_idx + 1) % 10 == 0:
+            gc.collect()
+    print("", flush=True)
+    # flush remaining buffers
+    for name, buf in entry_buf_map.items():
+        if not buf:
+            continue
+        weight_col = ""
+        for spec in entry_specs:
+            if str(spec.get("name")) == name:
+                weight_col = str(spec.get("weight_col") or "")
+                break
+        pool_df = entry_pool_map.get(name)
+        combined = pd.concat(([pool_df] if pool_df is not None and not pool_df.empty else []) + buf, axis=0, ignore_index=False)
+        pool_df = _sample_df(
+            combined,
+            "label_entry",
+            float(entry_ratio_neg_per_pos),
+            int(max_rows_entry),
+            weight_col=weight_col,
+        )
+        entry_pool_map[name] = pool_df
+        buf.clear()
+        del combined
 
-    def _combine(parts: List[np.ndarray], axis=0):
-        if not parts:
-            return np.empty((0,), dtype=np.float32)
-        if axis == 0:
-            return np.concatenate(parts)
-        return np.vstack(parts)
+    entry_batches: dict[str, SniperBatch] = {}
+    for spec in entry_specs:
+        name = str(spec["name"])
+        entry_df = entry_pool_map.get(name, pd.DataFrame())
+        if not entry_df.empty:
+            entry_df.sort_index(inplace=True)
+        feat_cols = feat_cols_entry_map.get(name, []) if not entry_df.empty else []
+        weight_col = str(spec.get("weight_col") or "")
+        Xe, ye, we, tse, syme = _to_numpy(entry_df, list(feat_cols), "label_entry", weight_col=weight_col)
+        entry_batches[name] = SniperBatch(X=Xe, y=ye, w=we, ts=tse, sym_id=syme, feature_cols=list(feat_cols))
 
-    X_entry = np.vstack(X_entry_parts) if X_entry_parts else np.empty((0, len(feat_cols_entry or [])), dtype=np.float32)
-    y_entry = _combine(y_entry_parts)
-    ts_entry = _combine(ts_entry_parts)
-    sym_entry = _combine(sym_ids_entry)
-
-    X_danger = np.vstack(X_danger_parts) if X_danger_parts else np.empty((0, len(feat_cols_danger or [])), dtype=np.float32)
-    y_danger = _combine(y_danger_parts)
-    ts_danger = _combine(ts_danger_parts)
-    sym_danger = _combine(sym_ids_danger)
-
-    X_exit = np.vstack(X_exit_parts) if X_exit_parts else np.empty((0, len(feat_cols_exit or [])), dtype=np.float32)
-    y_exit = _combine(y_exit_parts)
-    ts_exit = _combine(ts_exit_parts)
-    sym_exit = _combine(sym_ids_exit)
-
-    # Sampling GLOBAL (controla VRAM/tempo final de treino)
-    X_entry, y_entry, ts_entry, sym_entry = _sample_arrays(
-        X_entry, y_entry, ts_entry, sym_entry,
-        ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
-        max_rows=int(max_rows_entry),
+    entry_short = entry_batches.get("short")
+    entry_mid = entry_batches.get("mid", entry_short)
+    entry_long = entry_batches.get("long", entry_mid)
+    entry_batch = entry_mid if entry_mid is not None else SniperBatch(
+        X=np.empty((0, 0), dtype=np.float32),
+        y=np.empty((0,), dtype=np.float32),
+        w=np.empty((0,), dtype=np.float32),
+        ts=np.empty((0,), dtype="datetime64[ns]"),
+        sym_id=np.empty((0,), dtype=np.int32),
+        feature_cols=[],
     )
-    X_danger, y_danger, ts_danger, sym_danger = _sample_arrays(
-        X_danger, y_danger, ts_danger, sym_danger,
-        ratio_neg_per_pos=float(danger_ratio_neg_per_pos),
-        max_rows=int(max_rows_danger),
+    empty_batch = SniperBatch(
+        X=np.empty((0, 0), dtype=np.float32),
+        y=np.empty((0,), dtype=np.float32),
+        w=np.empty((0,), dtype=np.float32),
+        ts=np.empty((0,), dtype="datetime64[ns]"),
+        sym_id=np.empty((0,), dtype=np.int32),
+        feature_cols=[],
     )
-    X_exit, y_exit, ts_exit, sym_exit = _sample_arrays(
-        X_exit, y_exit, ts_exit, sym_exit,
-        ratio_neg_per_pos=float(exit_ratio_neg_per_pos),
-        max_rows=int(max_rows_exit),
-    )
-
-    entry_batch = SniperBatch(
-        X=X_entry,
-        y=y_entry,
-        ts=ts_entry,
-        sym_id=sym_entry,
-        feature_cols=feat_cols_entry or [],
-    )
-    danger_batch = SniperBatch(
-        X=X_danger,
-        y=y_danger,
-        ts=ts_danger,
-        sym_id=sym_danger,
-        feature_cols=feat_cols_danger or [],
-    )
-    exit_batch = SniperBatch(
-        X=X_exit,
-        y=y_exit,
-        ts=ts_exit,
-        sym_id=sym_exit,
-        feature_cols=feat_cols_exit or [],
-    )
-    train_end: pd.Timestamp | None = None
+    train_end = None
     try:
-        if ts_entry.size and ts_danger.size and ts_exit.size:
-            train_end = pd.to_datetime(min(ts_entry.max(), ts_danger.max(), ts_exit.max()))
-        elif ts_entry.size and ts_danger.size:
-            train_end = pd.to_datetime(min(ts_entry.max(), ts_danger.max()))
-        elif ts_entry.size and ts_exit.size:
-            train_end = pd.to_datetime(min(ts_entry.max(), ts_exit.max()))
-        elif ts_danger.size and ts_exit.size:
-            train_end = pd.to_datetime(min(ts_danger.max(), ts_exit.max()))
-        elif ts_entry.size:
-            train_end = pd.to_datetime(ts_entry.max())
-        elif ts_danger.size:
-            train_end = pd.to_datetime(ts_danger.max())
-        elif ts_exit.size:
-            train_end = pd.to_datetime(ts_exit.max())
+        ts_entry_mid = entry_mid.ts if entry_mid is not None else np.empty((0,), dtype="datetime64[ns]")
+        if ts_entry_mid.size:
+            train_end = pd.to_datetime(ts_entry_mid.max())
     except Exception:
         train_end = None
+
     return SniperDataPack(
         entry=entry_batch,
-        danger=danger_batch,
-        exit=exit_batch,
+        entry_short=entry_short,
+        entry_mid=entry_mid,
+        entry_long=entry_long,
+        danger=empty_batch,
+        exit=empty_batch,
         contract=contract,
-        symbols=list(symbols),
+        symbols=list(symbols_used or symbols),
+        symbols_used=symbols_used or None,
+        symbols_skipped=symbols_skipped or None,
         train_end_utc=train_end,
     )
 
@@ -1014,32 +1098,20 @@ def prepare_sniper_dataset_from_cache(
     remove_tail_days: int,
     contract: TradeContract | None = None,
     cache_map: Dict[str, Path] | None = None,
+    entry_label_name: str | None = None,
     # controle de tamanho (VRAM / tempo)
     entry_ratio_neg_per_pos: float = 6.0,
-    danger_ratio_neg_per_pos: float = 4.0,
-    exit_ratio_neg_per_pos: float = 4.0,
     max_rows_entry: int = 2_000_000,
-    max_rows_danger: int = 1_200_000,
-    max_rows_exit: int = 1_200_000,
     seed: int = 42,
 ) -> SniperDataPack:
     """
-    Calcula features 1x por símbolo (cache em disco) e, no walk-forward, apenas
-    recorta o final por `remove_tail_days` antes de montar o dataset.
-
-    Importante: para evitar leakage perto do cutoff, removemos também os últimos
-    `max(timeout_bars, danger_horizon_bars)` candles após o recorte.
+    Calcula features 1x por simbolo (cache em disco) e, no walk-forward, apenas
+    recorta o final por `remove_tail_days` antes de montar o dataset de entry.
     """
     contract = contract or DEFAULT_TRADE_CONTRACT
     symbols = list(symbols)
     if not symbols:
         raise RuntimeError("symbols vazio")
-
-    # warmup do numba (add snapshots)
-    try:
-        warmup_sniper_dataset_numba()
-    except Exception:
-        pass
 
     cache_dir = _cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1051,138 +1123,189 @@ def prepare_sniper_dataset_from_cache(
             contract=contract,
             flags=GLOBAL_FLAGS_FULL,
         )
-    # só mantém símbolos com cache válido
     symbols = [s for s in symbols if s in cache_map]
     if not symbols:
-        raise RuntimeError("Nenhum símbolo com cache válido (todos falharam/foram pulados)")
-
-    # cutoff global consistente: menor end_ts (quando disponível)
-    end_ts_list: List[pd.Timestamp] = []
-    for s in symbols:
-        ts = _read_cache_meta_end_ts(s, cache_dir)
-        if ts is not None:
-            end_ts_list.append(ts)
-    global_end_ts = min(end_ts_list) if end_ts_list else None
-    # train_end determinístico (não depende do sampling): cutoff - lookahead
-    train_end_det: pd.Timestamp | None = None
-    if global_end_ts is not None:
-        cutoff = pd.Timestamp(global_end_ts) - pd.Timedelta(days=int(remove_tail_days))
-        lookahead = _max_label_lookahead_bars(contract, 60)
-        train_end_det = cutoff - pd.Timedelta(seconds=int(lookahead) * 60)
+        raise RuntimeError("Nenhum simbolo com cache valido (todos falharam/foram pulados)")
 
     rng = np.random.default_rng(int(seed) + int(remove_tail_days))
+    # cap por simbolo: proporcional ao tamanho total para reduzir custo
+    per_sym = int(max_rows_entry // max(1, len(symbols))) if max_rows_entry > 0 else 0
+    symbol_cap = max(20_000, min(100_000, per_sym if per_sym > 0 else 100_000))
+    entry_specs = _entry_label_specs(contract)
+    if entry_label_name:
+        want = str(entry_label_name).strip().lower()
+        entry_specs = [s for s in entry_specs if str(s.get("name", "")).lower() == want]
+        if not entry_specs:
+            raise ValueError(f"entry_label_name invalido: {entry_label_name}")
+    entry_pool_map: dict[str, pd.DataFrame] = {str(s["name"]): pd.DataFrame() for s in entry_specs}
+    entry_buf_map: dict[str, list[pd.DataFrame]] = {str(s["name"]): [] for s in entry_specs}
+    feat_cols_entry_map: dict[str, List[str]] = {}
+    symbols_used: List[str] = []
+    symbols_skipped: List[str] = []
+    total_syms = len(symbols)
 
-    def _sample_df(df_in: pd.DataFrame, label_col: str, ratio_neg_per_pos: float, max_rows: int) -> pd.DataFrame:
-        # mesmo sampler robusto do prepare_sniper_dataset (duplicado aqui para independência)
+    def _fmt_eta(seconds: float) -> str:
+        if seconds < 0:
+            seconds = 0.0
+        m, s = divmod(int(seconds + 0.5), 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h:d}h{m:02d}m"
+        if m:
+            return f"{m:d}m{s:02d}s"
+        return f"{s:d}s"
+
+    start_time = time.time()
+
+    last_len = 0
+
+    def _print_progress(
+        i: int,
+        sym: str,
+        *,
+        pos_n: int | None = None,
+        neg_n: int | None = None,
+        pos_total: int | None = None,
+        neg_total: int | None = None,
+    ) -> None:
+        nonlocal last_len
+        w = 24
+        done = min(max(int(round(w * (i / total_syms))), 0), w)
+        bar = "#" * done + "-" * (w - done)
+        elapsed = max(time.time() - start_time, 0.0)
+        eta = _fmt_eta((elapsed / i) * (total_syms - i)) if i > 0 else "?"
+        if pos_n is None or neg_n is None:
+            counts = "p- n-"
+        else:
+            counts = f"p{pos_n} n{neg_n}"
+        if pos_total is None or neg_total is None:
+            totals = "pt- nt-"
+        else:
+            totals = f"pt{pos_total} nt{neg_total}"
+        line = f"[sniper-ds] [{bar}] {i}/{total_syms} | {sym} | eta {eta} | {counts} | {totals}"
+        if len(line) < last_len:
+            line = line + (" " * (last_len - len(line)))
+        last_len = max(last_len, len(line))
+        print(line, end="\r", flush=True)
+
+    def _sample_df(
+        df_in: pd.DataFrame,
+        label_col: str,
+        ratio_neg_per_pos: float,
+        max_rows: int,
+        weight_col: str | None = None,
+    ) -> pd.DataFrame:
         if df_in.empty or label_col not in df_in.columns:
             return df_in
         y = df_in[label_col].to_numpy()
         pos_idx = np.flatnonzero(y >= 0.5)
         neg_idx = np.flatnonzero(y < 0.5)
         max_rows = int(max_rows)
-        if max_rows <= 0:
+        if max_rows <= 0 or (pos_idx.size + neg_idx.size) <= max_rows:
             return df_in
         if pos_idx.size == 0:
             keep = neg_idx
             if keep.size > max_rows:
                 keep = rng.choice(keep, size=max_rows, replace=False)
             return df_in.iloc[np.sort(keep)].copy()
-
         denom = 1.0 + float(max(0.0, ratio_neg_per_pos))
         pos_target = int(max(1, round(max_rows / denom)))
         pos_keep_n = int(min(pos_idx.size, pos_target))
-        pos_keep = rng.choice(pos_idx, size=pos_keep_n, replace=False) if pos_idx.size > pos_keep_n else pos_idx
+        # sampling sempre pelo label para evitar viés por pesos
+        vals = y.astype(np.float32, copy=False)
 
+        def _sample_by_bins(idx: np.ndarray, v: np.ndarray, target: int) -> np.ndarray:
+            if target <= 0 or idx.size == 0:
+                return np.array([], dtype=idx.dtype)
+            if idx.size <= target:
+                return idx
+            vv = v.astype(np.float32, copy=False)
+            mask = np.isfinite(vv)
+            if not bool(np.any(mask)):
+                return rng.choice(idx, size=target, replace=False)
+            idx = idx[mask]
+            vv = vv[mask]
+            if idx.size <= target:
+                return idx
+            vmin = float(np.min(vv))
+            vmax = float(np.max(vv))
+            if vmin == vmax:
+                return rng.choice(idx, size=target, replace=False)
+            n_bins = 12
+            edges = np.linspace(vmin, vmax, n_bins + 1, dtype=np.float32)
+            bin_ids = np.digitize(vv, edges, right=False) - 1
+            bin_ids = np.clip(bin_ids, 0, n_bins - 1)
+            keep = []
+            extreme_bins = {0, n_bins - 1}
+            for b in extreme_bins:
+                b_idx = idx[bin_ids == b]
+                if b_idx.size:
+                    keep.append(b_idx)
+            keep_idx = np.concatenate(keep) if keep else np.array([], dtype=idx.dtype)
+            if keep_idx.size >= target:
+                return rng.choice(keep_idx, size=target, replace=False)
+            remaining = int(target - keep_idx.size)
+            mid_bins = [b for b in range(1, n_bins - 1)]
+            counts = np.array([int(np.sum(bin_ids == b)) for b in mid_bins], dtype=np.int64)
+            total_mid = int(np.sum(counts))
+            if total_mid <= 0:
+                return keep_idx
+            alloc = np.floor(remaining * (counts / total_mid)).astype(np.int64)
+            while int(np.sum(alloc)) < remaining:
+                b = int(np.argmax(counts - alloc))
+                alloc[b] += 1
+            while int(np.sum(alloc)) > remaining:
+                b = int(np.argmax(alloc))
+                if alloc[b] <= 0:
+                    break
+                alloc[b] -= 1
+            mid_keep = []
+            for b, take in zip(mid_bins, alloc):
+                if take <= 0:
+                    continue
+                b_idx = idx[bin_ids == b]
+                if b_idx.size <= take:
+                    mid_keep.append(b_idx)
+                else:
+                    mid_keep.append(rng.choice(b_idx, size=int(take), replace=False))
+            if mid_keep:
+                keep_idx = np.concatenate([keep_idx] + mid_keep)
+            return keep_idx
+
+        pos_keep = _sample_by_bins(pos_idx, vals[pos_idx], pos_keep_n)
         remain = int(max_rows - pos_keep.size)
         if remain <= 0:
             return df_in.iloc[np.sort(pos_keep)].copy()
-
         neg_target = int(min(neg_idx.size, remain))
         if neg_target > 0:
-            neg_keep = rng.choice(neg_idx, size=neg_target, replace=False) if neg_idx.size > neg_target else neg_idx
+            neg_keep = _sample_by_bins(neg_idx, vals[neg_idx], neg_target)
             keep = np.unique(np.concatenate([pos_keep, neg_keep]))
         else:
             keep = pos_keep
-
-        if keep.size < max_rows and pos_idx.size > pos_keep.size:
-            extra = int(min(max_rows - keep.size, pos_idx.size - pos_keep.size))
-            if extra > 0:
-                remaining_pos = np.setdiff1d(pos_idx, pos_keep, assume_unique=False)
-                extra_pos = rng.choice(remaining_pos, size=extra, replace=False) if remaining_pos.size > extra else remaining_pos
-                keep = np.unique(np.concatenate([keep, extra_pos]))
-
         if keep.size > max_rows:
             keep = rng.choice(keep, size=max_rows, replace=False)
         return df_in.iloc[np.sort(keep)].copy()
 
-    def _sample_arrays(
-        X: np.ndarray,
-        y: np.ndarray,
-        ts: np.ndarray,
-        sym: np.ndarray,
-        *,
-        ratio_neg_per_pos: float,
-        max_rows: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        if X.size == 0 or y.size == 0:
-            return X, y, ts, sym
-        n = int(y.shape[0])
-        max_rows = int(max_rows)
-        if max_rows <= 0 or n <= max_rows:
-            return X, y, ts, sym
-        pos = np.flatnonzero(y >= 0.5)
-        neg = np.flatnonzero(y < 0.5)
-        if pos.size == 0:
-            keep = neg
-            if keep.size > max_rows:
-                keep = rng.choice(keep, size=max_rows, replace=False)
-            keep = np.sort(keep)
-            return X[keep], y[keep], ts[keep], sym[keep]
-
-        denom = 1.0 + float(max(0.0, ratio_neg_per_pos))
-        pos_target = int(max(1, round(max_rows / denom)))
-        pos_keep_n = int(min(pos.size, pos_target))
-        pos_keep = rng.choice(pos, size=pos_keep_n, replace=False) if pos.size > pos_keep_n else pos
-
-        remain = int(max_rows - pos_keep.size)
-        if remain <= 0:
-            keep = np.sort(pos_keep)
-            return X[keep], y[keep], ts[keep], sym[keep]
-
-        neg_keep_n = int(min(neg.size, remain))
-        if neg_keep_n > 0:
-            neg_keep = rng.choice(neg, size=neg_keep_n, replace=False) if neg.size > neg_keep_n else neg
-            keep = np.unique(np.concatenate([pos_keep, neg_keep]))
-        else:
-            keep = pos_keep
-
-        if keep.size < max_rows and pos.size > pos_keep.size:
-            extra = int(min(max_rows - keep.size, pos.size - pos_keep.size))
-            if extra > 0:
-                remaining_pos = np.setdiff1d(pos, pos_keep, assume_unique=False)
-                extra_pos = rng.choice(remaining_pos, size=extra, replace=False) if remaining_pos.size > extra else remaining_pos
-                keep = np.unique(np.concatenate([keep, extra_pos]))
-
-        if keep.size > max_rows:
-            keep = rng.choice(keep, size=max_rows, replace=False)
-
-        keep = np.sort(keep)
-        return X[keep], y[keep], ts[keep], sym[keep]
-
-    def _to_numpy(df: pd.DataFrame, feats: List[str], label_col: str, sym_idx: int):
-        if label_col not in df.columns:
+    def _to_numpy(
+        df: pd.DataFrame,
+        feats: List[str],
+        label_col: str,
+        weight_col: str | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if df.empty:
             return (
                 np.empty((0, len(feats)), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
                 np.empty((0,), dtype=np.float32),
                 np.empty((0,), dtype="datetime64[ns]"),
                 np.empty((0,), dtype=np.int32),
             )
         mat = df.reindex(columns=feats).replace([np.inf, -np.inf], np.nan)
-        mat = mat.infer_objects(copy=False)
         mask = mat.notnull().all(axis=1).to_numpy(dtype=bool, copy=False)
         if mask.size == 0 or (not bool(np.any(mask))):
             return (
                 np.empty((0, len(feats)), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
                 np.empty((0,), dtype=np.float32),
                 np.empty((0,), dtype="datetime64[ns]"),
                 np.empty((0,), dtype=np.int32),
@@ -1190,512 +1313,204 @@ def prepare_sniper_dataset_from_cache(
         mat2 = mat.to_numpy(np.float32, copy=True)
         X = mat2[mask]
         y = df[label_col].to_numpy(dtype=np.float32, copy=False)[mask]
+        if weight_col and weight_col in df.columns:
+            w = df[weight_col].to_numpy(dtype=np.float32, copy=False)[mask]
+        else:
+            w = np.ones(int(y.shape[0]), dtype=np.float32)
         ts = df.index.to_numpy(dtype="datetime64[ns]")[mask]
-        sym_arr = np.full(int(ts.shape[0]), sym_idx, dtype=np.int32)
-        return X, y, ts, sym_arr
+        if "sym_id" in df.columns:
+            sym_arr = df["sym_id"].to_numpy(dtype=np.int32, copy=False)[mask]
+        else:
+            sym_arr = np.zeros(int(ts.shape[0]), dtype=np.int32)
+        return X, y, w, ts, sym_arr
 
-    def _cut_df(df_pf: pd.DataFrame) -> pd.DataFrame:
-        if df_pf.empty:
-            return df_pf
-        # normaliza index para evitar erro com tz-aware vs naive
+    def _process_symbol(sym_idx: int, symbol: str):
+        data_path = cache_map.get(symbol)
+        if data_path is None or (not Path(data_path).exists()):
+            raise RuntimeError(f"{symbol}: cache nao encontrado")
+        df = _load_feature_cache(Path(data_path))
+        if df.empty:
+            raise RuntimeError(f"{symbol}: cache vazio")
+        if remove_tail_days > 0:
+            cutoff = df.index[-1] - pd.Timedelta(days=int(remove_tail_days))
+            df = df[df.index < cutoff]
+        if df.empty:
+            raise RuntimeError(f"{symbol}: sem dados apos corte")
+        df = _try_downcast_df(df)
+
+        frames_local: dict[str, tuple[pd.DataFrame, List[str]]] = {}
+        for spec in entry_specs:
+            name = str(spec["name"])
+            weight_col = str(spec.get("weight_col") or "")
+            sniper_ds = build_sniper_datasets(
+                df,
+                contract=contract,
+                entry_label_col=str(spec["label_col"]),
+                exit_code_col=str(spec["exit_code_col"]),
+                seed=int(seed),
+            )
+            entry_df = sniper_ds.entry
+            if entry_df.empty:
+                continue
+            entry_df = _try_downcast_df(entry_df)
+            entry_df["sym_id"] = int(sym_idx)
+            feat_cols = _list_feature_columns(entry_df)
+            cols_keep = list(feat_cols) + ["label_entry", "sym_id"]
+            if weight_col and weight_col in entry_df.columns:
+                cols_keep.append(weight_col)
+            entry_df = entry_df.reindex(columns=cols_keep)
+            # cap por sÌmbolo para evitar combo gigante
+            entry_df = _sample_df(
+                entry_df,
+                "label_entry",
+                float(entry_ratio_neg_per_pos),
+                int(symbol_cap),
+                weight_col=weight_col,
+            )
+            frames_local[name] = (entry_df, feat_cols)
+        return sym_idx, symbol, frames_local
+
+    preferred_name = "mid" if any(str(s["name"]) == "mid" for s in entry_specs) else str(entry_specs[0]["name"])
+    total_pos = 0
+    total_neg = 0
+    batch_flush_n = 8
+    done = 0
+    for sym_idx, symbol in enumerate(symbols):
+        pos_n = None
+        neg_n = None
         try:
-            idx = pd.to_datetime(df_pf.index)
-            if isinstance(idx, pd.DatetimeIndex) and (idx.tz is not None):
-                idx = idx.tz_localize(None)
-            if not idx.equals(df_pf.index):
-                df_pf = df_pf.copy()
-                df_pf.index = idx
-        except Exception:
-            pass
-        end_ts = pd.Timestamp(df_pf.index.max())
-        if global_end_ts is not None:
-            end_ts = min(end_ts, global_end_ts)
-        cutoff = end_ts - pd.Timedelta(days=int(remove_tail_days))
-        df_cut = df_pf[df_pf.index < cutoff]
-        lookahead = _max_label_lookahead_bars(contract, 60)
-        if len(df_cut) > lookahead + 10:
-            df_cut = df_cut.iloc[: -lookahead]
-        return df_cut
-
-    # limites por símbolo enquanto concatena (protege RAM: sampling global já vai recortar depois)
-    n_syms = max(1, int(len(symbols)))
-    per_sym_entry_max = int(min(int(max_rows_entry), max(20_000, (int(max_rows_entry) // n_syms) * 2)))
-    per_sym_danger_max = int(min(int(max_rows_danger), max(15_000, (int(max_rows_danger) // n_syms) * 2)))
-    per_sym_exit_max = int(min(int(max_rows_exit), max(15_000, (int(max_rows_exit) // n_syms) * 2)))
-
-    def _build_symbol(
-        sym_idx: int,
-        symbol: str,
-        *,
-        feats_entry: List[str] | None = None,
-        feats_danger: List[str] | None = None,
-        feats_exit: List[str] | None = None,
-    ):
-        df_pf = _load_feature_cache(cache_map[symbol])
-        df_pf = _cut_df(df_pf)
-        if df_pf.empty or int(len(df_pf)) < 500:
-            raise RuntimeError(f"{symbol}: df_pf vazio após corte (rows={len(df_pf)})")
-
-        max_add_starts = _env_int("SNIPER_MAX_ADD_STARTS", 20_000)
-        max_exit_starts = _env_int("SNIPER_MAX_EXIT_STARTS", 8_000)
-        exit_stride_bars = _env_int("SNIPER_EXIT_STRIDE_BARS", 15)
-        exit_lookahead_bars = _env_int("SNIPER_EXIT_LOOKAHEAD_BARS", 0)
-        try:
-            env_exit_margin = os.getenv("SNIPER_EXIT_MARGIN_PCT")
-            if env_exit_margin is None or str(env_exit_margin).strip() == "":
-                exit_margin_pct = _default_exit_margin_pct(contract)
+            _, res_symbol, frames_local = _process_symbol(sym_idx, symbol)
+            if not frames_local:
+                symbols_skipped.append(res_symbol)
             else:
-                exit_margin_pct = float(env_exit_margin)
+                pref = frames_local.get(preferred_name)
+                if pref is not None:
+                    pref_df = pref[0]
+                    if not pref_df.empty and "label_entry" in pref_df.columns:
+                        y = pref_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                        pos_n = int(np.sum(y >= 0.5))
+                        neg_n = int(np.sum(y < 0.5))
+                if pos_n is None or neg_n is None:
+                    for _name, (entry_df, _feat_cols) in frames_local.items():
+                        if not entry_df.empty and "label_entry" in entry_df.columns:
+                            y = entry_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                            pos_n = int(np.sum(y >= 0.5))
+                            neg_n = int(np.sum(y < 0.5))
+                            break
+                for name, (entry_df, feat_cols) in frames_local.items():
+                    if name not in feat_cols_entry_map or not feat_cols_entry_map[name]:
+                        feat_cols_entry_map[name] = list(feat_cols)
+                    weight_col = ""
+                    for spec in entry_specs:
+                        if str(spec["name"]) == name:
+                            weight_col = str(spec.get("weight_col") or "")
+                            break
+                    buf = entry_buf_map.get(name)
+                    if buf is not None:
+                        buf.append(entry_df)
+                        if len(buf) >= batch_flush_n:
+                            pool_df = entry_pool_map.get(name)
+                            combined = pd.concat(([pool_df] if pool_df is not None and not pool_df.empty else []) + buf, axis=0, ignore_index=False)
+                            pool_df = _sample_df(
+                                combined,
+                                "label_entry",
+                                float(entry_ratio_neg_per_pos),
+                                int(max_rows_entry),
+                                weight_col=weight_col,
+                            )
+                            entry_pool_map[name] = pool_df
+                            buf.clear()
+                            del combined
+                symbols_used.append(res_symbol)
         except Exception:
-            exit_margin_pct = _default_exit_margin_pct(contract)
-        seed_local = _env_int("SNIPER_SEED", 1337) + int(remove_tail_days) + sym_idx
-        sniper_ds = build_sniper_datasets(
-            df_pf,
-            contract=contract,
-            max_add_starts=int(max_add_starts),
-            max_exit_starts=int(max_exit_starts),
-            exit_stride_bars=int(exit_stride_bars),
-            exit_lookahead_bars=(int(exit_lookahead_bars) if int(exit_lookahead_bars) > 0 else None),
-            exit_margin_pct=float(exit_margin_pct),
-            seed=int(seed_local),
+            symbols_skipped.append(symbol)
+        done += 1
+        if pos_n is None or neg_n is None:
+            pos_n, neg_n = 0, 0
+        total_pos += int(pos_n)
+        total_neg += int(neg_n)
+        _print_progress(
+            sym_idx + 1,
+            symbol,
+            pos_n=pos_n,
+            neg_n=neg_n,
+            pos_total=total_pos,
+            neg_total=total_neg,
         )
-
-        frames = [sniper_ds.entry, sniper_ds.add]
-        frames = [f for f in frames if f is not None and (not f.empty)]
-        if frames:
-            entry_df = pd.concat(frames, axis=0, ignore_index=False)
-        else:
-            entry_df = sniper_ds.entry.copy()
-        entry_df.sort_index(inplace=True)
-        danger_df = sniper_ds.danger
-        exit_df = sniper_ds.exit
-
-        # IMPORTANT: os modelos precisam de um espaço de features consistente entre símbolos.
-        # - No seed, inferimos as colunas.
-        # - Nos demais símbolos, usamos as colunas do seed (reindex cuida de colunas faltantes).
-        local_feat_cols_entry = _list_feature_columns(entry_df)
-        local_feat_cols_danger = _list_feature_columns(danger_df)
-        local_feat_cols_exit = _list_feature_columns(exit_df)
-        feat_cols_entry_eff = list(local_feat_cols_entry) if feats_entry is None else list(feats_entry)
-        feat_cols_danger_eff = list(local_feat_cols_danger) if feats_danger is None else list(feats_danger)
-        feat_cols_exit_eff = list(local_feat_cols_exit) if feats_exit is None else list(feats_exit)
-
-        entry_df = _sample_df(entry_df, "label_entry", float(entry_ratio_neg_per_pos), per_sym_entry_max)
-        danger_df = _sample_df(danger_df, "label_danger", float(danger_ratio_neg_per_pos), per_sym_danger_max)
-        exit_df = _sample_df(exit_df, "label_exit", float(exit_ratio_neg_per_pos), per_sym_exit_max)
-
-        Xe, ye, tse, syme = _to_numpy(entry_df, feat_cols_entry_eff, "label_entry", sym_idx)
-        Xd, yd, tsd, symd = _to_numpy(danger_df, feat_cols_danger_eff, "label_danger", sym_idx)
-        Xx, yx, tsx, symx = _to_numpy(exit_df, feat_cols_exit_eff, "label_exit", sym_idx)
-
-        del df_pf, entry_df, danger_df, exit_df
-        gc.collect()
-        return (
-            Xe,
-            ye,
-            tse,
-            syme,
-            Xd,
-            yd,
-            tsd,
-            symd,
-            Xx,
-            yx,
-            tsx,
-            symx,
-            feat_cols_entry_eff,
-            feat_cols_danger_eff,
-            feat_cols_exit_eff,
-        )
-
-    # coleta de símbolos realmente usados
-    symbols_total = list(symbols)
-    symbols_used: List[str] = []
-    symbols_skipped: List[str] = []
-
-    total_syms = int(len(symbols_total))
-    processed = 0
-    progress_every_s = 3.0
-    try:
-        v = os.getenv("SNIPER_DATAFLOW_PROGRESS_EVERY_S", "").strip()
-        progress_every_s = float(v) if v else 3.0
-    except Exception:
-        progress_every_s = 3.0
-    last_progress_ts = 0.0
-
-    def _bar(done: int, total: int, width: int = 26) -> str:
-        total = max(1, int(total))
-        done = int(max(0, min(done, total)))
-        n = int(round(width * (done / total)))
-        return ("#" * n) + ("-" * (width - n))
-
-    def _print_progress(sym: str) -> None:
-        nonlocal last_progress_ts
-        if total_syms <= 0:
-            return
-        line = f"[dataflow] [{_bar(processed, total_syms)}] {processed:>3}/{total_syms:<3} | {sym}"
-        if sys.stderr.isatty():
-            sys.stderr.write("\r" + line)
-            sys.stderr.flush()
-        else:
-            now = time.perf_counter()
-            if now - last_progress_ts >= max(1.0, progress_every_s):
-                print(line, flush=True)
-                last_progress_ts = now
-
-    # 1) achar um primeiro símbolo válido para definir feature_cols
-    feat_cols_entry: List[str] = []
-    feat_cols_danger: List[str] = []
-    feat_cols_exit: List[str] = []
-
-    # buffers (para flush em blocos) + pools (mantidos sempre <= max_rows_*)
-    X_entry_parts: List[np.ndarray] = []
-    y_entry_parts: List[np.ndarray] = []
-    ts_entry_parts: List[np.ndarray] = []
-    sym_ids_entry: List[np.ndarray] = []
-    buf_entry_rows = 0
-
-    X_danger_parts: List[np.ndarray] = []
-    y_danger_parts: List[np.ndarray] = []
-    ts_danger_parts: List[np.ndarray] = []
-    sym_ids_danger: List[np.ndarray] = []
-    buf_danger_rows = 0
-
-    X_exit_parts: List[np.ndarray] = []
-    y_exit_parts: List[np.ndarray] = []
-    ts_exit_parts: List[np.ndarray] = []
-    sym_ids_exit: List[np.ndarray] = []
-    buf_exit_rows = 0
-
-    # pools (inicializados após achar seed_symbol/feature_cols)
-    X_entry_pool: np.ndarray | None = None
-    y_entry_pool: np.ndarray | None = None
-    ts_entry_pool: np.ndarray | None = None
-    sym_entry_pool: np.ndarray | None = None
-
-    X_danger_pool: np.ndarray | None = None
-    y_danger_pool: np.ndarray | None = None
-    ts_danger_pool: np.ndarray | None = None
-    sym_danger_pool: np.ndarray | None = None
-
-    X_exit_pool: np.ndarray | None = None
-    y_exit_pool: np.ndarray | None = None
-    ts_exit_pool: np.ndarray | None = None
-    sym_exit_pool: np.ndarray | None = None
-
-    def _flush_cls(
-        X_pool: np.ndarray,
-        y_pool: np.ndarray,
-        ts_pool: np.ndarray,
-        sym_pool: np.ndarray,
-        X_parts: List[np.ndarray],
-        y_parts: List[np.ndarray],
-        ts_parts: List[np.ndarray],
-        sym_parts: List[np.ndarray],
-        *,
-        ratio_neg_per_pos: float,
-        max_rows: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        if not X_parts:
-            return X_pool, y_pool, ts_pool, sym_pool
-        X_new = (np.vstack([X_pool] + X_parts) if X_pool.size else np.vstack(X_parts))
-        y_new = (np.concatenate([y_pool] + y_parts) if y_pool.size else np.concatenate(y_parts))
-        ts_new = (np.concatenate([ts_pool] + ts_parts) if ts_pool.size else np.concatenate(ts_parts))
-        sym_new = (np.concatenate([sym_pool] + sym_parts) if sym_pool.size else np.concatenate(sym_parts))
-        X_new, y_new, ts_new, sym_new = _sample_arrays(
-            X_new,
-            y_new,
-            ts_new,
-            sym_new,
-            ratio_neg_per_pos=float(ratio_neg_per_pos),
-            max_rows=int(max_rows),
-        )
-        X_parts.clear(); y_parts.clear(); ts_parts.clear(); sym_parts.clear()
-        return X_new, y_new, ts_new, sym_new
-
-    seed_symbol = None
-    first_err: str | None = None
-    for sym in symbols_total:
-        try:
-            (
-                Xe0,
-                ye0,
-                tse0,
-                syme0,
-                Xd0,
-                yd0,
-                tsd0,
-                symd0,
-                Xx0,
-                yx0,
-                tsx0,
-                symx0,
-                feat_entry0,
-                feat_danger0,
-                feat_exit0,
-            ) = _build_symbol(
-                0, sym, feats_entry=None, feats_danger=None, feats_exit=None
-            )
-            feat_cols_entry = list(feat_entry0)
-            feat_cols_danger = list(feat_danger0)
-            feat_cols_exit = list(feat_exit0)
-            # inicializa pools com shapes corretos
-            X_entry_pool = np.empty((0, len(feat_cols_entry)), dtype=np.float32)
-            y_entry_pool = np.empty((0,), dtype=np.float32)
-            ts_entry_pool = np.empty((0,), dtype="datetime64[ns]")
-            sym_entry_pool = np.empty((0,), dtype=np.int32)
-
-            X_danger_pool = np.empty((0, len(feat_cols_danger)), dtype=np.float32)
-            y_danger_pool = np.empty((0,), dtype=np.float32)
-            ts_danger_pool = np.empty((0,), dtype="datetime64[ns]")
-            sym_danger_pool = np.empty((0,), dtype=np.int32)
-
-            X_exit_pool = np.empty((0, len(feat_cols_exit)), dtype=np.float32)
-            y_exit_pool = np.empty((0,), dtype=np.float32)
-            ts_exit_pool = np.empty((0,), dtype="datetime64[ns]")
-            sym_exit_pool = np.empty((0,), dtype=np.int32)
-
-            # joga o seed nos buffers e dá flush imediato
-            X_entry_parts.append(Xe0); y_entry_parts.append(ye0); ts_entry_parts.append(tse0); sym_ids_entry.append(syme0); buf_entry_rows += int(Xe0.shape[0])
-            X_danger_parts.append(Xd0); y_danger_parts.append(yd0); ts_danger_parts.append(tsd0); sym_ids_danger.append(symd0); buf_danger_rows += int(Xd0.shape[0])
-            X_exit_parts.append(Xx0); y_exit_parts.append(yx0); ts_exit_parts.append(tsx0); sym_ids_exit.append(symx0); buf_exit_rows += int(Xx0.shape[0])
-
-            X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool = _flush_cls(
-                X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool,
-                X_entry_parts, y_entry_parts, ts_entry_parts, sym_ids_entry,
-                ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
-                max_rows=int(max_rows_entry),
-            )
-            X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool = _flush_cls(
-                X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
-                X_danger_parts, y_danger_parts, ts_danger_parts, sym_ids_danger,
-                ratio_neg_per_pos=float(danger_ratio_neg_per_pos),
-                max_rows=int(max_rows_danger),
-            )
-            X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool = _flush_cls(
-                X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool,
-                X_exit_parts, y_exit_parts, ts_exit_parts, sym_ids_exit,
-                ratio_neg_per_pos=float(exit_ratio_neg_per_pos),
-                max_rows=int(max_rows_exit),
-            )
-            buf_entry_rows = buf_danger_rows = buf_exit_rows = 0
-            symbols_used.append(sym)
-            seed_symbol = sym
-            processed += 1
-            _print_progress(sym)
-            break
-        except Exception as e:
-            symbols_skipped.append(sym)
-            if first_err is None:
-                first_err = f"{sym}: {e}"
-            processed += 1
-            _print_progress(sym)
+        if done % 5 == 0:
+            gc.collect()
+    print("", flush=True)
+    # flush remaining buffers
+    for name, buf in entry_buf_map.items():
+        if not buf:
             continue
-
-    if seed_symbol is None:
-        extra = f" | first_error={first_err}" if first_err else ""
-        raise RuntimeError(f"Nenhum símbolo válido após corte (todos SKIP){extra}")
-
-    # 2) restantes (threads)
-    use_parallel = _env_bool("PF_SYMBOL_PARALLEL", default=True)
-    max_workers = _env_int("PF_SYMBOL_WORKERS", min(4, int(os.cpu_count() or 4)))
-
-    def _worker(si: int, sym: str):
-        Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx, _f1, _f2, _f3 = _build_symbol(
-            si,
-            sym,
-            feats_entry=feat_cols_entry,
-            feats_danger=feat_cols_danger,
-            feats_exit=feat_cols_exit,
+        weight_col = ""
+        for spec in entry_specs:
+            if str(spec["name"]) == name:
+                weight_col = str(spec.get("weight_col") or "")
+                break
+        pool_df = entry_pool_map.get(name)
+        combined = pd.concat(([pool_df] if pool_df is not None and not pool_df.empty else []) + buf, axis=0, ignore_index=False)
+        pool_df = _sample_df(
+            combined,
+            "label_entry",
+            float(entry_ratio_neg_per_pos),
+            int(max_rows_entry),
+            weight_col=weight_col,
         )
-        # robustez final: se ainda assim houver mismatch (não deveria), pula o símbolo
-        if Xe.size and Xe.shape[1] != len(feat_cols_entry):
-            raise RuntimeError(f"{sym}: entry features mismatch {Xe.shape[1]} != {len(feat_cols_entry)}")
-        if Xd.size and Xd.shape[1] != len(feat_cols_danger):
-            raise RuntimeError(f"{sym}: danger features mismatch {Xd.shape[1]} != {len(feat_cols_danger)}")
-        if Xx.size and Xx.shape[1] != len(feat_cols_exit):
-            raise RuntimeError(f"{sym}: exit features mismatch {Xx.shape[1]} != {len(feat_cols_exit)}")
-        return Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx
+        entry_pool_map[name] = pool_df
+        buf.clear()
+        del combined
 
-    # 2) restantes (threads) — índices compactos (sym_id não é usado no treino, mas mantemos consistente)
-    rest_symbols = [s for s in symbols_total if s != seed_symbol]
-    rest = list(enumerate(rest_symbols, start=1))
-    if rest:
-        if use_parallel and max_workers > 1:
-            with ThreadPoolExecutor(max_workers=min(max_workers, len(rest))) as ex:
-                futs = {ex.submit(_worker, si, sym): (si, sym) for (si, sym) in rest}
-                for fut in as_completed(futs):
-                    try:
-                        Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx = fut.result()
-                    except Exception as e:
-                        _si, _sym = futs.get(fut, (-1, "?"))
-                        symbols_skipped.append(str(_sym))
-                        processed += 1
-                        _print_progress(str(_sym))
-                        continue
-                    symbols_used.append(str(futs[fut][1]))
-                    processed += 1
-                    _print_progress(str(futs[fut][1]))
-                    X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme); buf_entry_rows += int(Xe.shape[0])
-                    X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd); buf_danger_rows += int(Xd.shape[0])
-                    X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx); buf_exit_rows += int(Xx.shape[0])
+    entry_batches: dict[str, SniperBatch] = {}
+    for spec in entry_specs:
+        name = str(spec["name"])
+        entry_df = entry_pool_map.get(name, pd.DataFrame())
+        if not entry_df.empty:
+            entry_df.sort_index(inplace=True)
+        feat_cols = feat_cols_entry_map.get(name, []) if not entry_df.empty else []
+        weight_col = str(spec.get("weight_col") or "")
+        Xe, ye, we, tse, syme = _to_numpy(entry_df, list(feat_cols), "label_entry", weight_col=weight_col)
+        entry_batches[name] = SniperBatch(X=Xe, y=ye, w=we, ts=tse, sym_id=syme, feature_cols=list(feat_cols))
 
-                    # flush em blocos para evitar vstack gigante
-                    if buf_entry_rows >= int(max(50_000, min(250_000, int(max_rows_entry) // 4))):
-                        X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool = _flush_cls(
-                            X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool,
-                            X_entry_parts, y_entry_parts, ts_entry_parts, sym_ids_entry,
-                            ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
-                            max_rows=int(max_rows_entry),
-                        )
-                        buf_entry_rows = 0
-                    if buf_danger_rows >= int(max(50_000, min(200_000, int(max_rows_danger) // 4))):
-                        X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool = _flush_cls(
-                            X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
-                            X_danger_parts, y_danger_parts, ts_danger_parts, sym_ids_danger,
-                            ratio_neg_per_pos=float(danger_ratio_neg_per_pos),
-                            max_rows=int(max_rows_danger),
-                        )
-                        buf_danger_rows = 0
-                    if buf_exit_rows >= int(max(50_000, min(200_000, int(max_rows_exit) // 4))):
-                        X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool = _flush_cls(
-                            X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool,
-                            X_exit_parts, y_exit_parts, ts_exit_parts, sym_ids_exit,
-                            ratio_neg_per_pos=float(exit_ratio_neg_per_pos),
-                            max_rows=int(max_rows_exit),
-                        )
-                        buf_exit_rows = 0
-        else:
-            for si, sym in rest:
-                try:
-                    Xe, ye, tse, syme, Xd, yd, tsd, symd, Xx, yx, tsx, symx = _worker(si, sym)
-                except Exception as e:
-                    symbols_skipped.append(str(sym))
-                    processed += 1
-                    _print_progress(str(sym))
-                    continue
-                symbols_used.append(str(sym))
-                processed += 1
-                _print_progress(str(sym))
-                X_entry_parts.append(Xe); y_entry_parts.append(ye); ts_entry_parts.append(tse); sym_ids_entry.append(syme); buf_entry_rows += int(Xe.shape[0])
-                X_danger_parts.append(Xd); y_danger_parts.append(yd); ts_danger_parts.append(tsd); sym_ids_danger.append(symd); buf_danger_rows += int(Xd.shape[0])
-                X_exit_parts.append(Xx); y_exit_parts.append(yx); ts_exit_parts.append(tsx); sym_ids_exit.append(symx); buf_exit_rows += int(Xx.shape[0])
-
-                if buf_entry_rows >= int(max(50_000, min(250_000, int(max_rows_entry) // 4))):
-                    X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool = _flush_cls(
-                        X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool,
-                        X_entry_parts, y_entry_parts, ts_entry_parts, sym_ids_entry,
-                        ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
-                        max_rows=int(max_rows_entry),
-                    )
-                    buf_entry_rows = 0
-                if buf_danger_rows >= int(max(50_000, min(200_000, int(max_rows_danger) // 4))):
-                    X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool = _flush_cls(
-                        X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
-                        X_danger_parts, y_danger_parts, ts_danger_parts, sym_ids_danger,
-                        ratio_neg_per_pos=float(danger_ratio_neg_per_pos),
-                        max_rows=int(max_rows_danger),
-                    )
-                    buf_danger_rows = 0
-                if buf_exit_rows >= int(max(50_000, min(200_000, int(max_rows_exit) // 4))):
-                    X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool = _flush_cls(
-                        X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool,
-                        X_exit_parts, y_exit_parts, ts_exit_parts, sym_ids_exit,
-                        ratio_neg_per_pos=float(exit_ratio_neg_per_pos),
-                        max_rows=int(max_rows_exit),
-                    )
-                    buf_exit_rows = 0
-
-    # flush final (restos nos buffers)
-    if X_entry_pool is None or y_entry_pool is None or ts_entry_pool is None or sym_entry_pool is None:
-        raise RuntimeError("Estado inválido: pools não inicializados")
-
-    X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool = _flush_cls(
-        X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool,
-        X_entry_parts, y_entry_parts, ts_entry_parts, sym_ids_entry,
-        ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
-        max_rows=int(max_rows_entry),
+    entry_short = entry_batches.get("short")
+    entry_mid = entry_batches.get("mid", entry_short)
+    entry_long = entry_batches.get("long", entry_mid)
+    entry_batch = entry_mid if entry_mid is not None else SniperBatch(
+        X=np.empty((0, 0), dtype=np.float32),
+        y=np.empty((0,), dtype=np.float32),
+        w=np.empty((0,), dtype=np.float32),
+        ts=np.empty((0,), dtype="datetime64[ns]"),
+        sym_id=np.empty((0,), dtype=np.int32),
+        feature_cols=[],
     )
-    X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool = _flush_cls(
-        X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
-        X_danger_parts, y_danger_parts, ts_danger_parts, sym_ids_danger,
-        ratio_neg_per_pos=float(danger_ratio_neg_per_pos),
-        max_rows=int(max_rows_danger),
+    empty_batch = SniperBatch(
+        X=np.empty((0, 0), dtype=np.float32),
+        y=np.empty((0,), dtype=np.float32),
+        w=np.empty((0,), dtype=np.float32),
+        ts=np.empty((0,), dtype="datetime64[ns]"),
+        sym_id=np.empty((0,), dtype=np.int32),
+        feature_cols=[],
     )
-    X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool = _flush_cls(
-        X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool,
-        X_exit_parts, y_exit_parts, ts_exit_parts, sym_ids_exit,
-        ratio_neg_per_pos=float(exit_ratio_neg_per_pos),
-        max_rows=int(max_rows_exit),
-    )
+    train_end = None
+    try:
+        ts_entry_mid = entry_mid.ts if entry_mid is not None else np.empty((0,), dtype="datetime64[ns]")
+        if ts_entry_mid.size:
+            train_end = pd.to_datetime(ts_entry_mid.max())
+    except Exception:
+        train_end = None
 
-    # (opcional) recorte final adicional (idempotente)
-    X_entry, y_entry, ts_entry, sym_entry = _sample_arrays(
-        X_entry_pool, y_entry_pool, ts_entry_pool, sym_entry_pool,
-        ratio_neg_per_pos=float(entry_ratio_neg_per_pos),
-        max_rows=int(max_rows_entry),
-    )
-    X_danger, y_danger, ts_danger, sym_danger = _sample_arrays(
-        X_danger_pool, y_danger_pool, ts_danger_pool, sym_danger_pool,
-        ratio_neg_per_pos=float(danger_ratio_neg_per_pos),
-        max_rows=int(max_rows_danger),
-    )
-    X_exit, y_exit, ts_exit, sym_exit = _sample_arrays(
-        X_exit_pool, y_exit_pool, ts_exit_pool, sym_exit_pool,
-        ratio_neg_per_pos=float(exit_ratio_neg_per_pos),
-        max_rows=int(max_rows_exit),
-    )
-
-    if total_syms > 0:
-        try:
-            if sys.stderr.isatty():
-                sys.stderr.write("\n")
-                sys.stderr.flush()
-        except Exception:
-            pass
-        print(
-            f"[dataflow] symbols: processed={processed} ok={len(symbols_used)} skipped={len(symbols_skipped)}",
-            flush=True,
-        )
-
-    entry_batch = SniperBatch(X=X_entry, y=y_entry, ts=ts_entry, sym_id=sym_entry, feature_cols=feat_cols_entry)
-    danger_batch = SniperBatch(X=X_danger, y=y_danger, ts=ts_danger, sym_id=sym_danger, feature_cols=feat_cols_danger)
-    exit_batch = SniperBatch(X=X_exit, y=y_exit, ts=ts_exit, sym_id=sym_exit, feature_cols=feat_cols_exit)
-    if train_end_det is None:
-        try:
-            if ts_entry.size and ts_danger.size and ts_exit.size:
-                train_end_det = pd.to_datetime(min(ts_entry.max(), ts_danger.max(), ts_exit.max()))
-            elif ts_entry.size and ts_danger.size:
-                train_end_det = pd.to_datetime(min(ts_entry.max(), ts_danger.max()))
-            elif ts_entry.size and ts_exit.size:
-                train_end_det = pd.to_datetime(min(ts_entry.max(), ts_exit.max()))
-            elif ts_danger.size and ts_exit.size:
-                train_end_det = pd.to_datetime(min(ts_danger.max(), ts_exit.max()))
-            elif ts_entry.size:
-                train_end_det = pd.to_datetime(ts_entry.max())
-            elif ts_danger.size:
-                train_end_det = pd.to_datetime(ts_danger.max())
-            elif ts_exit.size:
-                train_end_det = pd.to_datetime(ts_exit.max())
-        except Exception:
-            train_end_det = None
     return SniperDataPack(
         entry=entry_batch,
-        danger=danger_batch,
-        exit=exit_batch,
+        entry_short=entry_short,
+        entry_mid=entry_mid,
+        entry_long=entry_long,
+        danger=empty_batch,
+        exit=empty_batch,
         contract=contract,
-        symbols=list(symbols_total),
-        symbols_used=sorted(set(symbols_used)),
-        symbols_skipped=sorted(set(symbols_skipped)),
-        train_end_utc=train_end_det,
+        symbols=list(symbols_used or symbols),
+        symbols_used=symbols_used or None,
+        symbols_skipped=symbols_skipped or None,
+        train_end_utc=train_end,
     )
-
-
-__all__ = [
-    "SniperDataPack",
-    "SniperBatch",
-    "prepare_sniper_dataset",
-    "prepare_sniper_dataset_from_cache",
-    "ensure_feature_cache",
-]
 

@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward
+from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward, select_entry_mid
 from backtest.sniper_walkforward import apply_threshold_overrides
 from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL
@@ -200,7 +200,7 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
 
         t_sym = time.perf_counter()
         try:
-            p_entry, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+            p_entry_map, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
         except Exception as e:
             # fallback: tenta rebuildar o cache do sÃ­mbolo 1x (parquet pode estar corrompido)
             print(f"[scores] WARN {sym}: {type(e).__name__}: {e} -> tentando rebuild do cache", flush=True)
@@ -213,6 +213,7 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
                     parallel=False,
                     refresh=True,
                 )
+            p_entry = select_entry_mid(p_entry_map)
                 p2 = cache_map2.get(sym)
                 if p2:
                     df_retry = pd.read_parquet(p2) if str(p2).lower().endswith(".parquet") else pd.read_pickle(p2)
@@ -224,7 +225,7 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
                         end_ts2 = pd.to_datetime(df_retry.index.max())
                         start_ts2 = end_ts2 - pd.Timedelta(days=int(settings.days))
                         df = df_retry.loc[idx2 >= start_ts2].copy()
-                    p_entry, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+                    p_entry_map, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
                 else:
                     raise
             except Exception as e2:
@@ -247,6 +248,7 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
             period_id=pid,
             periods=periods,
         )
+            p_entry = select_entry_mid(p_entry_map)
 
     if not sym_data:
         raise RuntimeError("Nenhum sÃ­mbolo com dados suficientes para backtest")

@@ -81,7 +81,6 @@ def _get_results_header() -> list[str]:
         "profit_factor",
         "trades",
         "tau_entry",
-        "tau_danger",
     ]
 
 
@@ -98,7 +97,6 @@ def _build_sample_rows(count: int = 6) -> list[dict]:
         win = rng.uniform(0.38, 0.62)
         trades = rng.randint(40, 380)
         tau_e = rng.uniform(0.78, 0.90)
-        tau_d = rng.uniform(0.75, 0.92)
         rows.append(
             {
                 "train_id": f"demo_{i + 1:02d}",
@@ -115,7 +113,6 @@ def _build_sample_rows(count: int = 6) -> list[dict]:
                 "profit_factor": round(pf, 3),
                 "trades": trades,
                 "tau_entry": round(tau_e, 3),
-                "tau_danger": round(tau_d, 3),
                 "bt_years": 6,
                 "bt_step_days": 90,
                 "bt_bar_stride": 1,

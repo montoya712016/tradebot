@@ -3,9 +3,8 @@ from __future__ import annotations
 
 """
 Motor de backtest Sniper (ciclo stateful):
-- Entrada apenas se EntryScore >= tau_entry e DangerScore < tau_danger
-- Adds respeitando max_adds, add_spacing, risco máximo, e thresholds mais rígidos
-- Saídas por TP/SL/Timeout (contrato fixo)
+- Entrada apenas se EntryScore >= tau_entry
+- Sem adds/danger/exit model (entry + EMA exit)
 """
 
 from dataclasses import dataclass
@@ -23,31 +22,43 @@ except Exception as e:  # pragma: no cover
     raise
 
 try:
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
+    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 except Exception:
     try:
-        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore[import]
+        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
     except Exception:
-        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
+        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 
 
 @dataclass
 class SniperModels:
     entry_model: "xgb.Booster"
-    danger_model: "xgb.Booster"
+    entry_models: Dict[str, "xgb.Booster"]
+    danger_model: "xgb.Booster | None"
     exit_model: "xgb.Booster | None"
     entry_feature_cols: List[str]
+    entry_feature_cols_map: Dict[str, List[str]]
     danger_feature_cols: List[str]
     exit_feature_cols: List[str]
     entry_calib: dict
+    entry_calib_map: Dict[str, dict]
     danger_calib: dict
     exit_calib: dict
     tau_entry: float
+    tau_entry_map: Dict[str, float]
     tau_danger: float
     tau_exit: float
     tau_add: float
     tau_danger_add: float
+    entry_windows_minutes: Tuple[int, ...] | None = None
+
+
+def _entry_specs() -> list[tuple[str, int]]:
+    windows = list(getattr(DEFAULT_TRADE_CONTRACT, "entry_label_windows_minutes", []) or [])
+    if len(windows) < 1:
+        raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
+    return [("mid", int(windows[0]))]
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -100,15 +111,31 @@ def load_sniper_models(
     danger_path = pd_dir / "danger_model" / "model_danger.json"
     exit_path = pd_dir / "exit_model" / "model_exit.json"
 
-    entry_model = _load_booster(entry_path)
-    danger_model = _load_booster(danger_path)
+    entry_models: Dict[str, xgb.Booster] = {}
+    entry_feature_cols_map: Dict[str, List[str]] = {}
+    entry_calib_map: Dict[str, dict] = {}
+    for name, w in _entry_specs():
+        p = pd_dir / f"entry_model_{int(w)}m" / "model_entry.json"
+        if p.exists():
+            entry_models[name] = _load_booster(p)
+            meta_key = f"entry_{int(w)}m"
+            entry_feature_cols_map[name] = list((meta.get(meta_key) or {}).get("feature_cols") or meta["entry"]["feature_cols"])
+            entry_calib_map[name] = dict((meta.get(meta_key) or {}).get("calibration") or meta["entry"].get("calibration") or {"type": "identity"})
+
+    if not entry_models:
+        entry_models["mid"] = _load_booster(entry_path)
+        entry_feature_cols_map["mid"] = list(meta["entry"]["feature_cols"])
+        entry_calib_map["mid"] = dict(meta["entry"].get("calibration") or {"type": "identity"})
+
+    entry_model = entry_models.get("mid") or list(entry_models.values())[0]
+    danger_model = _load_booster(danger_path) if danger_path.exists() else None
     exit_model = _load_booster(exit_path) if exit_path.exists() else None
 
     entry_cols = list(meta["entry"]["feature_cols"])
-    danger_cols = list(meta["danger"]["feature_cols"])
+    danger_cols = list((meta.get("danger") or {}).get("feature_cols") or [])
     exit_cols = list((meta.get("exit") or {}).get("feature_cols") or [])
     entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
-    danger_calib = dict(meta["danger"].get("calibration") or {"type": "identity"})
+    danger_calib = dict((meta.get("danger") or {}).get("calibration") or {"type": "identity"})
     exit_calib = dict((meta.get("exit") or {}).get("calibration") or {"type": "identity"})
     tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
     tau_danger = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
@@ -116,28 +143,38 @@ def load_sniper_models(
     if tau_entry is None:
         tau_entry = float(meta["entry"].get("threshold", 0.5))
     if tau_danger is None:
-        tau_danger = float(meta["danger"].get("threshold", 0.5))
+        tau_danger = float((meta.get("danger") or {}).get("threshold", 0.5))
     if tau_exit is None:
         tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
 
     tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
     tau_danger_add = float(min(0.99, max(0.01, tau_danger * float(tau_danger_add_multiplier))))
+    if danger_model is None:
+        tau_danger = 1.0
+        tau_danger_add = 1.0
+    tau_entry_map = {"mid": float(tau_entry)}
+    entry_windows = tuple(int(w) for _n, w in _entry_specs())
 
     return SniperModels(
         entry_model=entry_model,
+        entry_models=entry_models,
         danger_model=danger_model,
         exit_model=exit_model,
         entry_feature_cols=entry_cols,
+        entry_feature_cols_map=entry_feature_cols_map,
         danger_feature_cols=danger_cols,
         exit_feature_cols=exit_cols,
         entry_calib=entry_calib,
+        entry_calib_map=entry_calib_map,
         danger_calib=danger_calib,
         exit_calib=exit_calib,
         tau_entry=tau_entry,
+        tau_entry_map=tau_entry_map,
         tau_danger=tau_danger,
         tau_exit=tau_exit,
         tau_add=tau_add,
         tau_danger_add=tau_danger_add,
+        entry_windows_minutes=entry_windows,
     )
 
 
@@ -244,8 +281,7 @@ def simulate_sniper_cycle(
     candle_sec: int | None = None,
     capital_per_cycle: float = 1.0,
     # Config explícita (sem depender de env vars)
-    tp_hard_when_exit: bool | None = None,
-    exit_min_hold_bars: int = 3,
+    exit_min_hold_bars: int = 0,
     exit_confirm_bars: int = 1,
 ) -> SniperBacktestResult:
     """
@@ -254,7 +290,6 @@ def simulate_sniper_cycle(
     """
     contract = contract or DEFAULT_TRADE_CONTRACT
     candle_sec = int(candle_sec or 60)
-    timeout_bars = contract.timeout_bars(candle_sec)
 
     close = df["close"].to_numpy(np.float64, copy=False)
     high = df.get("high", df["close"]).to_numpy(np.float64, copy=False)
@@ -277,14 +312,17 @@ def simulate_sniper_cycle(
     if len(size_sched) < contract.max_adds + 1:
         size_sched = size_sched + (size_sched[-1],) * (contract.max_adds + 1 - len(size_sched))
 
-    # Exit score: confirmation to avoid 1-bar spikes
-    exit_min_hold = int(exit_min_hold_bars)
+    exit_min_hold = int(max(0, exit_min_hold_bars))
     exit_confirm = int(exit_confirm_bars)
     if exit_confirm <= 0:
         exit_confirm = 1
     exit_streak = 0
-    exit_threshold = float(getattr(contract, "exit_score_threshold", 0.0))
-    time_per_bar_hours = float(candle_sec) / 3600.0
+    ema_span = exit_ema_span_from_window(contract, int(candle_sec))
+    use_ema_exit = ema_span > 0
+    ema_alpha = 2.0 / float(ema_span + 1) if use_ema_exit else 0.0
+    ema_offset = float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
+    ema = 0.0
+    ema_span_use = ema_span
 
     for i in range(n):
         px = close[i]
@@ -292,42 +330,41 @@ def simulate_sniper_cycle(
             eq_curve[i] = eq
             continue
 
-        # estado do ciclo observável
+        # estado do ciclo observável (somente entry; sem adds/danger)
         time_in_trade = (i - entry_i) if in_pos else 0
         dd_pct = (px / avg_price - 1.0) if (in_pos and avg_price > 0) else 0.0
-        tp_price = (avg_price * (1.0 + contract.tp_min_pct)) if in_pos else (px * (1.0 + contract.tp_min_pct))
-        sl_price = (avg_price * (1.0 - contract.sl_pct)) if in_pos else (px * (1.0 - contract.sl_pct))
-        dist_to_tp = ((tp_price - px) / tp_price) if tp_price > 0 else 0.0
-        dist_to_sl = ((px - sl_price) / sl_price) if sl_price > 0 else 0.0
-        risk_used = (total_size * contract.sl_pct) if in_pos else contract.sl_pct
-        next_size = size_sched[min(num_adds + 1, len(size_sched) - 1)] if in_pos else size_sched[0]
-        risk_if_add = ((total_size + next_size) * contract.sl_pct) if in_pos else (contract.sl_pct + contract.add_spacing_pct)
-
         cycle_state = {
-            # compatível com os datasets: 1.0 apenas quando estamos avaliando um add
             "cycle_is_add": 0.0,
-            "cycle_num_adds": float(num_adds),
+            "cycle_num_adds": 0.0,
             "cycle_time_in_trade": float(time_in_trade),
             "cycle_dd_pct": float(dd_pct),
-            "cycle_dist_to_tp": float(dist_to_tp),
-            "cycle_dist_to_sl": float(dist_to_sl),
             "cycle_avg_entry_price": float(avg_price if in_pos else px),
             "cycle_last_fill_price": float(last_fill if in_pos else px),
-            "cycle_risk_used_pct": float(risk_used),
-            "cycle_risk_if_add_pct": float(risk_if_add),
         }
-
-        # danger sempre é calculado
-        x_d = _build_row_vector(df, i, models.danger_feature_cols, cycle_state=cycle_state)
-        p_d = _predict_1row(models.danger_model, x_d)
-        p_d = float(_apply_calibration(np.array([p_d], dtype=np.float64), models.danger_calib)[0])
+        p_d = 0.0
 
         if not in_pos:
             exit_streak = 0
-            x_e = _build_row_vector(df, i, models.entry_feature_cols, cycle_state=cycle_state)
-            p_e = _predict_1row(models.entry_model, x_e)
-            p_e = float(_apply_calibration(np.array([p_e], dtype=np.float64), models.entry_calib)[0])
-            if (p_e >= models.tau_entry) and (p_d < models.tau_danger):
+            if i + int(exit_min_hold) >= (n - 1):
+                eq_curve[i] = eq
+                continue
+            best_name = "mid"
+            best_pe = 0.0
+            best_tau = float(models.tau_entry)
+            best_win = None
+            for name, w in _entry_specs():
+                feat_cols = models.entry_feature_cols_map.get(name, models.entry_feature_cols)
+                model = models.entry_models.get(name, models.entry_model)
+                calib = models.entry_calib_map.get(name, models.entry_calib)
+                x_e = _build_row_vector(df, i, feat_cols, cycle_state=cycle_state)
+                p_e = _predict_1row(model, x_e)
+                p_e = float(_apply_calibration(np.array([p_e], dtype=np.float64), calib)[0])
+                if p_e >= best_pe:
+                    best_pe = p_e
+                    best_name = name
+                    best_tau = float(models.tau_entry_map.get(name, models.tau_entry))
+                    best_win = w
+            if best_pe >= best_tau:
                 in_pos = True
                 entry_i = i
                 entry_price = px
@@ -335,55 +372,26 @@ def simulate_sniper_cycle(
                 last_fill = px
                 total_size = size_sched[0]
                 num_adds = 0
+                if use_ema_exit:
+                    ema_span_use = int(max(1, round((float(best_win or 0.0) * 60.0) / float(candle_sec)))) if best_win else ema_span
+                    ema_alpha = 2.0 / float(ema_span_use + 1) if ema_span_use > 0 else 0.0
+                    ema = float(entry_price) * (1.0 - ema_offset)
             eq_curve[i] = eq
             continue
 
-        # in position: checa exits (ordem conservadora SL -> TP -> EXIT -> timeout)
-        hi = high[i] if np.isfinite(high[i]) else px
+        # in position: checa exits (ordem conservadora SL -> EMA -> timeout)
         lo = low[i] if np.isfinite(low[i]) else px
         reason = None
         exit_px = None
-        # exit score (pnl/dd/tempo/danger)
-        exit_score = 0.0
-        if (exit_threshold > 0.0) and (time_in_trade >= exit_min_hold):
-            pnl_pct = ((px / avg_price) - 1.0) * 100.0 if avg_price > 0.0 else 0.0
-            if pnl_pct < 0.0:
-                pnl_pct = 0.0
-            dd_pct_score = ((avg_price - lo) / avg_price) * 100.0 if (avg_price > 0.0 and lo < avg_price) else 0.0
-            time_hours = float(time_in_trade) * time_per_bar_hours
-            danger_hit = bool(p_d >= models.tau_danger)
-            exit_score = contract.exit_score(
-                pnl_pct=float(pnl_pct),
-                dd_pct=float(dd_pct_score),
-                time_hours=float(time_hours),
-                danger_hit=bool(danger_hit),
-            )
+        if use_ema_exit:
+            ema = ema + (ema_alpha * (px - ema))
+            if px < ema:
+                exit_streak += 1
+            else:
+                exit_streak = 0
 
-        if (exit_threshold > 0.0) and (time_in_trade >= exit_min_hold) and (exit_score >= exit_threshold):
-            exit_streak += 1
-        else:
-            exit_streak = 0
-
-        # TP hard:
-        # - se existe ExitScore, por padrão desligamos TP hard (deixa o Exit decidir)
-        # - se não existe ExitScore, TP hard fica ligado como antes
-        has_exit = bool(exit_threshold > 0.0)
-        if tp_hard_when_exit is None:
-            tp_hard = (not has_exit)
-        else:
-            tp_hard = bool(tp_hard_when_exit) if has_exit else True
-
-        if lo <= (avg_price * (1.0 - contract.sl_pct)):
-            reason = "SL"
-            exit_px = avg_price * (1.0 - contract.sl_pct)
-        elif tp_hard and (hi >= (avg_price * (1.0 + contract.tp_min_pct))):
-            reason = "TP"
-            exit_px = avg_price * (1.0 + contract.tp_min_pct)
-        elif (has_exit) and (time_in_trade >= exit_min_hold) and (exit_streak >= exit_confirm):
-            reason = "EXIT"
-            exit_px = px
-        elif time_in_trade >= timeout_bars:
-            reason = "TO"
+        if use_ema_exit and (px < ema) and (exit_streak >= exit_confirm):
+            reason = "EMA"
             exit_px = px
 
         if reason is not None and exit_px is not None:
@@ -420,32 +428,35 @@ def simulate_sniper_cycle(
             eq_curve[i] = eq
             continue
 
-        # add logic (somente se ainda no ciclo)
-        if num_adds < int(contract.max_adds):
-            trigger = last_fill * (1.0 - float(contract.add_spacing_pct))
-            if trigger > 0 and lo <= trigger:
-                # thresholds mais rígidos para add
-                cycle_state["cycle_is_add"] = 1.0
-                x_e = _build_row_vector(df, i, models.entry_feature_cols, cycle_state=cycle_state)
-                p_e = _predict_1row(models.entry_model, x_e)
-                p_e = float(_apply_calibration(np.array([p_e], dtype=np.float64), models.entry_calib)[0])
-                next_size = size_sched[num_adds + 1]
-                risk_after = (total_size + next_size) * contract.sl_pct
-                if (
-                    (p_e >= models.tau_add)
-                    and (p_d < models.tau_danger_add)
-                    and (risk_after <= contract.risk_max_cycle_pct + 1e-9)
-                ):
-                    # executa add no preço trigger
-                    new_total = total_size + next_size
-                    avg_price = (avg_price * total_size + trigger * next_size) / new_total
-                    total_size = new_total
-                    last_fill = trigger
-                    num_adds += 1
-
         eq_curve[i] = eq
 
     # métricas
+    if in_pos and n > 0:
+        exit_px = float(close[-1])
+        entries = 1 + num_adds
+        sides = entries + 1
+        costs = sides * (contract.fee_pct_per_side + contract.slippage_pct)
+        r = (exit_px / avg_price) - 1.0 if avg_price > 0 else 0.0
+        r_net = r - costs
+        eq = eq * (1.0 + capital_per_cycle * r_net)
+        trades.append(
+            SniperTrade(
+                entry_ts=pd.to_datetime(idx[entry_i]),
+                exit_ts=pd.to_datetime(idx[-1]),
+                entry_price=float(entry_price),
+                exit_price=float(exit_px),
+                num_adds=int(num_adds),
+                reason="EOD",
+                r_net=float(r_net),
+                avg_entry_price=float(avg_price),
+                entries=int(entries),
+                sides=int(sides),
+                costs=float(costs),
+                r_gross=float(r),
+            )
+        )
+        eq_curve[-1] = eq
+
     if len(eq_curve):
         eq_max = np.maximum.accumulate(eq_curve)
         dd = (eq_max - eq_curve) / np.where(eq_max > 0, eq_max, 1.0)

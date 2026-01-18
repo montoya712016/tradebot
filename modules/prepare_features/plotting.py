@@ -1,7 +1,15 @@
 # -*- coding: utf-8 -*-
 import os
 import numpy as np, pandas as pd
+import matplotlib
 import matplotlib.pyplot as plt, matplotlib.dates as mdates
+try:
+    from trade_contract import DEFAULT_TRADE_CONTRACT
+except Exception:
+    try:
+        from trade_contract import DEFAULT_TRADE_CONTRACT  # type: ignore[import]
+    except Exception:
+        DEFAULT_TRADE_CONTRACT = None  # type: ignore[assignment]
 from matplotlib.patches import Rectangle
 from .pf_config import (
     EMA_PAIRS,
@@ -31,6 +39,7 @@ def plot_all(
     plot_candles: bool = True,
     grey_zone: float | None = None,
     show: bool = True,
+    save_path: str | None = None,
     max_points: int | None = None,
     max_candles: int | None = None,
 ):
@@ -71,13 +80,7 @@ def plot_all(
     if flags.get("mom_short"):   panels.append("mom_short")
     if flags.get("wick_stats"):  panels.append("wick_stats")
     if flags.get("label"):
-        sniper_cols = {
-            "sniper_entry_label",
-            "sniper_exit_code",
-            "sniper_danger_label",
-        }
-        if any(col in df.columns for col in sniper_cols):
-            panels.extend(["sniper_entry", "sniper_danger"])
+        panels.append("entry_weights")
 
     if max_points is None:
         v = os.getenv("PF_PLOT_MAX_POINTS", "").strip()
@@ -195,6 +198,50 @@ def plot_all(
                             seen.add(l); h2.append(h); l2.append(l)
                     ax.legend(h2, l2, loc="upper left")
 
+
+        elif panel == "entry_weights":
+            colors = ["tab:green", "tab:blue", "tab:orange"]
+            windows = []
+            try:
+                if DEFAULT_TRADE_CONTRACT is not None:
+                    windows = list(getattr(DEFAULT_TRADE_CONTRACT, "entry_label_windows_minutes", []) or [])
+            except Exception:
+                windows = []
+            label_specs = []
+            label_cols = []
+            if len(windows) == 3:
+                for w, color in zip(windows, colors):
+                    label_specs.append((f"sniper_entry_weight_{int(w)}m", color))
+                    label_cols.append(f"sniper_entry_label_{int(w)}m")
+            else:
+                for col in df.columns:
+                    if col.startswith("sniper_entry_weight_") and col.endswith("m"):
+                        label_specs.append((col, colors[len(label_specs) % len(colors)]))
+                for col in df.columns:
+                    if col.startswith("sniper_entry_label_") and col.endswith("m"):
+                        label_cols.append(col)
+            if not label_specs and "sniper_entry_weight" in df.columns:
+                label_specs = [("sniper_entry_weight", "tab:green")]
+            if not label_cols and "sniper_entry_label" in df.columns:
+                label_cols = ["sniper_entry_label"]
+            for col, color in label_specs:
+                if col in df.columns:
+                    ax.plot(x_vals, df[col].to_numpy(dtype=float, copy=False), color=color, label=col.replace("sniper_entry_weight_", "weight "))
+            for col in label_cols:
+                if col in df.columns:
+                    ax.step(
+                        x_vals,
+                        df[col].to_numpy(dtype=float, copy=False),
+                        where="post",
+                        color="black",
+                        alpha=0.35,
+                        linewidth=0.8,
+                        label="label 0/1",
+                    )
+            ax.axhline(0, ls="--", c="gray", lw=0.8)
+            ax.set_title("Entry Weights + Label (EMA exit)")
+            _safe_legend(ax, loc="upper left")
+            ax.grid()
         elif panel=="shitidx":
             for s, l in EMA_PAIRS:
                 col = f"shitidx_pct_{s}_{l}"
@@ -464,72 +511,6 @@ def plot_all(
             if any_line: _safe_legend(ax, loc="upper left")
             ax.grid()
 
-        elif panel == "sniper_entry":
-            plotted = False
-            if "sniper_entry_label" in df.columns:
-                ax.step(
-                    x_vals,
-                    df["sniper_entry_label"].astype(float),
-                    where="mid",
-                    color="tab:green",
-                    lw=1.0,
-                    label="entry label (lucro minimo no horizonte)",
-                )
-                plotted = True
-                ax.set_ylim(-0.2, 1.2)
-            if "sniper_exit_code" in df.columns:
-                codes = df["sniper_exit_code"].to_numpy()
-                mask = np.isfinite(codes) & (codes != 0)
-                if mask.any():
-                    code_map = {
-                        1: ("Exit score", "tab:blue", 1.05),
-                        -1: ("SL", "tab:red", -0.15),
-                        -3: ("Timeout", "tab:gray", 0.25),
-                        -4: ("Muito curto", "tab:purple", 0.75),
-                    }
-                    for code_val, (label, color, yval) in code_map.items():
-                        m = mask & (codes == code_val)
-                        if m.any():
-                            ax.scatter(
-                                x_vals[m],
-                                np.full(m.sum(), yval),
-                                color=color,
-                                s=20,
-                                marker='o',
-                                alpha=0.8,
-                                label=f"exit={label}",
-                            )
-                            plotted = True
-            ax.set_title("Sniper — Label & Exit Code")
-            if plotted:
-                _safe_legend(ax, loc="upper left", ncol=2)
-            ax.grid()
-
-        elif panel == "sniper_danger":
-            if "sniper_danger_label" in df.columns:
-                ax.step(
-                    x_vals,
-                    df["sniper_danger_label"].astype(float),
-                    where="mid",
-                    color="tab:red",
-                    lw=1.0,
-                    label="Danger (queda forte em pouco tempo)",
-                )
-                ax.set_ylim(-0.2, 1.2)
-                _safe_legend(ax, loc="upper left")
-            else:
-                ax.text(
-                    0.5,
-                    0.5,
-                    "sniper_danger_label não encontrado",
-                    transform=ax.transAxes,
-                    ha="center",
-                    va="center",
-                    color="gray",
-                )
-            ax.set_title("Sniper – Danger label")
-            ax.grid()
-
 
 
     try:
@@ -538,12 +519,27 @@ def plot_all(
     except Exception:
         pass
     axs[-1].xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-    plt.setp(axs[-1].get_xticklabels(), rotation=45, ha='right')
+    plt.setp(axs[-1].get_xticklabels(), rotation=45, ha="right")
     try:
         fig.subplots_adjust(hspace=0.25, top=0.96, bottom=0.06)
     except Exception:
         pass
+    if save_path:
+        try:
+            from pathlib import Path
+
+            p = Path(str(save_path)).expanduser().resolve()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(p, dpi=150)
+        except Exception:
+            pass
     if show:
-        plt.show()
+        try:
+            backend = str(matplotlib.get_backend() or "").lower()
+            if "agg" in backend:
+                plt.switch_backend("TkAgg")
+        except Exception:
+            pass
+        plt.show(block=True)
     else:
         plt.close(fig)

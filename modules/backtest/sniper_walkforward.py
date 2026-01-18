@@ -34,14 +34,14 @@ from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 
 try:
     # quando importado como pacote (ex.: backtest.*)
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
+    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 except Exception:
     try:
         # fallback legado (quando o repo_root está no sys.path com nome de pacote)
-        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore[import]
+        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
     except Exception:
         # modo comum: rodar a partir do repo_root (sys.path inclui modules/)
-        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
+        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 
 
 @dataclass
@@ -49,15 +49,19 @@ class PeriodModel:
     period_days: int
     train_end_utc: pd.Timestamp
     entry_model: xgb.Booster
-    danger_model: xgb.Booster
+    entry_models: dict[str, xgb.Booster]
+    danger_model: xgb.Booster | None
     exit_model: xgb.Booster | None
     entry_cols: List[str]
+    entry_cols_map: dict[str, List[str]]
     danger_cols: List[str]
     exit_cols: List[str]
     entry_calib: dict
+    entry_calib_map: dict[str, dict]
     danger_calib: dict
     exit_calib: dict
     tau_entry: float
+    tau_entry_map: dict[str, float]
     tau_danger: float
     tau_exit: float
     tau_add: float
@@ -72,6 +76,26 @@ def _load_booster(path_json: Path) -> xgb.Booster:
         return bst
     bst.load_model(str(path_json))
     return bst
+
+
+def _entry_specs() -> list[tuple[str, int]]:
+    windows = list(getattr(DEFAULT_TRADE_CONTRACT, "entry_label_windows_minutes", []) or [])
+    if len(windows) < 1:
+        raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
+    return [("mid", int(windows[0]))]
+
+
+def select_entry_mid(p_entry_map: dict[str, np.ndarray]) -> np.ndarray:
+    if "mid" in p_entry_map:
+        return p_entry_map["mid"]
+    if "short" in p_entry_map:
+        return p_entry_map["short"]
+    if "long" in p_entry_map:
+        return p_entry_map["long"]
+    # fallback: primeiro disponível
+    for v in p_entry_map.values():
+        return v
+    return np.array([], dtype=np.float32)
 
 
 def load_period_models(
@@ -89,15 +113,35 @@ def load_period_models(
             continue
         train_end_ts = pd.to_datetime(train_end)
 
-        entry_model = _load_booster(pd_dir / "entry_model" / "model_entry.json")
-        danger_model = _load_booster(pd_dir / "danger_model" / "model_danger.json")
+        entry_models: dict[str, xgb.Booster] = {}
+        entry_cols_map: dict[str, list[str]] = {}
+        entry_calib_map: dict[str, dict] = {}
+        # tenta carregar modelos multi-janela
+        for name, w in _entry_specs():
+            mdir = pd_dir / f"entry_model_{int(w)}m" / "model_entry.json"
+            if mdir.exists():
+                entry_models[name] = _load_booster(mdir)
+                meta_key = f"entry_{int(w)}m"
+                entry_cols_map[name] = list((meta.get(meta_key) or {}).get("feature_cols") or meta["entry"]["feature_cols"])
+                entry_calib_map[name] = dict((meta.get(meta_key) or {}).get("calibration") or meta["entry"].get("calibration") or {"type": "identity"})
+        # fallback legado (single)
+        if not entry_models:
+            entry_models["mid"] = _load_booster(pd_dir / "entry_model" / "model_entry.json")
+            entry_cols_map["mid"] = list(meta["entry"]["feature_cols"])
+            entry_calib_map["mid"] = dict(meta["entry"].get("calibration") or {"type": "identity"})
+
+        entry_model = entry_models.get("mid") or list(entry_models.values())[0]
+        danger_model = None
+        danger_path = pd_dir / "danger_model" / "model_danger.json"
+        if danger_path.exists():
+            danger_model = _load_booster(danger_path)
         exit_path = pd_dir / "exit_model" / "model_exit.json"
         exit_model = _load_booster(exit_path) if exit_path.exists() else None
         entry_cols = list(meta["entry"]["feature_cols"])
-        danger_cols = list(meta["danger"]["feature_cols"])
+        danger_cols = list((meta.get("danger") or {}).get("feature_cols") or [])
         exit_cols = list((meta.get("exit") or {}).get("feature_cols") or [])
         entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
-        danger_calib = dict(meta["danger"].get("calibration") or {"type": "identity"})
+        danger_calib = dict((meta.get("danger") or {}).get("calibration") or {"type": "identity"})
         exit_calib = dict((meta.get("exit") or {}).get("calibration") or {"type": "identity"})
         tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
         tau_danger = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
@@ -105,26 +149,34 @@ def load_period_models(
         if tau_entry is None:
             tau_entry = float(meta["entry"].get("threshold", 0.5))
         if tau_danger is None:
-            tau_danger = float(meta["danger"].get("threshold", 0.5))
+            tau_danger = float((meta.get("danger") or {}).get("threshold", 0.5))
         if tau_exit is None:
             tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
         tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
         tau_danger_add = float(min(0.99, max(0.01, tau_danger * float(tau_danger_add_multiplier))))
+        if danger_model is None:
+            tau_danger = 1.0
+            tau_danger_add = 1.0
+        tau_entry_map = {"mid": float(tau_entry)}
 
         periods.append(
             PeriodModel(
                 period_days=period_days,
                 train_end_utc=train_end_ts,
                 entry_model=entry_model,
+                entry_models=entry_models,
                 danger_model=danger_model,
                 exit_model=exit_model,
                 entry_cols=entry_cols,
+                entry_cols_map=entry_cols_map,
                 danger_cols=danger_cols,
                 exit_cols=exit_cols,
                 entry_calib=entry_calib,
+                entry_calib_map=entry_calib_map,
                 danger_calib=danger_calib,
                 exit_calib=exit_calib,
                 tau_entry=tau_entry,
+                tau_entry_map=tau_entry_map,
                 tau_danger=tau_danger,
                 tau_exit=tau_exit,
                 tau_add=tau_add,
@@ -155,10 +207,17 @@ def apply_threshold_overrides(
         tx = pm.tau_exit if tau_exit is None else float(tau_exit)
         ta = float(min(0.99, max(0.01, te * float(tau_add_multiplier))))
         tda = float(min(0.99, max(0.01, td * float(tau_danger_add_multiplier))))
+        if pm.danger_model is None:
+            td = 1.0
+            tda = 1.0
+        tau_entry_map = dict(pm.tau_entry_map or {})
+        if tau_entry is not None:
+            tau_entry_map = {k: float(te) for k in (tau_entry_map.keys() or ["mid"])}
         out.append(
             replace(
                 pm,
                 tau_entry=float(te),
+                tau_entry_map=tau_entry_map,
                 tau_danger=float(td),
                 tau_exit=float(tx),
                 tau_add=float(ta),
@@ -191,16 +250,17 @@ def predict_scores_walkforward(
     *,
     periods: List[PeriodModel],
     return_period_id: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, PeriodModel] | tuple[np.ndarray, np.ndarray, np.ndarray, PeriodModel, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel] | tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel, np.ndarray]:
     """
     Prediz p_entry/p_danger para cada timestamp, escolhendo o modelo mais recente com train_end_utc < t.
-    Retorna arrays e o primeiro período efetivamente usado (para thresholds).
+    Retorna p_entry por janela, p_danger e o primeiro período efetivamente usado.
     """
+    import xgboost as xgb
     idx = pd.to_datetime(df.index)
     n = len(idx)
-    p_entry = np.full(n, np.nan, dtype=np.float32)
+    p_entry_map = {name: np.full(n, np.nan, dtype=np.float32) for name, _w in _entry_specs()}
     p_danger = np.full(n, np.nan, dtype=np.float32)
-    # p_exit is unused with exit_score; keep NaN for compatibility.
+    # p_exit unused (mantido por compatibilidade).
     p_exit = np.full(n, np.nan, dtype=np.float32)
     period_id = np.full(n, -1, dtype=np.int16)
 
@@ -208,22 +268,30 @@ def predict_scores_walkforward(
 
     for pid, pm in enumerate(periods):
         mask = idx > pm.train_end_utc
-        mask &= ~np.isfinite(p_entry)  # só preenche onde ainda não foi preenchido
+        # só preenche onde ainda não foi preenchido (usa mid como proxy)
+        mask &= ~np.isfinite(p_entry_map.get("mid", np.full(n, np.nan, dtype=np.float32)))
         if not mask.any():
             continue
         mask_np = np.asarray(mask, dtype=bool)
         rows = np.flatnonzero(mask_np)
-        X_e = _build_matrix_rows(df, pm.entry_cols, rows)
-        X_d = _build_matrix_rows(df, pm.danger_cols, rows)
-        # IMPORTANT (XGBoost CUDA):
-        # `inplace_predict` com booster em CUDA e input numpy (CPU) gera warning
-        # "mismatched devices" e faz fallback interno. Usamos DMatrix direto.
-        import xgboost as xgb  # local import para reduzir custo em ambientes sem xgb
-        pe = pm.entry_model.predict(xgb.DMatrix(X_e), validate_features=False).astype(np.float32, copy=False)
-        pdg = pm.danger_model.predict(xgb.DMatrix(X_d), validate_features=False).astype(np.float32, copy=False)
-        pe = _apply_calibration(pe.astype(np.float64), pm.entry_calib).astype(np.float32, copy=False)
+        if pm.danger_model is None:
+            pdg = np.zeros(rows.size, dtype=np.float32)
+        else:
+            X_d = _build_matrix_rows(df, pm.danger_cols, rows)
+            # IMPORTANT (XGBoost CUDA):
+            # `inplace_predict` com booster em CUDA e input numpy (CPU) gera warning
+            # "mismatched devices" e faz fallback interno. Usamos DMatrix direto.
+            pdg = pm.danger_model.predict(xgb.DMatrix(X_d), validate_features=False).astype(np.float32, copy=False)
+        # entry por janela
+        for name, _w in _entry_specs():
+            model = pm.entry_models.get(name, pm.entry_model)
+            cols = pm.entry_cols_map.get(name, pm.entry_cols)
+            X_e = _build_matrix_rows(df, cols, rows)
+            pe = model.predict(xgb.DMatrix(X_e), validate_features=False).astype(np.float32, copy=False)
+            calib = pm.entry_calib_map.get(name, pm.entry_calib)
+            pe = _apply_calibration(pe.astype(np.float64), calib).astype(np.float32, copy=False)
+            p_entry_map[name][rows] = pe
         pdg = _apply_calibration(pdg.astype(np.float64), pm.danger_calib).astype(np.float32, copy=False)
-        p_entry[rows] = pe
         p_danger[rows] = pdg
         period_id[rows] = np.int16(pid)
         if used_any is None:
@@ -241,8 +309,8 @@ def predict_scores_walkforward(
             f"df=[{t0}..{t1}] train_end_range=[{te_min}..{te_max}]"
         )
     if return_period_id:
-        return p_entry, p_danger, p_exit, used_any, period_id
-    return p_entry, p_danger, p_exit, used_any
+        return p_entry_map, p_danger, p_exit, used_any, period_id
+    return p_entry_map, p_danger, p_exit, used_any
 
 
 
@@ -357,8 +425,7 @@ def simulate_sniper_from_scores(
     contract: TradeContract | None = None,
     candle_sec: int = 60,
     # Config explícita (sem depender de env vars)
-    tp_hard_when_exit: bool | None = None,
-    exit_min_hold_bars: int = 3,
+    exit_min_hold_bars: int = 0,
     exit_confirm_bars: int = 1,
 ) -> SniperBacktestResult:
     """
@@ -372,7 +439,6 @@ def simulate_sniper_from_scores(
     n = len(df)
 
 
-    timeout_bars = contract.timeout_bars(int(candle_sec))
     eq = 1.0
     eq_curve = np.ones(n, dtype=np.float64)
     trades: List[SniperTrade] = []
@@ -385,13 +451,16 @@ def simulate_sniper_from_scores(
     total_size = 0.0
     num_adds = 0
     # confirmação simples do exit
-    exit_min_hold = int(exit_min_hold_bars)
+    exit_min_hold = int(max(0, exit_min_hold_bars))
     exit_confirm = int(exit_confirm_bars)
     if exit_confirm <= 0:
         exit_confirm = 1
     exit_streak = 0
-    exit_threshold = float(getattr(contract, "exit_score_threshold", 0.0))
-    time_per_bar_hours = float(candle_sec) / 3600.0
+    ema_span = exit_ema_span_from_window(contract, int(candle_sec))
+    use_ema_exit = ema_span > 0
+    ema_alpha = 2.0 / float(ema_span + 1) if use_ema_exit else 0.0
+    ema_offset = float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
+    ema = 0.0
 
     size_sched = tuple(float(x) for x in contract.add_sizing) if contract.add_sizing else (1.0,)
     if len(size_sched) < contract.max_adds + 1:
@@ -419,6 +488,9 @@ def simulate_sniper_from_scores(
 
         if not in_pos:
             exit_streak = 0
+            if i + int(exit_min_hold) >= (n - 1):
+                eq_curve[i] = eq
+                continue
             if (pe >= pm.tau_entry) and (pdg < pm.tau_danger):
                 in_pos = True
                 entry_i = i
@@ -427,56 +499,24 @@ def simulate_sniper_from_scores(
                 last_fill = px
                 total_size = size_sched[0]
                 num_adds = 0
+                if use_ema_exit:
+                    ema = float(entry_price) * (1.0 - ema_offset)
             eq_curve[i] = eq
             continue
 
         time_in_trade = i - entry_i
-        hi = high[i] if np.isfinite(high[i]) else px
         lo = low[i] if np.isfinite(low[i]) else px
         reason = None
         exit_px = None
-        # exit score (pnl/dd/tempo/danger)
-        exit_score = 0.0
-        if (exit_threshold > 0.0) and (time_in_trade >= exit_min_hold):
-            pnl_pct = ((px / avg_price) - 1.0) * 100.0 if avg_price > 0.0 else 0.0
-            if pnl_pct < 0.0:
-                pnl_pct = 0.0
-            dd_pct_score = ((avg_price - lo) / avg_price) * 100.0 if (avg_price > 0.0 and lo < avg_price) else 0.0
-            time_hours = float(time_in_trade) * time_per_bar_hours
-            danger_hit = bool(pdg >= pm.tau_danger)
-            exit_score = contract.exit_score(
-                pnl_pct=float(pnl_pct),
-                dd_pct=float(dd_pct_score),
-                time_hours=float(time_hours),
-                danger_hit=bool(danger_hit),
-            )
+        if use_ema_exit:
+            ema = ema + (ema_alpha * (px - ema))
+            if px < ema:
+                exit_streak += 1
+            else:
+                exit_streak = 0
 
-        has_exit = bool(exit_threshold > 0.0)
-        if has_exit and (time_in_trade >= exit_min_hold) and (exit_score >= exit_threshold):
-            exit_streak += 1
-        else:
-            exit_streak = 0
-        exit_ok = has_exit and (exit_streak >= exit_confirm) and (time_in_trade >= exit_min_hold)
-
-        # TP hard:
-        # - se existe ExitScore, por padrão desligamos TP hard (deixa o Exit decidir)
-        # - se não existe ExitScore, TP hard fica ligado como antes
-        if tp_hard_when_exit is None:
-            tp_hard = (not has_exit)
-        else:
-            tp_hard = bool(tp_hard_when_exit) if has_exit else True
-
-        if reason is None and lo <= (avg_price * (1.0 - contract.sl_pct)):
-            reason = "SL"
-            exit_px = avg_price * (1.0 - contract.sl_pct)
-        elif reason is None and tp_hard and (hi >= (avg_price * (1.0 + contract.tp_min_pct))):
-            reason = "TP"
-            exit_px = avg_price * (1.0 + contract.tp_min_pct)
-        elif reason is None and exit_ok:
-            reason = "EXIT"
-            exit_px = px
-        elif reason is None and time_in_trade >= timeout_bars:
-            reason = "TO"
+        if use_ema_exit and (px < ema) and (exit_streak >= exit_confirm):
+            reason = "EMA"
             exit_px = px
 
         if reason is not None and exit_px is not None:
@@ -533,6 +573,32 @@ def simulate_sniper_from_scores(
         eq_curve[i] = eq
 
     # métricas
+    if in_pos and n > 0:
+        exit_px = float(close[-1])
+        entries = 1 + num_adds
+        sides = entries + 1
+        costs = sides * (contract.fee_pct_per_side + contract.slippage_pct)
+        r_gross = (exit_px / avg_price) - 1.0 if avg_price > 0 else 0.0
+        r_net = float(r_gross) - float(costs)
+        eq = eq * (1.0 + r_net)
+        trades.append(
+            SniperTrade(
+                entry_ts=pd.to_datetime(idx[entry_i]),
+                exit_ts=pd.to_datetime(idx[-1]),
+                entry_price=float(entry_price),
+                exit_price=float(exit_px),
+                num_adds=int(num_adds),
+                reason="EOD",
+                r_net=float(r_net),
+                avg_entry_price=float(avg_price),
+                entries=int(entries),
+                sides=int(sides),
+                costs=float(costs),
+                r_gross=float(r_gross),
+            )
+        )
+        eq_curve[-1] = eq
+
     eq_max = np.maximum.accumulate(eq_curve) if len(eq_curve) else eq_curve
     dd = (eq_max - eq_curve) / np.where(eq_max > 0, eq_max, 1.0) if len(eq_curve) else np.array([0.0])
     max_dd = float(np.nanmax(dd)) if len(dd) else 0.0
@@ -573,6 +639,7 @@ __all__ = [
     "PeriodModel",
     "load_period_models",
     "predict_scores_walkforward",
+    "select_entry_mid",
     "simulate_sniper_from_scores",
 ]
 

@@ -27,6 +27,6 @@ test/out_*.png
 modules/data/generated/
 
 # Secrets (local only)
-config/pushover_secrets.py
+modules/config/secrets.py
 .env
 

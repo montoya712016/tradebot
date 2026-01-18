@@ -1,15 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """
-Notificações via Pushover.
+NotificaÃ§Ãµes via Pushover.
 
 Uso (recomendado):
-- Defina variáveis de ambiente:
+- Defina variÃ¡veis de ambiente:
   - PUSHOVER_USER_KEY
   - PUSHOVER_TOKEN_TRADE (ou PUSHOVER_TOKEN_ERROR, etc.)
 
 Opcional (local):
-- Se existir `config/pushover_secrets.py`, ele pode ser usado como fallback.
+- Se existir `config/secrets.py`, ele pode ser usado como fallback.
   Esse arquivo deve ficar no `.gitignore`.
 """
 
@@ -65,15 +65,15 @@ def load_from_local_secrets(
     sound: str | None = None,
 ) -> PushoverConfig | None:
     """
-    Fallback local: lê `config/pushover_secrets.py` (se existir).
+    Fallback local: lÃª `config/secrets.py` (se existir).
     """
     try:
         # import absoluto (funciona quando `modules/` esta no sys.path)
-        from config import pushover_secrets as sec  # type: ignore
+        from config import secrets as sec  # type: ignore
     except Exception:
         try:
             # import relativo (quando importado como pacote)
-            from config import pushover_secrets as sec  # type: ignore
+            from config import secrets as sec  # type: ignore
         except Exception:
             return None
 
@@ -99,7 +99,7 @@ def load_default(
     """
     Ordem:
     1) ENV
-    2) config/pushover_secrets.py (local)
+    2) config/secrets.py (local)
     """
     cfg = load_from_env(user_env=user_env, token_env=token_env, title=title, device=device, priority=priority, sound=sound)
     if cfg is not None:
@@ -171,4 +171,5 @@ def send_pushover(
         return True, obj, None
     except Exception as e:
         return False, None, f"{type(e).__name__}: {e}"
+
 

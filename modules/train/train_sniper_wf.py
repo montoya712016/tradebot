@@ -43,7 +43,6 @@ from train.sniper_trainer import (  # type: ignore[import]
     TrainConfig,
     train_sniper_models,
     DEFAULT_ENTRY_PARAMS,
-    DEFAULT_DANGER_PARAMS,
 )
 
 
@@ -71,9 +70,7 @@ class TrainSniperWFSettings:
 
     # sizing (use RAM/VRAM)
     max_rows_entry: int = 6_000_000
-    max_rows_danger: int = 3_000_000
     entry_ratio_neg_per_pos: float = 6.0
-    danger_ratio_neg_per_pos: float = 4.0
 
     # device
     xgb_device: str = "cuda:0"  # "cpu" se quiser forÃ§ar
@@ -81,7 +78,6 @@ class TrainSniperWFSettings:
     # thresholds são definidos manualmente em config/thresholds.py
     # params xgb
     entry_params: dict = field(default_factory=lambda: dict(DEFAULT_ENTRY_PARAMS))
-    danger_params: dict = field(default_factory=lambda: dict(DEFAULT_DANGER_PARAMS))
 
     def __post_init__(self) -> None:
         # Se o usuÃ¡rio nÃ£o definiu offsets explicitamente, gera automaticamente.
@@ -109,9 +105,7 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         pass
 
     entry_params = dict(settings.entry_params)
-    danger_params = dict(settings.danger_params)
     entry_params["device"] = settings.xgb_device
-    danger_params["device"] = settings.xgb_device
 
     cfg = TrainConfig(
         total_days=int(settings.total_days),
@@ -119,11 +113,8 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         max_symbols=int(settings.max_symbols),
         min_symbols_used_per_period=int(settings.min_symbols_used_per_period),
         entry_params=entry_params,
-        danger_params=danger_params,
         max_rows_entry=int(settings.max_rows_entry),
-        max_rows_danger=int(settings.max_rows_danger),
         entry_ratio_neg_per_pos=float(settings.entry_ratio_neg_per_pos),
-        danger_ratio_neg_per_pos=float(settings.danger_ratio_neg_per_pos),
         use_feature_cache=bool(settings.use_feature_cache),
     )
     run_dir = train_sniper_models(cfg)
@@ -132,7 +123,7 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
 
 def main() -> None:
     run_dir = run()
-    print(f"âœ“ run_dir: {run_dir}")
+    print(f"[train-wf] run_dir: {run_dir}")
 
 
 if __name__ == "__main__":

@@ -5,15 +5,16 @@ from __future__ import annotations
 Random loop:
 - sample contract params (labels)
 - refresh labels
-- train WF (entry/danger)
+- train WF (entry)
 - run multiple backtests with same models (vary thresholds)
 - append metrics to CSV
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import csv
 import json
+import os
 import random
 import subprocess
 import sys
@@ -40,11 +41,12 @@ _ensure_modules_on_sys_path()
 
 from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract
 from prepare_features.refresh_sniper_labels_in_cache import RefreshLabelsSettings, run as refresh_labels
+from train.wf_train_params import TrainOptimizedContractRanges
+from backtest.wf_backtest_params import BacktestOptimizedRanges
 from train.sniper_trainer import (
     TrainConfig,
     train_sniper_models,
     DEFAULT_ENTRY_PARAMS,
-    DEFAULT_DANGER_PARAMS,
 )
 from utils.paths import resolve_generated_path
 
@@ -85,6 +87,32 @@ def _max_drawdown(eq: np.ndarray) -> float:
     peak = np.maximum.accumulate(eq)
     dd = (eq - peak) / np.where(peak > 0, peak, 1.0)
     return float(abs(np.min(dd)))
+
+
+def _find_latest_wf_dir() -> Path | None:
+    try:
+        from utils.paths import models_root as _models_root  # type: ignore
+
+        models_root = _models_root().resolve()
+    except Exception:
+        models_root = (Path(__file__).resolve().parents[2].parent / "models_sniper").resolve()
+    if not models_root.is_dir():
+        return None
+    wf_list = sorted([p for p in models_root.glob("wf_*") if p.is_dir()], key=lambda p: p.stat().st_mtime)
+    return wf_list[-1] if wf_list else None
+
+
+def _load_contract_from_json(path: Path) -> TradeContract:
+    base = DEFAULT_TRADE_CONTRACT
+    if not path.exists():
+        return base
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return replace(base, **data)
+    except Exception:
+        pass
+    return base
 
 
 def _compute_metrics(out_dir: Path) -> dict:
@@ -155,29 +183,22 @@ RESULTS_HEADER = [
     "top_symbols",
     "error",
     # contract params
-    "entry_min_profit_pct",
-    "entry_horizon_hours",
-    "min_hold_minutes",
-    "sl_pct",
-    "exit_score_threshold",
-    "danger_drop_pct",
-    "danger_drop_pct_critical",
-    "danger_fast_minutes",
-    "danger_timeout_hours",
+    "entry_window_min",
+    "entry_min_profit",
+    "entry_weight_alpha",
+    "exit_ema_span",
+    "exit_ema_init_offset_pct",
     # train params
     "entry_ratio_neg_per_pos",
-    "danger_ratio_neg_per_pos",
     "train_total_days",
     "train_offsets_years",
     "train_offsets_step_days",
     "train_max_symbols",
     "train_min_symbols_used_per_period",
     "train_max_rows_entry",
-    "train_max_rows_danger",
     "train_xgb_device",
     # backtest thresholds
     "tau_entry",
-    "tau_danger",
     # backtest params
     "bt_years",
     "bt_step_days",
@@ -187,7 +208,6 @@ RESULTS_HEADER = [
     "bt_total_exposure",
     "bt_max_trade_exposure",
     "bt_min_trade_exposure",
-    "bt_exit_min_hold_bars",
     "bt_exit_confirm_bars",
     "bt_universe_history_mode",
     "bt_universe_history_days",
@@ -207,107 +227,82 @@ class RandomLoopSettings:
     max_runs: int = 0  # 0 => infinite
     sleep_seconds_on_error: int = 30
 
-    # refresh
+    # fixed params (nao otimizados pelo wf_random_loop)
     candle_sec: int = 60
     refresh_verbose: bool = True
-
-    # train
+    skip_refresh: bool = True
+    rebuild_cache: bool = True
+    rebuild_cache_mode: str = "once"
     total_days: int = 0
-    offsets_step_days: int = 90
+    offsets_step_days: int = 180
     offsets_years: int = 6
-    max_symbols_train: int = 0
+    max_symbols_train: int = 100
     min_symbols_used_per_period: int = 30
-    max_rows_entry: int = 6_000_000
-    max_rows_danger: int = 3_000_000
+    max_rows_entry: int = 2_000_000
     xgb_device: str = "cuda:0"
-
-    # backtest
+    entry_ratio_neg_per_pos: float = 6.0
+    backtests_per_train: int = 5
     years: int = 6
-    step_days: int = 90
+    step_days: int = 180
     bar_stride: int = 1
-    max_symbols_backtest: int = 0
+    max_symbols_backtest: int = 100
     step_cache_mode: str = "memory"
     plot_save_only: bool = True
-
-    # random ranges (contract/labels)
-    entry_min_profit_pct: tuple[float, float, float]     = (0.020, 0.050, 0.005)
-    entry_horizon_hours: tuple[float, float, float]      = (1.0, 4.0, 0.5)
-    min_hold_minutes: tuple[int, int, int]               = (10, 60, 10)
-    sl_pct: tuple[float, float, float]                   = (0.020, 0.040, 0.005)
-    exit_score_threshold: tuple[float, float, float]     = (5.0, 15.0, 1.0)
-    danger_drop_pct_critical: tuple[float, float, float] = (0.05, 0.075, 0.005)
-    danger_fast_minutes: tuple[int, int, int]            = (45, 90, 15)
-    danger_timeout_hours: tuple[float, float, float]     = (4.0, 8.0, 1.0)
-
-    # training sampling (fixed)
-    entry_ratio_neg_per_pos: float = 6.0
-    danger_ratio_neg_per_pos: float = 4.0
-
-    # backtest thresholds (varied per train)
-    backtests_per_train: int = 3
-    tau_entry_range: tuple[float, float, float]  = (0.700, 0.900, 0.025)
-    tau_danger_range: tuple[float, float, float] = (0.750, 0.900, 0.025)
-
-    # backtest config (varied per backtest)
-    max_positions_range: tuple[int, int, int] = (15, 30, 3)
-    total_exposure_range: tuple[float, float, float] = (0.50, 1.00, 0.10)
-    max_trade_exposure_range: tuple[float, float, float] = (0.05, 0.10, 0.01)
-    min_trade_exposure_range: tuple[float, float, float] = (0.02, 0.05, 0.01)
-    exit_min_hold_bars_range: tuple[int, int, int] = (2, 5, 1)
-    exit_confirm_bars_range: tuple[int, int, int] = (1, 3, 1)
     universe_history_mode: str = "rolling"
-    universe_history_days_range: tuple[int, int, int] = (365, 730, 90)
-    universe_min_pf_range: tuple[float, float, float] = (1.0, 1.20, 0.05)
-    universe_min_win_range: tuple[float, float, float] = (0.30, 0.45, 0.05)
-    universe_max_dd_range: tuple[float, float, float] = (0.70, 1.00, 0.10)
+
+    # otimizados pelo wf_random_loop
+    train_contract_ranges: TrainOptimizedContractRanges = field(default_factory=TrainOptimizedContractRanges)
+    backtest_ranges: BacktestOptimizedRanges = field(default_factory=BacktestOptimizedRanges)
 
 
 def _sample_contract(rng: random.Random, s: RandomLoopSettings) -> tuple[TradeContract, dict]:
-    danger_drop = _rand_float(rng, *s.danger_drop_pct_critical)
+    r = s.train_contract_ranges
+    win_lo, win_hi, win_step = r.entry_window
+    w = _rand_int(rng, int(win_lo), int(win_hi), int(win_step))
+    p = _rand_float(rng, *r.entry_min_profit, decimals=4)
+    windows = (int(w),)
+    profits = [float(p)]
+    alpha = _rand_float(rng, *r.entry_weight_alpha, decimals=3)
+    ema_span = int(max(1, round((float(w) * 60.0) / float(max(1, int(s.candle_sec))))))
+    ema_offset = _rand_float(rng, *r.exit_ema_init_offset_pct, decimals=4)
     overrides = {
-        "entry_min_profit_pct": _rand_float(rng, *s.entry_min_profit_pct),
-        "entry_horizon_hours": _rand_float(rng, *s.entry_horizon_hours),
-        "min_hold_minutes": _rand_int(rng, *s.min_hold_minutes),
-        "sl_pct": _rand_float(rng, *s.sl_pct),
-        "exit_score_threshold": _rand_float(rng, *s.exit_score_threshold),
-        "danger_drop_pct": float(danger_drop),
-        "danger_drop_pct_critical": float(danger_drop),
-        "danger_fast_minutes": _rand_int(rng, *s.danger_fast_minutes),
-        "danger_timeout_hours": _rand_float(rng, *s.danger_timeout_hours),
+        "entry_label_windows_minutes": tuple(int(w) for w in windows),
+        "entry_label_min_profit_pcts": tuple(float(p) for p in profits),
+        "entry_label_weight_alpha": float(alpha),
+        "exit_ema_span": int(ema_span),
+        "exit_ema_init_offset_pct": float(ema_offset),
     }
     contract = replace(DEFAULT_TRADE_CONTRACT, **overrides)
     return contract, overrides
 
 
 def _sample_backtest_params(rng: random.Random, s: RandomLoopSettings) -> dict:
-    max_positions = _rand_int(rng, *s.max_positions_range)
-    total_exposure = _rand_float(rng, *s.total_exposure_range, decimals=3)
-    max_trade = _rand_float(rng, *s.max_trade_exposure_range, decimals=3)
-    min_trade_lo = float(s.min_trade_exposure_range[0])
-    min_trade_hi = float(min(max_trade, s.min_trade_exposure_range[1]))
+    r = s.backtest_ranges
+    max_positions = _rand_int(rng, *r.max_positions_range)
+    total_exposure = _rand_float(rng, *r.total_exposure_range, decimals=3)
+    max_trade = _rand_float(rng, *r.max_trade_exposure_range, decimals=3)
+    min_trade_lo = float(r.min_trade_exposure_range[0])
+    min_trade_hi = float(min(max_trade, r.min_trade_exposure_range[1]))
     if min_trade_hi < min_trade_lo:
         min_trade = min_trade_hi
     else:
-        min_trade = _rand_float(rng, min_trade_lo, min_trade_hi, s.min_trade_exposure_range[2], decimals=3)
-    exit_min_hold_bars = _rand_int(rng, *s.exit_min_hold_bars_range)
-    exit_confirm_bars = _rand_int(rng, *s.exit_confirm_bars_range)
-    universe_history_days = _rand_int(rng, *s.universe_history_days_range)
-    universe_min_pf = _rand_float(rng, *s.universe_min_pf_range, decimals=3)
-    universe_min_win = _rand_float(rng, *s.universe_min_win_range, decimals=3)
-    universe_max_dd = _rand_float(rng, *s.universe_max_dd_range, decimals=3)
+        min_trade = _rand_float(rng, min_trade_lo, min_trade_hi, r.min_trade_exposure_range[2], decimals=3)
+    exit_confirm_bars = _rand_int(rng, *r.exit_confirm_bars_range)
+    universe_history_days = _rand_int(rng, *r.universe_history_days_range)
+    universe_min_pf = _rand_float(rng, *r.universe_min_pf_range, decimals=3)
+    universe_min_win = _rand_float(rng, *r.universe_min_win_range, decimals=3)
+    universe_max_dd = _rand_float(rng, *r.universe_max_dd_range, decimals=3)
     return {
         "max_positions": int(max_positions),
         "total_exposure": float(total_exposure),
         "max_trade_exposure": float(max_trade),
         "min_trade_exposure": float(min_trade),
-        "exit_min_hold_bars": int(exit_min_hold_bars),
         "exit_confirm_bars": int(exit_confirm_bars),
         "universe_history_days": int(universe_history_days),
         "universe_min_pf": float(universe_min_pf),
         "universe_min_win": float(universe_min_win),
         "universe_max_dd": float(universe_max_dd),
-        "tau_entry": _rand_float(rng, *s.tau_entry_range, decimals=3),
-        "tau_danger": _rand_float(rng, *s.tau_danger_range, decimals=3),
+        "tau_entry": _rand_float(rng, *r.tau_entry_range, decimals=3),
     }
 
 
@@ -337,8 +332,6 @@ def _run_backtest(out_dir: Path, run_dir: Path, contract_json: Path, bt_params: 
         str(float(bt_params["max_trade_exposure"])),
         "--min-trade-exposure",
         str(float(bt_params["min_trade_exposure"])),
-        "--exit-min-hold-bars",
-        str(int(bt_params["exit_min_hold_bars"])),
         "--exit-confirm-bars",
         str(int(bt_params["exit_confirm_bars"])),
         "--universe-history-mode",
@@ -357,8 +350,6 @@ def _run_backtest(out_dir: Path, run_dir: Path, contract_json: Path, bt_params: 
         str(contract_json),
         "--tau-entry",
         str(float(bt_params["tau_entry"])),
-        "--tau-danger",
-        str(float(bt_params["tau_danger"])),
         "--no-pushover",
     ]
     if bool(s.plot_save_only):
@@ -368,6 +359,49 @@ def _run_backtest(out_dir: Path, run_dir: Path, contract_json: Path, bt_params: 
 
 def run(settings: RandomLoopSettings | None = None) -> None:
     s = settings or RandomLoopSettings()
+    env_out_root = os.getenv("WF_OUT_ROOT", "").strip()
+    if env_out_root:
+        s.out_root = str(env_out_root)
+    env_results_csv = os.getenv("WF_RESULTS_CSV", "").strip()
+    if env_results_csv:
+        s.results_csv = str(env_results_csv)
+    env_skip = os.getenv("WF_SKIP_REFRESH", "").strip().lower()
+    if env_skip in {"1", "true", "yes", "y", "on"}:
+        s.skip_refresh = True
+    env_force_refresh = os.getenv("WF_FORCE_REFRESH", "").strip().lower()
+    if env_force_refresh in {"1", "true", "yes", "y", "on"}:
+        s.skip_refresh = False
+    env_rebuild = os.getenv("WF_REBUILD_CACHE", "").strip().lower()
+    if env_rebuild in {"1", "true", "yes", "y", "on"}:
+        s.rebuild_cache = True
+    env_rebuild_mode = os.getenv("WF_REBUILD_CACHE_MODE", "").strip().lower()
+    if env_rebuild_mode in {"once", "always", "off"}:
+        s.rebuild_cache_mode = env_rebuild_mode
+    env_max_train = os.getenv("WF_MAX_SYMBOLS_TRAIN", "").strip()
+    if env_max_train:
+        try:
+            s.max_symbols_train = int(env_max_train)
+        except Exception:
+            pass
+    env_max_bt = os.getenv("WF_MAX_SYMBOLS_BACKTEST", "").strip()
+    if env_max_bt:
+        try:
+            s.max_symbols_backtest = int(env_max_bt)
+        except Exception:
+            pass
+    env_min_used = os.getenv("WF_MIN_SYMBOLS_USED_PER_PERIOD", "").strip()
+    if env_min_used:
+        try:
+            s.min_symbols_used_per_period = int(env_min_used)
+        except Exception:
+            pass
+    env_skip_train = os.getenv("WF_SKIP_TRAIN", "").strip().lower()
+    skip_train = env_skip_train in {"1", "true", "yes", "y", "on"}
+    env_skip_train_mode = os.getenv("WF_SKIP_TRAIN_MODE", "").strip().lower()
+    skip_train_mode = env_skip_train_mode if env_skip_train_mode in {"once", "always"} else "always"
+    if skip_train:
+        # no skip-train: reaproveita modelos existentes, entao nao precisa refresh de labels
+        s.skip_refresh = True
     out_root = resolve_generated_path(s.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     results_csv = out_root / s.results_csv
@@ -375,6 +409,8 @@ def run(settings: RandomLoopSettings | None = None) -> None:
     header = list(RESULTS_HEADER)
 
     run_idx = 0
+    skip_train_once_done = False
+    cache_rebuilt_once = False
     while True:
         if s.max_runs > 0 and run_idx >= s.max_runs:
             break
@@ -386,6 +422,29 @@ def run(settings: RandomLoopSettings | None = None) -> None:
         train_dir = out_root / train_id
         train_dir.mkdir(parents=True, exist_ok=True)
         contract, contract_overrides = _sample_contract(rng, s)
+        if skip_train and (skip_train_mode == "always" or not skip_train_once_done):
+            latest = _find_latest_wf_dir()
+            if latest is None:
+                raise RuntimeError("WF_SKIP_TRAIN ativo mas nenhum wf_* encontrado em models_sniper")
+            contract_json = latest / "contract.json"
+            contract = _load_contract_from_json(contract_json)
+            contract_overrides = json.loads(contract_json.read_text(encoding="utf-8")) if contract_json.exists() else {}
+
+        if bool(s.rebuild_cache):
+            mode = str(getattr(s, "rebuild_cache_mode", "once") or "once").lower()
+            if mode == "always":
+                os.environ["SNIPER_CACHE_REFRESH"] = "1"
+            elif mode == "once":
+                if not cache_rebuilt_once:
+                    os.environ["SNIPER_CACHE_REFRESH"] = "1"
+                else:
+                    os.environ["SNIPER_CACHE_REFRESH"] = "0"
+            else:
+                os.environ["SNIPER_CACHE_REFRESH"] = "0"
+            print(
+                f"[loop] cache_refresh={os.environ.get('SNIPER_CACHE_REFRESH','0')} mode={mode} rebuilt_once={cache_rebuilt_once}",
+                flush=True,
+            )
 
         contract_json = train_dir / "contract.json"
         contract_json.write_text(json.dumps(contract_overrides, indent=2, ensure_ascii=True), encoding="utf-8")
@@ -398,6 +457,7 @@ def run(settings: RandomLoopSettings | None = None) -> None:
             "refresh": {
                 "candle_sec": int(s.candle_sec),
                 "verbose": bool(s.refresh_verbose),
+                "skip": bool(s.skip_refresh),
             },
             "train": {
                 "total_days": int(s.total_days),
@@ -406,9 +466,7 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                 "max_symbols": int(s.max_symbols_train),
                 "min_symbols_used_per_period": int(s.min_symbols_used_per_period),
                 "max_rows_entry": int(s.max_rows_entry),
-                "max_rows_danger": int(s.max_rows_danger),
                 "entry_ratio_neg_per_pos": float(s.entry_ratio_neg_per_pos),
-                "danger_ratio_neg_per_pos": float(s.danger_ratio_neg_per_pos),
                 "xgb_device": str(s.xgb_device),
             },
             "backtest": {
@@ -420,18 +478,16 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                 "universe_history_mode": str(s.universe_history_mode),
                 "step_cache_mode": str(s.step_cache_mode),
                 "plot_save_only": bool(s.plot_save_only),
-                "tau_entry_range": tuple(s.tau_entry_range),
-                "tau_danger_range": tuple(s.tau_danger_range),
-                "max_positions_range": tuple(s.max_positions_range),
-                "total_exposure_range": tuple(s.total_exposure_range),
-                "max_trade_exposure_range": tuple(s.max_trade_exposure_range),
-                "min_trade_exposure_range": tuple(s.min_trade_exposure_range),
-                "exit_min_hold_bars_range": tuple(s.exit_min_hold_bars_range),
-                "exit_confirm_bars_range": tuple(s.exit_confirm_bars_range),
-                "universe_history_days_range": tuple(s.universe_history_days_range),
-                "universe_min_pf_range": tuple(s.universe_min_pf_range),
-                "universe_min_win_range": tuple(s.universe_min_win_range),
-                "universe_max_dd_range": tuple(s.universe_max_dd_range),
+                "tau_entry_range": tuple(s.backtest_ranges.tau_entry_range),
+                "max_positions_range": tuple(s.backtest_ranges.max_positions_range),
+                "total_exposure_range": tuple(s.backtest_ranges.total_exposure_range),
+                "max_trade_exposure_range": tuple(s.backtest_ranges.max_trade_exposure_range),
+                "min_trade_exposure_range": tuple(s.backtest_ranges.min_trade_exposure_range),
+                "exit_confirm_bars_range": tuple(s.backtest_ranges.exit_confirm_bars_range),
+                "universe_history_days_range": tuple(s.backtest_ranges.universe_history_days_range),
+                "universe_min_pf_range": tuple(s.backtest_ranges.universe_min_pf_range),
+                "universe_min_win_range": tuple(s.backtest_ranges.universe_min_win_range),
+                "universe_max_dd_range": tuple(s.backtest_ranges.universe_max_dd_range),
             },
         }
         (train_dir / "train_meta.json").write_text(json.dumps(train_meta, indent=2, ensure_ascii=True), encoding="utf-8")
@@ -439,43 +495,55 @@ def run(settings: RandomLoopSettings | None = None) -> None:
         train_run_dir = ""
         try:
             print(f"[loop] train {train_id} seed={seed}", flush=True)
-            print(f"[loop] refresh labels start contract={contract_overrides}", flush=True)
-            refresh_info = refresh_labels(
-                RefreshLabelsSettings(
-                    limit=0,
-                    symbols=None,
-                    candle_sec=int(s.candle_sec),
-                    contract=contract,
-                    verbose=bool(s.refresh_verbose),
+            if bool(s.skip_refresh):
+                print(
+                    f"[loop] refresh labels skipped (WF_SKIP_REFRESH={os.getenv('WF_SKIP_REFRESH','')})",
+                    flush=True,
                 )
-            )
-            print(
-                f"[loop] refresh labels done ok={refresh_info.get('ok', 0)} "
-                f"fail={refresh_info.get('fail', 0)} sec={refresh_info.get('seconds', 0):.2f}",
-                flush=True,
-            )
+            else:
+                print(f"[loop] refresh labels start contract={contract_overrides}", flush=True)
+                refresh_info = refresh_labels(
+                    RefreshLabelsSettings(
+                        limit=0,
+                        symbols=None,
+                        candle_sec=int(s.candle_sec),
+                        contract=contract,
+                        max_symbols=int(s.max_symbols_train),
+                        verbose=bool(s.refresh_verbose),
+                    )
+                )
+                print(
+                    f"[loop] refresh labels done ok={refresh_info.get('ok', 0)} "
+                    f"fail={refresh_info.get('fail', 0)} sec={refresh_info.get('seconds', 0):.2f}",
+                    flush=True,
+                )
 
-            entry_params = dict(DEFAULT_ENTRY_PARAMS)
-            danger_params = dict(DEFAULT_DANGER_PARAMS)
-            entry_params["device"] = str(s.xgb_device)
-            danger_params["device"] = str(s.xgb_device)
-            cfg = TrainConfig(
-                total_days=int(s.total_days),
-                offsets_days=tuple(range(int(s.offsets_step_days), int(365 * s.offsets_years) + 1, int(s.offsets_step_days))),
-                max_symbols=int(s.max_symbols_train),
-                min_symbols_used_per_period=int(s.min_symbols_used_per_period),
-                entry_ratio_neg_per_pos=float(s.entry_ratio_neg_per_pos),
-                danger_ratio_neg_per_pos=float(s.danger_ratio_neg_per_pos),
-                max_rows_entry=int(s.max_rows_entry),
-                max_rows_danger=int(s.max_rows_danger),
-                entry_params=entry_params,
-                danger_params=danger_params,
-                use_feature_cache=True,
-                contract=contract,
-            )
-            print("[loop] training start", flush=True)
-            train_run_dir = str(train_sniper_models(cfg))
-            print(f"[loop] training done run_dir={train_run_dir}", flush=True)
+            if skip_train and (skip_train_mode == "always" or not skip_train_once_done):
+                latest = _find_latest_wf_dir()
+                if latest is None:
+                    raise RuntimeError("WF_SKIP_TRAIN ativo mas nenhum wf_* encontrado em models_sniper")
+                train_run_dir = str(latest)
+                print(f"[loop] training skipped, using run_dir={train_run_dir}", flush=True)
+                skip_train_once_done = True
+            else:
+                entry_params = dict(DEFAULT_ENTRY_PARAMS)
+                entry_params["device"] = str(s.xgb_device)
+                cfg = TrainConfig(
+                    total_days=int(s.total_days),
+                    offsets_days=tuple(range(int(s.offsets_step_days), int(365 * s.offsets_years) + 1, int(s.offsets_step_days))),
+                    max_symbols=int(s.max_symbols_train),
+                    min_symbols_used_per_period=int(s.min_symbols_used_per_period),
+                    entry_ratio_neg_per_pos=float(s.entry_ratio_neg_per_pos),
+                    max_rows_entry=int(s.max_rows_entry),
+                    entry_params=entry_params,
+                    use_feature_cache=True,
+                    contract=contract,
+                )
+                print("[loop] training start", flush=True)
+                train_run_dir = str(train_sniper_models(cfg))
+                print(f"[loop] training done run_dir={train_run_dir}", flush=True)
+                if bool(s.rebuild_cache) and str(getattr(s, "rebuild_cache_mode", "once") or "once").lower() == "once":
+                    cache_rebuilt_once = True
         except KeyboardInterrupt:
             raise
         except Exception as e:
@@ -508,29 +576,22 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                 "top_symbols": "",
                 "error": err_msg,
                 # contract params
-                "entry_min_profit_pct": contract_overrides.get("entry_min_profit_pct", ""),
-                "entry_horizon_hours": contract_overrides.get("entry_horizon_hours", ""),
-                "min_hold_minutes": contract_overrides.get("min_hold_minutes", ""),
-                "sl_pct": contract_overrides.get("sl_pct", ""),
-                "exit_score_threshold": contract_overrides.get("exit_score_threshold", ""),
-                "danger_drop_pct": contract_overrides.get("danger_drop_pct", ""),
-                "danger_drop_pct_critical": contract_overrides.get("danger_drop_pct_critical", ""),
-                "danger_fast_minutes": contract_overrides.get("danger_fast_minutes", ""),
-                "danger_timeout_hours": contract_overrides.get("danger_timeout_hours", ""),
+                "entry_window_min": (contract.entry_label_windows_minutes[0] if len(contract.entry_label_windows_minutes) > 0 else ""),
+                "entry_min_profit": (contract.entry_label_min_profit_pcts[0] if len(contract.entry_label_min_profit_pcts) > 0 else ""),
+                "entry_weight_alpha": float(getattr(contract, "entry_label_weight_alpha", 1.0)),
+                "exit_ema_span": int(getattr(contract, "exit_ema_span", 0) or 0),
+                "exit_ema_init_offset_pct": float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
                 # train params
                 "entry_ratio_neg_per_pos": float(s.entry_ratio_neg_per_pos),
-                "danger_ratio_neg_per_pos": float(s.danger_ratio_neg_per_pos),
                 "train_total_days": int(s.total_days),
                 "train_offsets_years": int(s.offsets_years),
                 "train_offsets_step_days": int(s.offsets_step_days),
                 "train_max_symbols": int(s.max_symbols_train),
                 "train_min_symbols_used_per_period": int(s.min_symbols_used_per_period),
                 "train_max_rows_entry": int(s.max_rows_entry),
-                "train_max_rows_danger": int(s.max_rows_danger),
                 "train_xgb_device": str(s.xgb_device),
                 # backtest thresholds
                 "tau_entry": "",
-                "tau_danger": "",
                 # backtest params
                 "bt_years": "",
                 "bt_step_days": "",
@@ -540,7 +601,6 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                 "bt_total_exposure": "",
                 "bt_max_trade_exposure": "",
                 "bt_min_trade_exposure": "",
-                "bt_exit_min_hold_bars": "",
                 "bt_exit_confirm_bars": "",
                 "bt_universe_history_mode": "",
                 "bt_universe_history_days": "",
@@ -575,7 +635,7 @@ def run(settings: RandomLoopSettings | None = None) -> None:
             try:
                 print(
                     f"[loop] backtest start {train_id}/{bt_id} "
-                    f"tau_entry={bt_params.get('tau_entry')} tau_danger={bt_params.get('tau_danger')} "
+                    f"tau_entry={bt_params.get('tau_entry')} "
                     f"max_positions={bt_params.get('max_positions')} total_exposure={bt_params.get('total_exposure')}",
                     flush=True,
                 )
@@ -625,29 +685,22 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                     "top_symbols": metrics.get("top_symbols", ""),
                     "error": err_msg,
                     # contract params
-                    "entry_min_profit_pct": contract_overrides.get("entry_min_profit_pct", ""),
-                    "entry_horizon_hours": contract_overrides.get("entry_horizon_hours", ""),
-                    "min_hold_minutes": contract_overrides.get("min_hold_minutes", ""),
-                    "sl_pct": contract_overrides.get("sl_pct", ""),
-                    "exit_score_threshold": contract_overrides.get("exit_score_threshold", ""),
-                    "danger_drop_pct": contract_overrides.get("danger_drop_pct", ""),
-                    "danger_drop_pct_critical": contract_overrides.get("danger_drop_pct_critical", ""),
-                    "danger_fast_minutes": contract_overrides.get("danger_fast_minutes", ""),
-                    "danger_timeout_hours": contract_overrides.get("danger_timeout_hours", ""),
+                    "entry_window_min": (contract.entry_label_windows_minutes[0] if len(contract.entry_label_windows_minutes) > 0 else ""),
+                    "entry_min_profit": (contract.entry_label_min_profit_pcts[0] if len(contract.entry_label_min_profit_pcts) > 0 else ""),
+                    "entry_weight_alpha": float(getattr(contract, "entry_label_weight_alpha", 1.0)),
+                    "exit_ema_span": int(getattr(contract, "exit_ema_span", 0) or 0),
+                    "exit_ema_init_offset_pct": float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
                     # train params
                     "entry_ratio_neg_per_pos": float(s.entry_ratio_neg_per_pos),
-                    "danger_ratio_neg_per_pos": float(s.danger_ratio_neg_per_pos),
                     "train_total_days": int(s.total_days),
                     "train_offsets_years": int(s.offsets_years),
                     "train_offsets_step_days": int(s.offsets_step_days),
                     "train_max_symbols": int(s.max_symbols_train),
                     "train_min_symbols_used_per_period": int(s.min_symbols_used_per_period),
                     "train_max_rows_entry": int(s.max_rows_entry),
-                    "train_max_rows_danger": int(s.max_rows_danger),
                     "train_xgb_device": str(s.xgb_device),
                     # backtest thresholds
                     "tau_entry": bt_params.get("tau_entry", ""),
-                    "tau_danger": bt_params.get("tau_danger", ""),
                     # backtest params
                     "bt_years": int(s.years),
                     "bt_step_days": int(s.step_days),
@@ -657,7 +710,6 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                     "bt_total_exposure": bt_params.get("total_exposure", ""),
                     "bt_max_trade_exposure": bt_params.get("max_trade_exposure", ""),
                     "bt_min_trade_exposure": bt_params.get("min_trade_exposure", ""),
-                    "bt_exit_min_hold_bars": bt_params.get("exit_min_hold_bars", ""),
                     "bt_exit_confirm_bars": bt_params.get("exit_confirm_bars", ""),
                     "bt_universe_history_mode": str(s.universe_history_mode),
                     "bt_universe_history_days": bt_params.get("universe_history_days", ""),

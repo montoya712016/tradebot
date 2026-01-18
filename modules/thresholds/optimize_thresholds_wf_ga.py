@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 """
@@ -6,22 +6,22 @@ GA (Genetic Algorithm) para calibrar thresholds (tau_entry/tau_danger/tau_exit) 
 em walk-forward por janelas fixas.
 
 Ideia (sem leakage):
-- Dividimos o histórico em janelas consecutivas de tamanho `step_days` (ex.: 90d).
+- Dividimos o histÃ³rico em janelas consecutivas de tamanho `step_days` (ex.: 90d).
 - Para cada passo i:
-    - Otimiza thresholds SOMENTE na janela i (train/calibração).
+    - Otimiza thresholds SOMENTE na janela i (train/calibraÃ§Ã£o).
     - Avalia (out-of-sample) esses thresholds na janela i+1 (teste).
-    - Avança (i <- i+1).
+    - AvanÃ§a (i <- i+1).
 
-Observações importantes:
-- `ExitScore` é calculado on-the-fly dentro do simulador (depende de cycle_*),
-  então o custo de simulação domina. Para viabilizar, este script suporta:
+ObservaÃ§Ãµes importantes:
+- `ExitScore` Ã© calculado on-the-fly dentro do simulador (depende de cycle_*),
+  entÃ£o o custo de simulaÃ§Ã£o domina. Para viabilizar, este script suporta:
     - `--bar_stride` para downsample (ex.: 5 => usa 1 a cada 5 candles).
-    - `--symbols_per_eval` para amostrar símbolos por avaliação (fitness estocástico).
-    - Paralelismo em nível de indivíduos (`--jobs`).
+    - `--symbols_per_eval` para amostrar sÃ­mbolos por avaliaÃ§Ã£o (fitness estocÃ¡stico).
+    - Paralelismo em nÃ­vel de indivÃ­duos (`--jobs`).
 
-Saídas:
-- CSV com thresholds e métricas in-sample e out-of-sample por passo.
-- JSON por passo em `out_dir` (opcional), útil para reaplicar thresholds na simulação.
+SaÃ­das:
+- CSV com thresholds e mÃ©tricas in-sample e out-of-sample por passo.
+- JSON por passo em `out_dir` (opcional), Ãºtil para reaplicar thresholds na simulaÃ§Ã£o.
 
 Executar:
   python modules/thresholds/optimize_thresholds_wf_ga.py --run-dir D:/astra/models_sniper/wf_020 --max-symbols 150
@@ -63,7 +63,7 @@ try:
     from config.symbols import load_top_market_cap_symbols
     from utils.paths import resolve_generated_path
 except Exception:
-    # fallback para execução direta
+    # fallback para execuÃ§Ã£o direta
     import sys
     here = Path(__file__).resolve()
     for p in here.parents:
@@ -84,7 +84,7 @@ except Exception:
     from utils.paths import resolve_generated_path  # type: ignore[import]
 
 try:
-    # opcional: notificações (não pode quebrar o GA)
+    # opcional: notificaÃ§Ãµes (nÃ£o pode quebrar o GA)
     from utils.pushover_notify import load_default as _pushover_load_default, send_pushover as _pushover_send
 except Exception:
     try:
@@ -118,8 +118,8 @@ def _set_thread_limits(n: int) -> int:
     Limita threads internas (OpenMP/BLAS/numexpr/pyarrow) e XGBoost.
 
     IMPORTANT:
-    - `--jobs` controla QUANTOS processos; mesmo com jobs=1 você pode ver CPU=100%
-      porque XGBoost (OpenMP) e/ou BLAS podem usar vários cores dentro de um único processo.
+    - `--jobs` controla QUANTOS processos; mesmo com jobs=1 vocÃª pode ver CPU=100%
+      porque XGBoost (OpenMP) e/ou BLAS podem usar vÃ¡rios cores dentro de um Ãºnico processo.
     """
     try:
         n = int(max(1, int(n)))
@@ -142,7 +142,7 @@ def _set_thread_limits(n: int) -> int:
         except Exception:
             pass
 
-    # XGBoost global config (3.x): nthread=0 => usa "máximo"
+    # XGBoost global config (3.x): nthread=0 => usa "mÃ¡ximo"
     try:
         import xgboost as xgb  # type: ignore
 
@@ -169,7 +169,7 @@ def _xgb_has_cuda() -> bool:
         return False
 
 
-# Threshold grids específicos para cada variável
+# Threshold grids especÃ­ficos para cada variÃ¡vel
 _ENTRY_MIN, _ENTRY_MAX = 0.70, 0.85
 _DANGER_MIN, _DANGER_MAX = 0.40, 0.65
 _EXIT_MIN, _EXIT_MAX = 0.60, 0.85
@@ -190,7 +190,7 @@ def _quantize_tau(x: float, lo: float, hi: float) -> float:
 
 def _read_parquet_best_effort(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame | None:
     """
-    Lê parquet tentando selecionar colunas, mas tolerando colunas ausentes (evita crash).
+    LÃª parquet tentando selecionar colunas, mas tolerando colunas ausentes (evita crash).
     """
     p = Path(path)
     cols = list(columns) if columns else None
@@ -198,7 +198,7 @@ def _read_parquet_best_effort(path: Path, *, columns: list[str] | None = None) -
         try:
             return pd.read_parquet(p, columns=cols)
         except Exception:
-            # tenta interseção via schema (pyarrow)
+            # tenta interseÃ§Ã£o via schema (pyarrow)
             try:
                 import pyarrow.parquet as pq  # type: ignore
 
@@ -216,8 +216,8 @@ def _read_parquet_best_effort(path: Path, *, columns: list[str] | None = None) -
 
 def _read_cache_meta_times(data_path: Path) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     """
-    Lê start/end do cache via *.meta.json (rápido).
-    Fallback para None se não conseguir.
+    LÃª start/end do cache via *.meta.json (rÃ¡pido).
+    Fallback para None se nÃ£o conseguir.
     """
     try:
         mp = Path(data_path).with_suffix(".meta.json")
@@ -243,38 +243,38 @@ class Individual:
 @dataclass(frozen=True)
 class FitnessWeights:
     """
-    Fitness simples (como você pediu): otimiza SOMENTE 4 métricas via média geométrica de margens:
+    Fitness simples (como vocÃª pediu): otimiza SOMENTE 4 mÃ©tricas via mÃ©dia geomÃ©trica de margens:
     - retorno final (%)
     - profit factor (PF)
     - win rate (hit)
     - max drawdown (DD)
 
-    Sem mínimo/máximo de trades, sem consistência mensal.
+    Sem mÃ­nimo/mÃ¡ximo de trades, sem consistÃªncia mensal.
     """
 
     pf_cap: float = 8.0
 
     # Targets (margens >= 1.0)
-    # Obs: definimos em % para você não ter que "converter na cabeça".
-    # Ex.: 30.0 = +30% no período.
+    # Obs: definimos em % para vocÃª nÃ£o ter que "converter na cabeÃ§a".
+    # Ex.: 30.0 = +30% no perÃ­odo.
     target_return_pct: float = 30.0  # +30% / 180d
     target_pf: float = 1.50
     target_win: float = 0.50
     target_dd: float = 0.30
 
     # Penaliza mais forte nesses limites "ruins"
-    hard_return_pct: float = 0.0  # não aceita retorno negativo (padrão)
+    hard_return_pct: float = 0.0  # nÃ£o aceita retorno negativo (padrÃ£o)
     hard_pf: float = 1.00
     hard_win: float = 0.30
     hard_dd: float = 0.50
 
-    # Regularização numérica e clipping (evita 0/inf)
+    # RegularizaÃ§Ã£o numÃ©rica e clipping (evita 0/inf)
     eps: float = 1e-9
     margin_min: float = 0.20
-    # caps por métrica (evita que UMA métrica domine a GM)
-    # - PF muito alto (>~2.3) costuma indicar "quase não opera" (suspeito)
+    # caps por mÃ©trica (evita que UMA mÃ©trica domine a GM)
+    # - PF muito alto (>~2.3) costuma indicar "quase nÃ£o opera" (suspeito)
     # - win muito alto (>~0.6) idem
-    # - DD muito baixo não deve "comprar" fitness
+    # - DD muito baixo nÃ£o deve "comprar" fitness
     eq_margin_max: float = 3.00
     pf_margin_max: float = 1.55  # ~ 2.3 / 1.5
     win_margin_max: float = 1.20  # 0.60 / 0.50
@@ -285,18 +285,18 @@ class FitnessWeights:
     pen_pf_hi: float = 1.25
     pen_win_hi: float = 1.00
 
-    # Pesos das penalidades hard (multiplicativas; não vai a -inf)
+    # Pesos das penalidades hard (multiplicativas; nÃ£o vai a -inf)
     pen_eq: float = 8.0
     pen_pf: float = 6.0
     pen_win: float = 2.0
     pen_dd: float = 6.0
 
-    # Se True e o símbolo não operou, tratamos como neutro (não derruba a média)
+    # Se True e o sÃ­mbolo nÃ£o operou, tratamos como neutro (nÃ£o derruba a mÃ©dia)
     no_trade_neutral: bool = True
 
     # --- NOVAS TRAVAS DE ESTABILIDADE ---
-    # Alvos de quantidade de trades (total do portfólio na janela de 180 dias)
-    # Para 24 símbolos em 180 dias, ~100-800 trades é um range saudável (0.5 a 4 trades/dia).
+    # Alvos de quantidade de trades (total do portfÃ³lio na janela de 180 dias)
+    # Para 24 sÃ­mbolos em 180 dias, ~100-800 trades Ã© um range saudÃ¡vel (0.5 a 4 trades/dia).
     target_trades_min: int = 100
     target_trades_max: int = 800
     pen_trade_count: float = 5.0
@@ -312,7 +312,7 @@ class EvalResult:
     max_dd: float
     profit_factor: float
     win_rate: float
-    trades: int  # trades do símbolo (quando per-symbol) ou média (quando agregado)
+    trades: int  # trades do sÃ­mbolo (quando per-symbol) ou mÃ©dia (quando agregado)
     neg_months: int  # idem
     # Extras p/ leitura humana (agregado):
     symbols: int = 1
@@ -324,12 +324,12 @@ class EvalResult:
 @dataclass(frozen=True)
 class UniverseSelectorConfig:
     """
-    Config para seleção dinâmica de universo por step, baseado em OOS acumulado por símbolo.
+    Config para seleÃ§Ã£o dinÃ¢mica de universo por step, baseado em OOS acumulado por sÃ­mbolo.
 
     Regras (sem vazamento):
-    - O universo ATIVO do step k é decidido usando apenas o histórico OOS até k-1.
-    - No final do step k, rodamos um "shadow OOS" com TODO o universo disponível do step
-      para atualizar métricas por símbolo (incluindo símbolos inativos).
+    - O universo ATIVO do step k Ã© decidido usando apenas o histÃ³rico OOS atÃ© k-1.
+    - No final do step k, rodamos um "shadow OOS" com TODO o universo disponÃ­vel do step
+      para atualizar mÃ©tricas por sÃ­mbolo (incluindo sÃ­mbolos inativos).
     """
 
     enabled: bool = True
@@ -339,16 +339,16 @@ class UniverseSelectorConfig:
     min_steps: int = 2
     min_trades_total: int = 10
 
-    # Histerese (ban/unban) usando retorno normalizado e PF (OOS, por símbolo)
+    # Histerese (ban/unban) usando retorno normalizado e PF (OOS, por sÃ­mbolo)
     ban_ret180: float = -1.0
     ban_pf: float = 1.00
     unban_ret180: float = 0.50
     unban_pf: float = 1.05
 
-    # Remove "não-operáveis" (ex.: stablecoins que nunca geram trade) após algum histórico
+    # Remove "nÃ£o-operÃ¡veis" (ex.: stablecoins que nunca geram trade) apÃ³s algum histÃ³rico
     ban_if_avg_trades_per_step_below: float = 0.25
 
-    # Mantém diversificação mínima, mesmo que o critério baniria muita coisa
+    # MantÃ©m diversificaÃ§Ã£o mÃ­nima, mesmo que o critÃ©rio baniria muita coisa
     min_active: int = 20
 
     # Limita churn por step (estabilidade de universo)
@@ -371,7 +371,7 @@ def _append_csv(path: Path, df: pd.DataFrame) -> None:
         else:
             df.to_csv(p, mode="w", header=True, index=False, encoding="utf-8")
     except Exception:
-        # nunca quebrar o GA por I/O de relatórios
+        # nunca quebrar o GA por I/O de relatÃ³rios
         return
 
 
@@ -401,10 +401,10 @@ def _per_symbol_eval_from_portfolio_trades(
     weights: FitnessWeights,
 ) -> dict[str, EvalResult]:
     """
-    Constrói métricas por símbolo a partir de trades de um backtest de PORTFÓLIO.
+    ConstrÃ³i mÃ©tricas por sÃ­mbolo a partir de trades de um backtest de PORTFÃ“LIO.
 
-    Nota: retornos por trade são tratados como multiplicativos via (1 + weight*r_net)
-    em ordem cronológica de saída (exit_ts), para obter eq_end/max_dd por símbolo.
+    Nota: retornos por trade sÃ£o tratados como multiplicativos via (1 + weight*r_net)
+    em ordem cronolÃ³gica de saÃ­da (exit_ts), para obter eq_end/max_dd por sÃ­mbolo.
     """
     by_sym: dict[str, list[Any]] = {str(s).upper(): [] for s in (symbols or [])}
     for tr in list(trades or []):
@@ -467,9 +467,9 @@ def _per_symbol_eval_from_portfolio_trades(
 
 def _compute_symbol_ewm(history: pd.DataFrame, *, decay: float) -> dict[str, dict[str, float]]:
     """
-    Agrega histórico por símbolo usando EWM simples (decay).
+    Agrega histÃ³rico por sÃ­mbolo usando EWM simples (decay).
 
-    Espera colunas (quando disponíveis):
+    Espera colunas (quando disponÃ­veis):
     - fitness
     - ret180_pct
     - profit_factor
@@ -502,7 +502,7 @@ def _compute_symbol_ewm(history: pd.DataFrame, *, decay: float) -> dict[str, dic
         g2 = g
         steps = int(len(g2))
         trades_total = 0.0
-        # EWM de métricas-chave (fallback = NaN)
+        # EWM de mÃ©tricas-chave (fallback = NaN)
         ew_f = None
         ew_r = None
         ew_pf = None
@@ -555,7 +555,7 @@ def _select_active_symbols_for_step(
     cfg: UniverseSelectorConfig,
 ) -> tuple[list[str], dict[str, str]]:
     """
-    Decide universo ativo do step (somente com base no histórico OOS anterior).
+    Decide universo ativo do step (somente com base no histÃ³rico OOS anterior).
 
     Retorna (active_syms, reason_by_symbol) para logging/debug.
     """
@@ -572,11 +572,11 @@ def _select_active_symbols_for_step(
     prev_active = [str(x).upper() for x in (state_prev.get("active_symbols") or [])]
     prev_banned = {str(x).upper() for x in (state_prev.get("banned_symbols") or [])}
 
-    # Mantém coerência com o universo disponível no step
+    # MantÃ©m coerÃªncia com o universo disponÃ­vel no step
     prev_active = [s for s in prev_active if s in av_set]
     prev_banned = {s for s in prev_banned if s in av_set}
 
-    # Se não havia estado (primeiro step pós-warmup), começa com tudo disponível
+    # Se nÃ£o havia estado (primeiro step pÃ³s-warmup), comeÃ§a com tudo disponÃ­vel
     if not prev_active:
         prev_active = sorted(av_set)
 
@@ -590,7 +590,7 @@ def _select_active_symbols_for_step(
         trades_total = float(f.get("trades_total", 0.0) or 0.0)
         return (steps >= int(cfg.min_steps)) and (trades_total >= float(cfg.min_trades_total))
 
-    # Aplica ban/unban com histerese (ret180 + pf) + regra de "não opera"
+    # Aplica ban/unban com histerese (ret180 + pf) + regra de "nÃ£o opera"
     for s in sorted(av_set):
         f = feats.get(s) or {}
         steps = int(f.get("steps", 0.0) or 0.0)
@@ -598,7 +598,7 @@ def _select_active_symbols_for_step(
         r180 = float(f.get("ewm_ret180", float("nan")))
         pf = float(f.get("ewm_pf", float("nan")))
 
-        # Ainda sem histórico suficiente: mantém como estava (e se não estava, ativa por padrão)
+        # Ainda sem histÃ³rico suficiente: mantÃ©m como estava (e se nÃ£o estava, ativa por padrÃ£o)
         if steps < int(cfg.min_steps):
             if s in desired_banned:
                 reasons[s] = "ban_keep_insufficient_history"
@@ -607,15 +607,15 @@ def _select_active_symbols_for_step(
                 reasons[s] = "active_insufficient_history"
             continue
 
-        # Ban por "não opera"
+        # Ban por "nÃ£o opera"
         if avg_tr < float(cfg.ban_if_avg_trades_per_step_below):
-            # após min_steps, se não gera trade, é candidato a ban (stable coins etc.)
+            # apÃ³s min_steps, se nÃ£o gera trade, Ã© candidato a ban (stable coins etc.)
             desired_banned.add(s)
             desired_active.discard(s)
             reasons[s] = f"ban_low_activity(avg_trades={avg_tr:.2f})"
             continue
 
-        # Ban (exige histórico mínimo e trades mínimos)
+        # Ban (exige histÃ³rico mÃ­nimo e trades mÃ­nimos)
         if _ok_min_hist(s) and np.isfinite(r180) and np.isfinite(pf):
             if (r180 <= float(cfg.ban_ret180)) and (pf <= float(cfg.ban_pf)):
                 desired_banned.add(s)
@@ -631,14 +631,14 @@ def _select_active_symbols_for_step(
                 reasons[s] = f"unban(ret180={r180:+.2f} pf={pf:.2f})"
                 continue
 
-        # default: mantém estado
+        # default: mantÃ©m estado
         if s in desired_banned:
             reasons[s] = "ban_keep"
         else:
             desired_active.add(s)
             reasons[s] = "active_keep"
 
-    # Impõe churn máximo por step (remove piores / adiciona melhores)
+    # ImpÃµe churn mÃ¡ximo por step (remove piores / adiciona melhores)
     prev_active_set = set(prev_active)
     removed = sorted((prev_active_set - desired_active))
     added = sorted((desired_active - prev_active_set))
@@ -657,7 +657,7 @@ def _select_active_symbols_for_step(
         if len(removed) > maxchg:
             removed_sorted = sorted(removed, key=_rank)  # remove os piores primeiro
             keep_removed = set(removed_sorted[:maxchg])
-            # desfaz remoções além do cap
+            # desfaz remoÃ§Ãµes alÃ©m do cap
             for s in removed:
                 if s not in keep_removed:
                     desired_active.add(s)
@@ -671,7 +671,7 @@ def _select_active_symbols_for_step(
                     desired_active.discard(s)
                     reasons[s] = "skip_add_due_to_churn_cap"
 
-    # Diversificação mínima
+    # DiversificaÃ§Ã£o mÃ­nima
     active = sorted(set(desired_active) & av_set)
     if int(cfg.min_active) > 0 and len(active) < int(cfg.min_active):
         feats = feats or {}
@@ -724,7 +724,7 @@ def _ret_pct_per_180d(eq_end: float, window_days: int) -> float:
     """
     Retorno normalizado para uma janela equivalente de 180d.
 
-    Útil porque no expanding window o IN (treino) cresce (360d, 540d, ...),
+    Ãštil porque no expanding window o IN (treino) cresce (360d, 540d, ...),
     enquanto o OOS continua 180d.
     """
     try:
@@ -738,9 +738,9 @@ def _ret_pct_per_180d(eq_end: float, window_days: int) -> float:
 
 def _normalize_weights_dict(weights: dict[str, Any]) -> dict[str, Any]:
     """
-    Compatibilidade entre versões:
-    - versões antigas usavam `target_eq`/`hard_eq` (equity multiplicativa)
-    - versões novas usam `target_return_pct`/`hard_return_pct`
+    Compatibilidade entre versÃµes:
+    - versÃµes antigas usavam `target_eq`/`hard_eq` (equity multiplicativa)
+    - versÃµes novas usam `target_return_pct`/`hard_return_pct`
     """
     w: dict[str, Any] = dict(weights or {})
 
@@ -758,7 +758,7 @@ def _normalize_weights_dict(weights: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             w.pop("hard_eq", None)
 
-    # Remove chaves desconhecidas (evita crash quando rodar com caches/versões misturadas)
+    # Remove chaves desconhecidas (evita crash quando rodar com caches/versÃµes misturadas)
     try:
         from dataclasses import fields
 
@@ -784,10 +784,10 @@ def _score_result(res, weights: FitnessWeights, *, symbol: str | None = None) ->
     pf = float(min(pf_cap, max(0.0, pf)))
     win_rate = float(getattr(res, "win_rate", 0.0) or 0.0)
     trades = int(len(getattr(res, "trades", []) or []))
-    # -------- fitness geométrico (margens vs targets) --------
+    # -------- fitness geomÃ©trico (margens vs targets) --------
     eps = float(getattr(weights, "eps", 1e-9) or 1e-9)
     # alvo de retorno em %, mas a conta continua multiplicativa (equity) para ser bem-comportada.
-    # Como agora o treino pode ser "expanding", escalamos o alvo por duração (base=180d).
+    # Como agora o treino pode ser "expanding", escalamos o alvo por duraÃ§Ã£o (base=180d).
     t_ret_pct_180 = float(getattr(weights, "target_return_pct", 30.0) or 30.0)
     w_days = float(getattr(weights, "step_days", 180) or 180)
     # compounding: target_eq = (1 + r_180)^(days/180)
@@ -796,7 +796,7 @@ def _score_result(res, weights: FitnessWeights, *, symbol: str | None = None) ->
     t_win = float(getattr(weights, "target_win", 0.5) or 0.5)
     t_dd = float(getattr(weights, "target_dd", 0.30) or 0.30)
 
-    # neutro para stablecoins sem trades (não derruba média), mas NÃO vira ótimo.
+    # neutro para stablecoins sem trades (nÃ£o derruba mÃ©dia), mas NÃƒO vira Ã³timo.
     if int(trades) <= 0 and bool(getattr(weights, "no_trade_neutral", True)):
         symu = str(symbol or "").strip().upper()
         is_stable = symu.startswith(("USDC", "BUSD", "TUSD", "USDP", "DAI", "FDUSD")) if symu else False
@@ -816,8 +816,8 @@ def _score_result(res, weights: FitnessWeights, *, symbol: str | None = None) ->
             )
 
     # Margens vs targets:
-    # - reward acima do target, mas com caps por métrica
-    # - DD recompensa abaixo do target, mas também com cap (evita dominar)
+    # - reward acima do target, mas com caps por mÃ©trica
+    # - DD recompensa abaixo do target, mas tambÃ©m com cap (evita dominar)
     mmin = float(getattr(weights, "margin_min", 0.2) or 0.2)
     eq_mmax = float(getattr(weights, "eq_margin_max", 3.0) or 3.0)
     pf_mmax = float(getattr(weights, "pf_margin_max", 1.55) or 1.55)
@@ -857,7 +857,7 @@ def _score_result(res, weights: FitnessWeights, *, symbol: str | None = None) ->
         k = float(getattr(weights, "pen_dd", 6.0) or 6.0)
         pen *= float(np.exp(-k * (float(max_dd) - h_dd)))
 
-    # penalidades "suspeitas": PF/win bons demais normalmente = poucas operações / regime muito específico
+    # penalidades "suspeitas": PF/win bons demais normalmente = poucas operaÃ§Ãµes / regime muito especÃ­fico
     try:
         pf_hi = float(getattr(weights, "pf_suspicious_hi", 2.30) or 2.30)
         if float(pf) > pf_hi:
@@ -876,7 +876,7 @@ def _score_result(res, weights: FitnessWeights, *, symbol: str | None = None) ->
     fitness = float(gm * pen)
 
     # --- PENALIDADE DE QUANTIDADE DE TRADES ---
-    # Se operar demais ou de menos, derruba o fitness para evitar extremos e overfitting ao ruído.
+    # Se operar demais ou de menos, derruba o fitness para evitar extremos e overfitting ao ruÃ­do.
     # IMPORTANTE: com janela "expanding", trades crescem ~linear com os dias.
     # Escalamos os targets (definidos por ~180d) proporcionalmente ao tamanho da janela avaliada.
     base_min = float(getattr(weights, "target_trades_min", 100))
@@ -889,13 +889,13 @@ def _score_result(res, weights: FitnessWeights, *, symbol: str | None = None) ->
 
     if trades > 0:
         if trades < t_min:
-            # Penaliza falta de amostragem estatística
+            # Penaliza falta de amostragem estatÃ­stica
             fitness *= float(np.exp(-k_pen * (t_min - trades) / t_min))
         elif trades > t_max:
-            # Penaliza overtrading (provável overfitting ao ruído de baixa confiança)
+            # Penaliza overtrading (provÃ¡vel overfitting ao ruÃ­do de baixa confianÃ§a)
             fitness *= float(np.exp(-k_pen * (trades - t_max) / t_max))
 
-    # métricas mensais continuam sendo reportadas, mas não entram no fitness
+    # mÃ©tricas mensais continuam sendo reportadas, mas nÃ£o entram no fitness
     monthly_raw = getattr(res, "monthly_returns", None) or []
     monthly = [float(x) for x in list(monthly_raw)]
     neg_months = int(sum(1 for r in monthly if float(r) < 0.0))
@@ -930,7 +930,7 @@ def _aggregate_eval(results: list[EvalResult]) -> EvalResult:
             trades_avg=0.0,
             neg_month_ratio=1.0,
         )
-    # média simples (o objetivo é a MÉDIA do universo)
+    # mÃ©dia simples (o objetivo Ã© a MÃ‰DIA do universo)
     n = int(len(results))
     fitness = float(np.mean([r.fitness for r in results]))
     eq_end = float(np.mean([r.eq_end for r in results]))
@@ -972,7 +972,7 @@ def _needed_feature_columns(periods) -> list[str]:
         cols.update([str(c) for c in (pm.entry_cols or [])])
         cols.update([str(c) for c in (pm.danger_cols or [])])
         cols.update([str(c) for c in (getattr(pm, "exit_cols", None) or [])])
-    # o simulador lê df[col].iat[i]; se a coluna não existe, vira 0.0 (mas piora o exit)
+    # o simulador lÃª df[col].iat[i]; se a coluna nÃ£o existe, vira 0.0 (mas piora o exit)
     return sorted(cols)
 
 
@@ -993,20 +993,21 @@ def _prepare_symbol_frame(
     if df.empty:
         return df
     try:
-        pe, pdg, pex, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+        pe_map, pdg, pex, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+        pe = pe_map.get('mid') if isinstance(pe_map, dict) else pe_map
     except RuntimeError:
-        # range de timestamps pode estar antes do primeiro período do wf_* (sem modelo "válido").
-        # Não deve derrubar o GA; apenas ignora este símbolo neste step.
+        # range de timestamps pode estar antes do primeiro perÃ­odo do wf_* (sem modelo "vÃ¡lido").
+        # NÃ£o deve derrubar o GA; apenas ignora este sÃ­mbolo neste step.
         return df.iloc[0:0].copy()
     # anexar como colunas (facilita slicing em worker)
     df = df.copy()
     df["__p_entry"] = np.asarray(pe, dtype=np.float32)
     df["__p_danger"] = np.asarray(pdg, dtype=np.float32)
     df["__period_id"] = np.asarray(pid, dtype=np.int16)
-    # Otimização: NÃO guardar __p_exit (GA não usa); reduz tamanho de parquet e I/O.
+    # OtimizaÃ§Ã£o: NÃƒO guardar __p_exit (GA nÃ£o usa); reduz tamanho de parquet e I/O.
 
-    # Otimização: após predição, podemos descartar colunas de entry/danger (só eram necessárias pra predizer).
-    # Mantemos OHLCV + colunas do Exit (não-cycle) + colunas internas.
+    # OtimizaÃ§Ã£o: apÃ³s prediÃ§Ã£o, podemos descartar colunas de entry/danger (sÃ³ eram necessÃ¡rias pra predizer).
+    # Mantemos OHLCV + colunas do Exit (nÃ£o-cycle) + colunas internas.
     keep: set[str] = {"open", "high", "low", "close", "volume", "__p_entry", "__p_danger", "__period_id"}
     for pm in periods:
         for c in list(getattr(pm, "exit_cols", None) or []):
@@ -1025,12 +1026,12 @@ def _init_population(rng: np.random.Generator, pop_size: int, seed_best: Individ
     out: list[Individual] = []
     for i in range(int(pop_size)):
         if seed_best is not None and i < max(1, int(pop_size) // 5):
-            # perturbação pequena ao redor do melhor anterior (warm start)
+            # perturbaÃ§Ã£o pequena ao redor do melhor anterior (warm start)
             te = _quantize_tau(seed_best.tau_entry + float(rng.normal(0, 0.05)), _ENTRY_MIN, _ENTRY_MAX)
             td = _quantize_tau(seed_best.tau_danger + float(rng.normal(0, 0.05)), _DANGER_MIN, _DANGER_MAX)
             tx = _quantize_tau(seed_best.tau_exit + float(rng.normal(0, 0.05)), _EXIT_MIN, _EXIT_MAX)
         else:
-            # amostra aleatória dentro dos limites específicos
+            # amostra aleatÃ³ria dentro dos limites especÃ­ficos
             te = rng.uniform(_ENTRY_MIN, _ENTRY_MAX)
             td = rng.uniform(_DANGER_MIN, _DANGER_MAX)
             tx = rng.uniform(_EXIT_MIN, _EXIT_MAX)
@@ -1101,10 +1102,10 @@ _W_PORTF_CFG: PortfolioConfig | None = None
 @dataclass(frozen=True)
 class SimPeriod:
     """
-    Período mínimo para simulação.
+    PerÃ­odo mÃ­nimo para simulaÃ§Ã£o.
 
-    IMPORTANT: NÃO carrega entry_model/danger_model no worker (economiza RAM).
-    O simulador só precisa de taus + exit_model (para pxit on-the-fly) e calib/cols.
+    IMPORTANT: NÃƒO carrega entry_model/danger_model no worker (economiza RAM).
+    O simulador sÃ³ precisa de taus + exit_model (para pxit on-the-fly) e calib/cols.
     """
 
     period_days: int
@@ -1121,7 +1122,7 @@ class SimPeriod:
 
 def _load_xgb_booster_best_effort(path_json: Path) -> Any:
     """
-    Carrega Booster preferindo .ubj (menor/mais rápido), com fallback para .json.
+    Carrega Booster preferindo .ubj (menor/mais rÃ¡pido), com fallback para .json.
     """
     import xgboost as xgb  # type: ignore
 
@@ -1136,11 +1137,11 @@ def _load_xgb_booster_best_effort(path_json: Path) -> Any:
 
 def _load_periods_for_sim(run_dir: Path) -> list[SimPeriod]:
     """
-    Versão leve do load_period_models: carrega APENAS o necessário para simular.
+    VersÃ£o leve do load_period_models: carrega APENAS o necessÃ¡rio para simular.
 
-    - lê meta.json
+    - lÃª meta.json
     - carrega exit_model (se existir)
-    - NÃO carrega entry/danger models (já usamos __p_entry/__p_danger pré-computados no dataset)
+    - NÃƒO carrega entry/danger models (jÃ¡ usamos __p_entry/__p_danger prÃ©-computados no dataset)
     """
     periods: list[SimPeriod] = []
     run_dir = Path(run_dir)
@@ -1196,7 +1197,7 @@ def _load_periods_for_sim(run_dir: Path) -> list[SimPeriod]:
             )
         )
 
-    # mesma ordenação do sniper_walkforward.load_period_models (mais recente primeiro)
+    # mesma ordenaÃ§Ã£o do sniper_walkforward.load_period_models (mais recente primeiro)
     periods.sort(key=lambda p: p.train_end_utc, reverse=True)
     return periods
 
@@ -1252,7 +1253,7 @@ def _df_cache_get(sym: str) -> pd.DataFrame | None:
         df = pd.read_parquet(p)
     except Exception:
         return None
-    # garante DatetimeIndex uma única vez (evita pd.to_datetime em cada avaliação)
+    # garante DatetimeIndex uma Ãºnica vez (evita pd.to_datetime em cada avaliaÃ§Ã£o)
     try:
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
@@ -1287,16 +1288,16 @@ def _worker_init(
     # Limita threads internas dentro do worker para evitar oversubscription.
     xgb_threads = _set_thread_limits(int(xgb_threads))
 
-    # Carrega períodos leves (sem entry/danger models) para evitar "bad allocation".
+    # Carrega perÃ­odos leves (sem entry/danger models) para evitar "bad allocation".
     _W_PERIODS_SIM = _load_periods_for_sim(_W_RUN_DIR)
-    # reforça nthread no Booster do exit (alguns modelos vêm com nthread=0)
+    # reforÃ§a nthread no Booster do exit (alguns modelos vÃªm com nthread=0)
     try:
         import xgboost as xgb  # type: ignore
 
         dev = str(xgb_device or "cpu").strip().lower()
         if dev not in {"cpu", "cuda"}:
             dev = "cpu"
-        # safety: não tentar cuda se não tiver build com cuda
+        # safety: nÃ£o tentar cuda se nÃ£o tiver build com cuda
         if dev == "cuda" and (not _xgb_has_cuda()):
             dev = "cpu"
 
@@ -1309,14 +1310,14 @@ def _worker_init(
                     pass
     except Exception:
         pass
-    # Compatibilidade: pode receber dicionário de uma versão anterior do GA
-    # (por exemplo se o processo principal ficou carregado com código antigo e os workers spawnaram com código novo).
+    # Compatibilidade: pode receber dicionÃ¡rio de uma versÃ£o anterior do GA
+    # (por exemplo se o processo principal ficou carregado com cÃ³digo antigo e os workers spawnaram com cÃ³digo novo).
     _W_WEIGHTS = FitnessWeights(**_normalize_weights_dict(weights))
     _W_TRAIN_START = pd.to_datetime(int(train_start_ns))
     _W_TRAIN_END = pd.to_datetime(int(train_end_ns))
     _W_SYMBOLS_PER_EVAL = int(symbols_per_eval)
     _W_SEED = int(seed)
-    # Config do portfólio (fixo, estilo demo)
+    # Config do portfÃ³lio (fixo, estilo demo)
     try:
         _W_PORTF_CFG = PortfolioConfig(
             max_positions=20,
@@ -1342,8 +1343,8 @@ def _worker_init(
     _W_DF_CACHE_LRU = []
     _W_DF_CACHE_SIZE = int(df_cache_size)
 
-    # IMPORTANT: escolhe subconjunto de símbolos UMA VEZ por step (não por indivíduo).
-    # Isso reduz MUITO o thrash de disco/cache e deixa o fitness estável/determinístico.
+    # IMPORTANT: escolhe subconjunto de sÃ­mbolos UMA VEZ por step (nÃ£o por indivÃ­duo).
+    # Isso reduz MUITO o thrash de disco/cache e deixa o fitness estÃ¡vel/determinÃ­stico.
     syms_all = sorted(paths.keys())
     if _W_SYMBOLS_PER_EVAL > 0 and _W_SYMBOLS_PER_EVAL < len(syms_all):
         rr = np.random.default_rng(int(_W_SEED) ^ 0xA5A5_1234)
@@ -1354,7 +1355,7 @@ def _worker_init(
 
     # IMPORTANT: evitar thrash de disco:
     # se o cache LRU for menor que o conjunto avaliado, vamos reler parquets o tempo todo.
-    # Ajusta automaticamente para caber todos os símbolos avaliados neste step.
+    # Ajusta automaticamente para caber todos os sÃ­mbolos avaliados neste step.
     try:
         need = int(len(_W_EVAL_SYMS or []))
         if need > 0 and _W_DF_CACHE_SIZE < need:
@@ -1373,7 +1374,7 @@ def _eval_one(ind: Individual) -> tuple[Individual, EvalResult]:
         tau_danger=float(ind.tau_danger),
         tau_exit=float(ind.tau_exit),
     )
-    # --- Simulação de portfólio (carteira única) ---
+    # --- SimulaÃ§Ã£o de portfÃ³lio (carteira Ãºnica) ---
     t0 = _W_TRAIN_START
     t1 = _W_TRAIN_END
     sym_data: dict[str, SymbolData] = {}
@@ -1502,14 +1503,14 @@ def _save_step_json(
         "in_sample": asdict(in_metrics),
         "out_of_sample": asdict(oos_metrics),
     }
-    # Windows: ":" e espaços em filenames causam OSError 22. Sanitiza timestamps para o nome do arquivo.
+    # Windows: ":" e espaÃ§os em filenames causam OSError 22. Sanitiza timestamps para o nome do arquivo.
     def _ts_slug(x: Any) -> str:
         try:
             ts = pd.to_datetime(x)
             s = ts.strftime("%Y%m%d_%H%M%S")
         except Exception:
             s = str(x)
-        # não depende de regex (Windows-friendly)
+        # nÃ£o depende de regex (Windows-friendly)
         out = []
         for ch in str(s):
             if ch.isalnum() or ch in "._-":
@@ -1526,7 +1527,7 @@ def _save_step_json(
 
 
 def main() -> None:
-    # Silencia warning ruidoso do XGBoost quando há device mismatch (CUDA booster + numpy CPU),
+    # Silencia warning ruidoso do XGBoost quando hÃ¡ device mismatch (CUDA booster + numpy CPU),
     # caso algum caminho legado ainda chame inplace_predict internamente.
     try:
         warnings.filterwarnings(
@@ -1536,8 +1537,8 @@ def main() -> None:
         )
     except Exception:
         pass
-    # ======== CONFIG PADRÃO (Sem precisar de flags) ========
-    # Se quiser forçar um diretório específico, mude aqui. 
+    # ======== CONFIG PADRÃƒO (Sem precisar de flags) ========
+    # Se quiser forÃ§ar um diretÃ³rio especÃ­fico, mude aqui. 
     # None = busca o wf_* mais recente em models_sniper/
     run_dir_override: str | None = None 
     
@@ -1569,36 +1570,36 @@ def main() -> None:
         "ALGOUSDT"
     ]
 
-    # Default: usar TODO o top_market_cap.txt (sem limite), a menos que o usuário especifique.
+    # Default: usar TODO o top_market_cap.txt (sem limite), a menos que o usuÃ¡rio especifique.
     max_symbols_default = 0
-    # 180d reduz o ruído e melhora a estabilidade do GA (menos overfit de curto prazo).
+    # 180d reduz o ruÃ­do e melhora a estabilidade do GA (menos overfit de curto prazo).
     step_days_default = 180
     years_default = 6
     bar_stride_default = 5
     # Para usar bem CPUs com muitos threads:
-    # - paralelizamos por indivíduo (cada indivíduo = 1 processo)
-    # - então pop_size precisa ser >= jobs para ocupar tudo.
+    # - paralelizamos por indivÃ­duo (cada indivÃ­duo = 1 processo)
+    # - entÃ£o pop_size precisa ser >= jobs para ocupar tudo.
     pop_size_default = 10
     gens_default = 10
     # Default conservador no Windows: muitos processos duplicam RAM (datasets + modelos exit).
-    # Você pode subir via --jobs quando tiver RAM sobrando.
+    # VocÃª pode subir via --jobs quando tiver RAM sobrando.
     jobs_default = 4
     # =======================================================
 
-    # Se existir CUDA no xgboost, deixa cuda como default (mas ainda dá para forçar cpu via flag).
+    # Se existir CUDA no xgboost, deixa cuda como default (mas ainda dÃ¡ para forÃ§ar cpu via flag).
     xgb_device_default = "cuda" if _xgb_has_cuda() else "cpu"
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", type=str, default=run_dir_override)
     # Deixe vazio para usar top_market_cap.txt (recomendado)
-    ap.add_argument("--symbols", type=str, default="", help="Lista fixa de símbolos (CSV). Se vazio, usa top_market_cap.txt.")
+    ap.add_argument("--symbols", type=str, default="", help="Lista fixa de sÃ­mbolos (CSV). Se vazio, usa top_market_cap.txt.")
     ap.add_argument("--max-symbols", type=int, default=max_symbols_default)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--step-days", type=int, default=step_days_default)
     ap.add_argument("--years", type=int, default=years_default)
     ap.add_argument("--bar-stride", type=int, default=bar_stride_default)
-    ap.add_argument("--refresh-cache", action="store_true", help="Recria caches de features (força atualizar dados).")
-    # 0 = usa todos os símbolos do dataset/step (recomendado com lista fixa pequena)
+    ap.add_argument("--refresh-cache", action="store_true", help="Recria caches de features (forÃ§a atualizar dados).")
+    # 0 = usa todos os sÃ­mbolos do dataset/step (recomendado com lista fixa pequena)
     ap.add_argument("--symbols-per-eval", type=int, default=0)
     ap.add_argument("--pop-size", type=int, default=pop_size_default)
     ap.add_argument("--gens", type=int, default=gens_default)
@@ -1612,18 +1613,18 @@ def main() -> None:
     ap.add_argument("--early-stop-patience", type=int, default=3)
     ap.add_argument("--early-stop-min-delta", type=float, default=0.01)
     # Pushover notifications:
-    # Por padrão, fica LIGADO automaticamente se houver credenciais (ENV ou config/pushover_secrets.py).
+    # Por padrÃ£o, fica LIGADO automaticamente se houver credenciais (ENV ou config/secrets.py).
     # Use --no-pushover para desativar.
     ap.add_argument("--no-pushover", action="store_true")
     ap.add_argument("--pushover-user-env", type=str, default="PUSHOVER_USER_KEY")
     ap.add_argument("--pushover-token-env", type=str, default="PUSHOVER_TOKEN_TRADE")
     ap.add_argument("--pushover-title", type=str, default="tradebot GA")
-    ap.add_argument("--pushover-every", type=int, default=1, help="Enviar a cada N gerações (1 = toda geração).")
+    ap.add_argument("--pushover-every", type=int, default=1, help="Enviar a cada N geraÃ§Ãµes (1 = toda geraÃ§Ã£o).")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out-csv", type=str, default="thresholds_ga_wf.csv")
     ap.add_argument("--out-dir", type=str, default="thresholds_ga_steps")
-    # Universo dinâmico (por símbolo, usando OOS acumulado)
-    ap.add_argument("--no-dynamic-universe", action="store_true", help="Desativa seleção dinâmica de universo por símbolo.")
+    # Universo dinÃ¢mico (por sÃ­mbolo, usando OOS acumulado)
+    ap.add_argument("--no-dynamic-universe", action="store_true", help="Desativa seleÃ§Ã£o dinÃ¢mica de universo por sÃ­mbolo.")
     ap.add_argument("--universe-warmup-steps", type=int, default=2)
     ap.add_argument("--universe-ewm-decay", type=float, default=0.85)
     ap.add_argument("--universe-min-steps", type=int, default=2)
@@ -1636,9 +1637,9 @@ def main() -> None:
     ap.add_argument("--universe-max-changes", type=int, default=12)
     ap.add_argument("--symbol-perf-csv", type=str, default="thresholds_ga_wf_symbols.csv")
     ap.add_argument("--universe-state", type=str, default="thresholds_ga_universe_state.json")
-    ap.add_argument("--no-shadow-eval", action="store_true", help="Não rodar shadow OOS (por símbolo) a cada step.")
+    ap.add_argument("--no-shadow-eval", action="store_true", help="NÃ£o rodar shadow OOS (por sÃ­mbolo) a cada step.")
     args = ap.parse_args()
-    # Limita threads também no processo principal (dataset build + OOS por geração)
+    # Limita threads tambÃ©m no processo principal (dataset build + OOS por geraÃ§Ã£o)
     _set_thread_limits(int(getattr(args, "xgb_threads", 1) or 1))
 
     pushover_on = not bool(getattr(args, "no_pushover", False))
@@ -1663,7 +1664,7 @@ def main() -> None:
             return
         try:
             res = _pushover_send(msg, cfg=pushover_cfg)
-            # nossa implementação retorna (ok, payload, err). Se falhar, avisar 1x.
+            # nossa implementaÃ§Ã£o retorna (ok, payload, err). Se falhar, avisar 1x.
             if isinstance(res, tuple) and len(res) >= 1:
                 ok = bool(res[0])
                 err = None
@@ -1673,18 +1674,18 @@ def main() -> None:
                     _pushover_warned = True
                     print(f"[pushover][warn] falhou ao enviar (ok=False) err={err}", flush=True)
         except Exception as e:
-            # nunca quebrar o GA por notificação
+            # nunca quebrar o GA por notificaÃ§Ã£o
             if not _pushover_warned:
                 _pushover_warned = True
-                print(f"[pushover][warn] exceção ao enviar: {type(e).__name__}: {e}", flush=True)
+                print(f"[pushover][warn] exceÃ§Ã£o ao enviar: {type(e).__name__}: {e}", flush=True)
             return
 
     if pushover_on:
         if pushover_cfg is None:
             print(
-                f"[pushover] NÃO ativado (credenciais não encontradas). "
+                f"[pushover] NÃƒO ativado (credenciais nÃ£o encontradas). "
                 f"ENV esperadas: {getattr(args,'pushover_user_env','PUSHOVER_USER_KEY')} + {getattr(args,'pushover_token_env','PUSHOVER_TOKEN_TRADE')} "
-                f"(ou config/pushover_secrets.py).",
+                f"(ou config/secrets.py).",
                 flush=True,
             )
         else:
@@ -1693,7 +1694,7 @@ def main() -> None:
     # Auto-detect run_dir se for None
     if args.run_dir is None:
         try:
-            # Tenta caminhos prováveis no seu ambiente (absolutos primeiro)
+            # Tenta caminhos provÃ¡veis no seu ambiente (absolutos primeiro)
             paths_to_check = [
                 Path("D:/astra/models_sniper"),
                 Path(__file__).resolve().parents[2].parent / "models_sniper",
@@ -1711,30 +1712,30 @@ def main() -> None:
             pass
 
     if args.run_dir is None:
-        raise RuntimeError("Não foi possível encontrar nenhum wf_* automaticamente. Por favor, defina run_dir_override no código.")
+        raise RuntimeError("NÃ£o foi possÃ­vel encontrar nenhum wf_* automaticamente. Por favor, defina run_dir_override no cÃ³digo.")
 
     run_dir = Path(args.run_dir).expanduser().resolve()
     print(f"[ga] Usando run_dir: {run_dir}")
     if not run_dir.is_dir():
-        raise RuntimeError(f"run_dir inválido: {run_dir}")
+        raise RuntimeError(f"run_dir invÃ¡lido: {run_dir}")
 
     xgb_device = str(getattr(args, "xgb_device", "cpu") or "cpu").strip().lower()
     if xgb_device == "cuda" and (not _xgb_has_cuda()):
-        print("[ga][warn] --xgb-device=cuda solicitado, mas este xgboost não tem CUDA. Revertendo para cpu.", flush=True)
+        print("[ga][warn] --xgb-device=cuda solicitado, mas este xgboost nÃ£o tem CUDA. Revertendo para cpu.", flush=True)
         xgb_device = "cpu"
     print(f"[ga] xgb_device={xgb_device} xgb_threads={int(getattr(args,'xgb_threads',1) or 1)}", flush=True)
 
-    # teste de notificação (após saber qual wf_* está rodando)
+    # teste de notificaÃ§Ã£o (apÃ³s saber qual wf_* estÃ¡ rodando)
     if pushover_on and (pushover_cfg is not None) and (_pushover_send is not None):
         _notify(f"GA iniciado: run={run_dir.name} | pop={int(args.pop_size)} gens={int(args.gens)} step_days={int(args.step_days)}")
 
     rng = np.random.default_rng(int(args.seed))
     periods_base = load_period_models(run_dir)
-    # Base leve de períodos (mesma estrutura usada pelos workers).
-    # Usaremos isso também no OOS no processo principal para garantir que IN/OOS usem
-    # exatamente a mesma lógica de simulação (diferença apenas no recorte temporal).
+    # Base leve de perÃ­odos (mesma estrutura usada pelos workers).
+    # Usaremos isso tambÃ©m no OOS no processo principal para garantir que IN/OOS usem
+    # exatamente a mesma lÃ³gica de simulaÃ§Ã£o (diferenÃ§a apenas no recorte temporal).
     periods_sim_base = _load_periods_for_sim(run_dir)
-    # reforça nthread nos boosters do processo principal (dataset build usa entry/danger)
+    # reforÃ§a nthread nos boosters do processo principal (dataset build usa entry/danger)
     try:
         for pm in (periods_base or []):
             try:
@@ -1754,7 +1755,7 @@ def main() -> None:
     except Exception:
         pass
 
-    # Seleção de símbolos (lista fixa do usuário; sem aleatoriedade)
+    # SeleÃ§Ã£o de sÃ­mbolos (lista fixa do usuÃ¡rio; sem aleatoriedade)
     syms = [s.strip().upper() for s in str(getattr(args, "symbols", "")).split(",") if s.strip()]
     if not syms:
         # default: top_market_cap.txt (tudo), com opcionais --limit/--max-symbols
@@ -1763,12 +1764,12 @@ def main() -> None:
     if int(args.max_symbols) > 0:
         syms = syms[: int(args.max_symbols)]
     if not syms:
-        raise RuntimeError("Sem símbolos (top_market_cap.txt vazio?)")
+        raise RuntimeError("Sem sÃ­mbolos (top_market_cap.txt vazio?)")
 
     try:
         if int(len(syms)) >= 120 and int(getattr(args, "symbols_per_eval", 0) or 0) <= 0:
             print(
-                f"[ga][warn] universo grande (symbols={len(syms)}) e --symbols-per-eval=0 => cada avaliação vai usar TODOS os símbolos. "
+                f"[ga][warn] universo grande (symbols={len(syms)}) e --symbols-per-eval=0 => cada avaliaÃ§Ã£o vai usar TODOS os sÃ­mbolos. "
                 f"Se ficar lento demais, use --symbols-per-eval (ex.: 60-120) para amostrar por step.",
                 flush=True,
             )
@@ -1790,16 +1791,16 @@ def main() -> None:
     )
     syms = [s for s in syms if s in cache_map]
     if not syms:
-        raise RuntimeError("Nenhum símbolo restou após cache")
+        raise RuntimeError("Nenhum sÃ­mbolo restou apÃ³s cache")
 
     # Janela global:
-    # - Antes: usava o menor end_ts (todos alinhados) -> corta steps quando 1 símbolo é curto.
-    # - Agora: usamos o MAIOR end_ts e deixamos símbolos entrarem/sair ao longo do tempo.
+    # - Antes: usava o menor end_ts (todos alinhados) -> corta steps quando 1 sÃ­mbolo Ã© curto.
+    # - Agora: usamos o MAIOR end_ts e deixamos sÃ­mbolos entrarem/sair ao longo do tempo.
     ends_by_sym: dict[str, pd.Timestamp] = {}
     starts_by_sym: dict[str, pd.Timestamp] = {}
 
-    # IMPORTANTE (performance): NÃO ler 408 parquets gigantes só pra descobrir start/end.
-    # Usamos os meta.json do cache (bem rápido). Só faz fallback para parquet se faltar meta.
+    # IMPORTANTE (performance): NÃƒO ler 408 parquets gigantes sÃ³ pra descobrir start/end.
+    # Usamos os meta.json do cache (bem rÃ¡pido). SÃ³ faz fallback para parquet se faltar meta.
     t_scan0 = time.perf_counter()
     miss_meta = 0
     for i, s in enumerate(syms, start=1):
@@ -1828,7 +1829,7 @@ def main() -> None:
             except Exception:
                 pass
     if not ends_by_sym:
-        raise RuntimeError("Sem dados válidos nos caches para end_global")
+        raise RuntimeError("Sem dados vÃ¡lidos nos caches para end_global")
     end_global = max(ends_by_sym.values())
     try:
         worst = sorted(ends_by_sym.items(), key=lambda kv: kv[1])[:5]
@@ -1848,15 +1849,15 @@ def main() -> None:
         pass
     start_global = end_global - pd.Timedelta(days=int(args.years) * 365)
 
-    # Garante que as janelas não comecem ANTES do primeiro modelo disponível no wf_*
-    # (caso contrário, `predict_scores_walkforward` não consegue preencher nenhum ponto e lança erro)
+    # Garante que as janelas nÃ£o comecem ANTES do primeiro modelo disponÃ­vel no wf_*
+    # (caso contrÃ¡rio, `predict_scores_walkforward` nÃ£o consegue preencher nenhum ponto e lanÃ§a erro)
     try:
         min_train_end = min(pd.to_datetime(pm.train_end_utc) for pm in (periods_base or []))
         if pd.to_datetime(end_global) <= min_train_end:
             raise RuntimeError(
-                f"end_global={end_global} está <= min_train_end(model)={min_train_end}. "
+                f"end_global={end_global} estÃ¡ <= min_train_end(model)={min_train_end}. "
                 "Seu cache/dados terminam antes do primeiro modelo do wf_*. "
-                "Use um wf_* compatível ou aumente o range de dados."
+                "Use um wf_* compatÃ­vel ou aumente o range de dados."
             )
         if pd.to_datetime(start_global) < min_train_end:
             print(
@@ -1876,7 +1877,7 @@ def main() -> None:
     if len(windows) < 3:
         raise RuntimeError(f"Poucas janelas geradas (windows={len(windows)}). Ajuste years/step_days.")
 
-    # colunas necessárias para o Exit (e Entry/Danger)
+    # colunas necessÃ¡rias para o Exit (e Entry/Danger)
     need_cols = _needed_feature_columns(periods_base)
 
     out_rows: list[dict[str, Any]] = []
@@ -1888,7 +1889,7 @@ def main() -> None:
 
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
-    # Universo dinâmico (por símbolo)
+    # Universo dinÃ¢mico (por sÃ­mbolo)
     universe_cfg = UniverseSelectorConfig(
         enabled=not bool(getattr(args, "no_dynamic_universe", False)),
         warmup_steps=int(getattr(args, "universe_warmup_steps", 2) or 2),
@@ -1906,7 +1907,7 @@ def main() -> None:
     universe_state_path = resolve_generated_path(str(getattr(args, "universe_state", "thresholds_ga_universe_state.json")))
     shadow_eval_on = not bool(getattr(args, "no_shadow_eval", False))
 
-    # Pesos para score POR SÍMBOLO (menos rígidos que o portfólio; sem penalidade de trade count)
+    # Pesos para score POR SÃMBOLO (menos rÃ­gidos que o portfÃ³lio; sem penalidade de trade count)
     weights_symbol_oos = FitnessWeights(
         step_days=int(getattr(args, "step_days", 180) or 180),
         target_return_pct=5.0,
@@ -1923,14 +1924,14 @@ def main() -> None:
         no_trade_neutral=True,
     )
 
-    # Walk-forward OOS consolidado (portfólio): compõe equity ao longo dos steps
+    # Walk-forward OOS consolidado (portfÃ³lio): compÃµe equity ao longo dos steps
     wf_oos_logeq_portf: float = 0.0
     wf_oos_steps: int = 0
 
     # Expanding window:
     # - step 0: train = 180d (windows[0])
     # - step 1: train = 360d (windows[0] + windows[1])
-    # - step k: train = (k+1)*step_days (sempre começando em windows[0][0])
+    # - step k: train = (k+1)*step_days (sempre comeÃ§ando em windows[0][0])
     train_start0 = pd.to_datetime(windows[0][0])
 
     for step_idx in range(len(windows) - 1):
@@ -1938,7 +1939,7 @@ def main() -> None:
         train_start = train_start0
         train_end = pd.to_datetime(windows[step_idx][1])
         # IMPORTANT: evita "vazamento" de 1 candle por slicing inclusivo (train_end entra no IN e no OOS).
-        # Como estamos em 1m, 1 minuto é suficiente; com bar_stride > 1, ainda é seguro.
+        # Como estamos em 1m, 1 minuto Ã© suficiente; com bar_stride > 1, ainda Ã© seguro.
         test_start = pd.to_datetime(train_end) + pd.Timedelta(minutes=1)
         test_end = pd.to_datetime(windows[step_idx + 1][1])
 
@@ -1948,9 +1949,9 @@ def main() -> None:
             train_len_days = int((step_idx + 1) * int(args.step_days))
         train_len_days = max(1, int(train_len_days))
 
-        # FitnessWeights é frozen (imutável) -> setar via construtor
+        # FitnessWeights Ã© frozen (imutÃ¡vel) -> setar via construtor
         # - treino: usa o tamanho real da janela (expanding) para escalar targets/penalidades
-        # - OOS: mantém "por step" (180d) para comparabilidade entre steps
+        # - OOS: mantÃ©m "por step" (180d) para comparabilidade entre steps
         weights_train = FitnessWeights(step_days=int(train_len_days))
         weights_train_dict = asdict(weights_train)
         weights_oos = FitnessWeights(step_days=int(args.step_days))
@@ -1962,8 +1963,8 @@ def main() -> None:
             flush=True,
         )
 
-        # Pré-filtro: evita preparar dataset para símbolos sem barras suficientes neste step.
-        # Isso é CRÍTICO quando `syms` é grande (ex.: 400+).
+        # PrÃ©-filtro: evita preparar dataset para sÃ­mbolos sem barras suficientes neste step.
+        # Isso Ã© CRÃTICO quando `syms` Ã© grande (ex.: 400+).
         min_bars_step = 400
         stride = int(getattr(args, "bar_stride", 1) or 1)
         stride = max(1, stride)
@@ -1973,7 +1974,7 @@ def main() -> None:
             st = starts_by_sym.get(s)
             en = ends_by_sym.get(s)
             if st is None or en is None:
-                # fallback: não sabemos; tenta
+                # fallback: nÃ£o sabemos; tenta
                 syms_build.append(s)
                 continue
             try:
@@ -1994,11 +1995,11 @@ def main() -> None:
             except Exception:
                 pass
         if not syms_build:
-            raise RuntimeError("Nenhum símbolo tem barras suficientes neste step (syms_build=0).")
+            raise RuntimeError("Nenhum sÃ­mbolo tem barras suficientes neste step (syms_build=0).")
 
-        # prepara dataset do passo (train+test) em parquet por símbolo (Windows-friendly)
+        # prepara dataset do passo (train+test) em parquet por sÃ­mbolo (Windows-friendly)
         ds_dir = dataset_root / f"step_{int(step_idx):03d}"
-        # Rebuild automático se o dataset for de uma versão antiga (com colunas a mais, ex.: __p_exit)
+        # Rebuild automÃ¡tico se o dataset for de uma versÃ£o antiga (com colunas a mais, ex.: __p_exit)
         need_rebuild = False
         if ds_dir.is_dir():
             meta_p = ds_dir / "_ga_dataset_meta.json"
@@ -2007,12 +2008,12 @@ def main() -> None:
                     meta = json.loads(meta_p.read_text(encoding="utf-8"))
                     if str(meta.get("format", "")) != "ga_v2_mincols":
                         need_rebuild = True
-                    # rebuild se o conjunto de símbolos mudou (evita misturar runs antigos)
+                    # rebuild se o conjunto de sÃ­mbolos mudou (evita misturar runs antigos)
                     meta_syms = [str(x).upper() for x in (meta.get("symbols") or [])]
-                    # se meta não tem lista, assume legado -> rebuild
+                    # se meta nÃ£o tem lista, assume legado -> rebuild
                     if (not meta_syms) or meta_syms != [str(x).upper() for x in syms_build]:
                         need_rebuild = True
-                    # rebuild se o range mudou (expanding window muda t_start em relação ao legado)
+                    # rebuild se o range mudou (expanding window muda t_start em relaÃ§Ã£o ao legado)
                     if str(meta.get("t_start", "")) != str(train_start):
                         need_rebuild = True
                     if str(meta.get("t_end", "")) != str(test_end):
@@ -2025,7 +2026,7 @@ def main() -> None:
         if (not ds_dir.is_dir()) or (not any(ds_dir.glob("*.parquet"))) or need_rebuild:
             ds_dir.mkdir(parents=True, exist_ok=True)
             print(f"[ga] preparando dataset (cols={len(need_cols)}) em {ds_dir}", flush=True)
-            # limpa parquets antigos (se existirem) para não misturar formatos
+            # limpa parquets antigos (se existirem) para nÃ£o misturar formatos
             try:
                 for p in ds_dir.glob("*.parquet"):
                     p.unlink(missing_ok=True)
@@ -2051,7 +2052,7 @@ def main() -> None:
                 # grava
                 out_p = ds_dir / f"{sym}.parquet"
                 df_step.to_parquet(out_p, index=True)
-            # marca versão do dataset (para permitir upgrades futuros sem confusão)
+            # marca versÃ£o do dataset (para permitir upgrades futuros sem confusÃ£o)
             try:
                 (ds_dir / "_ga_dataset_meta.json").write_text(
                     json.dumps(
@@ -2069,7 +2070,7 @@ def main() -> None:
             except Exception:
                 pass
 
-        # Carrega parquets do step uma vez (reuso para OOS por geração)
+        # Carrega parquets do step uma vez (reuso para OOS por geraÃ§Ã£o)
         frames_step: dict[str, pd.DataFrame] = {}
         try:
             syms_set = {s.upper() for s in syms_build}
@@ -2082,8 +2083,8 @@ def main() -> None:
             frames_step = {}
 
         # IMPORTANT: trave o universo por step para comparabilidade IN vs OOS.
-        # Sem isso, pode acontecer do treino usar N símbolos e o OOS usar N+1 (ou N-1),
-        # só porque algum símbolo não tinha barras suficientes em um dos intervalos.
+        # Sem isso, pode acontecer do treino usar N sÃ­mbolos e o OOS usar N+1 (ou N-1),
+        # sÃ³ porque algum sÃ­mbolo nÃ£o tinha barras suficientes em um dos intervalos.
         syms_step: list[str] = []
         for sym, df0 in frames_step.items():
             try:
@@ -2099,14 +2100,14 @@ def main() -> None:
         if syms_step:
             frames_step = {s: frames_step[s] for s in syms_step if s in frames_step}
         else:
-            # fallback: mantém tudo (não deve acontecer com seus 24 símbolos)
+            # fallback: mantÃ©m tudo (nÃ£o deve acontecer com seus 24 sÃ­mbolos)
             syms_step = sorted(frames_step.keys())
 
         # ------------------------------
-        # Universo dinâmico (ativo vs shadow) por step
-        # - disponível: intersecao train∩test (syms_step)
+        # Universo dinÃ¢mico (ativo vs shadow) por step
+        # - disponÃ­vel: intersecao trainâˆ©test (syms_step)
         # - ativo: subset usado pelo GA (e pelo OOS "real")
-        # - shadow: avaliado no final do step (OOS) para pontuar TODOS os símbolos
+        # - shadow: avaliado no final do step (OOS) para pontuar TODOS os sÃ­mbolos
         # ------------------------------
         state_prev = _load_universe_state(universe_state_path)
         hist_prev = pd.DataFrame()
@@ -2143,12 +2144,12 @@ def main() -> None:
             except Exception:
                 pass
 
-        # GA: avalia indivíduos no TRAIN somente
+        # GA: avalia indivÃ­duos no TRAIN somente
         pop = _init_population(rng, int(args.pop_size), best_prev)
         elite_n = max(0, int(args.elite))
 
-        # Paralelismo efetivo aqui é "por indivíduo".
-        # Se jobs > pop_size, processos vão ficar ociosos (só há pop_size tarefas por geração).
+        # Paralelismo efetivo aqui Ã© "por indivÃ­duo".
+        # Se jobs > pop_size, processos vÃ£o ficar ociosos (sÃ³ hÃ¡ pop_size tarefas por geraÃ§Ã£o).
         eff_workers = max(1, min(int(args.jobs), int(args.pop_size)))
         print(
             f"[ga] workers: eff={eff_workers} (jobs={int(args.jobs)} pop={int(args.pop_size)} xgb_threads={int(args.xgb_threads)} df_cache={int(args.df_cache_size)})",
@@ -2161,7 +2162,7 @@ def main() -> None:
         if len(syms_build) != len(syms):
             print(f"[ga] symbols: dataset_build={len(syms_build)} (prefilter)", flush=True)
         if syms_step and (len(syms_step) != len(syms)):
-            print(f"[ga] symbols: usando intersecao train∩test = {len(syms_step)}", flush=True)
+            print(f"[ga] symbols: usando intersecao trainâˆ©test = {len(syms_step)}", flush=True)
         if universe_cfg.enabled and syms_active_step and (len(syms_active_step) != len(syms_step)):
             print(f"[ga] symbols: universo ATIVO (para GA) = {len(syms_active_step)}", flush=True)
         with ProcessPoolExecutor(
@@ -2190,7 +2191,7 @@ def main() -> None:
 
             for g in range(int(args.gens)):
                 tgen0 = time.perf_counter()
-                # Evita reavaliar indivíduos idênticos (acontece muito com elitismo/crossover).
+                # Evita reavaliar indivÃ­duos idÃªnticos (acontece muito com elitismo/crossover).
                 futs = []
                 missing: list[Individual] = []
                 for ind in pop:
@@ -2199,12 +2200,12 @@ def main() -> None:
                         missing.append(ind)
                         futs.append(ex.submit(_eval_one, ind))
                 scored: list[tuple[Individual, EvalResult]] = []
-                # já coloca os que estavam no memo
+                # jÃ¡ coloca os que estavam no memo
                 for ind in pop:
                     ev0 = memo.get(ind)
                     if ev0 is not None:
                         scored.append((ind, ev0))
-                # e adiciona os recém-calculados
+                # e adiciona os recÃ©m-calculados
                 for f in _progress(as_completed(futs), total=len(futs), desc=f"gen {g+1}/{int(args.gens)}"):
                     ind, ev = f.result()
                     memo[ind] = ev
@@ -2227,12 +2228,12 @@ def main() -> None:
                         ),
                         flush=True,
                     )
-                    # notificação a cada N gerações (se habilitada) com IN + OOS
+                    # notificaÃ§Ã£o a cada N geraÃ§Ãµes (se habilitada) com IN + OOS
                     every = max(1, int(getattr(args, "pushover_every", 1) or 1))
                     if pushover_on and ((g + 1) % every == 0):
                         oos_msg = ""
                         try:
-                            # avalia o melhor da geração no OOS (TEST) só para monitoramento (não afeta seleção)
+                            # avalia o melhor da geraÃ§Ã£o no OOS (TEST) sÃ³ para monitoramento (nÃ£o afeta seleÃ§Ã£o)
                             if frames_step_active:
                                 periods_gen = _apply_threshold_overrides_sim(
                                     periods_sim_base,
@@ -2362,7 +2363,7 @@ def main() -> None:
                                 f"{oos_msg} gen_sec={tgen:.1f}"
                             )
                         )
-                    # early stopping simples por estagnação
+                    # early stopping simples por estagnaÃ§Ã£o
                     if best_gen_fit is None:
                         best_gen_fit = float(e0.fitness)
                         no_improve = 0
@@ -2374,7 +2375,7 @@ def main() -> None:
                             no_improve += 1
                     if int(args.early_stop_patience) > 0 and no_improve >= int(args.early_stop_patience):
                         print(
-                            f"[ga] early-stop: sem melhora por {no_improve} gerações (min_delta={float(args.early_stop_min_delta):.4f})",
+                            f"[ga] early-stop: sem melhora por {no_improve} geraÃ§Ãµes (min_delta={float(args.early_stop_min_delta):.4f})",
                             flush=True,
                         )
                         break
@@ -2397,7 +2398,7 @@ def main() -> None:
                     if best_fit is None or cand_ev.fitness > best_fit.fitness:
                         best_ind, best_fit = cand_ind, cand_ev
 
-                # elitismo + reprodução
+                # elitismo + reproduÃ§Ã£o
                 next_pop: list[Individual] = [x[0] for x in scored[:elite_n]]
                 while len(next_pop) < int(args.pop_size):
                     p1 = _tournament_select(rng, scored, k=3)
@@ -2412,9 +2413,9 @@ def main() -> None:
 
         assert best_ind is not None and best_fit is not None
 
-        # Avalia OOS no TEST usando o melhor do passo (sequencial, determinístico)
+        # Avalia OOS no TEST usando o melhor do passo (sequencial, determinÃ­stico)
         frames: dict[str, pd.DataFrame] = {}
-        # `syms_step` é o universo disponível do step (train∩test). `syms_active_step` é o subset operado.
+        # `syms_step` Ã© o universo disponÃ­vel do step (trainâˆ©test). `syms_active_step` Ã© o subset operado.
         syms_set = {s.upper() for s in syms_step} if syms_step else {s.upper() for s in syms}
         for p in ds_dir.glob("*.parquet"):
             s = p.stem.upper()
@@ -2534,7 +2535,7 @@ def main() -> None:
                 neg_month_ratio=float(ev.neg_month_ratio),
             )
 
-        # Shadow OOS: simula portfólio com TODO o universo disponível do step
+        # Shadow OOS: simula portfÃ³lio com TODO o universo disponÃ­vel do step
         if universe_cfg.enabled and shadow_eval_on and sym_data_oos_shadow:
             try:
                 pres_sh = simulate_portfolio(
@@ -2601,7 +2602,7 @@ def main() -> None:
             ),
             flush=True,
         )
-        # consolida walk-forward OOS (portfólio)
+        # consolida walk-forward OOS (portfÃ³lio)
         try:
             wf_oos_logeq_portf = float(wf_oos_logeq_portf) + float(np.log(max(1e-12, float(oos.eq_end))))
             wf_oos_steps = int(wf_oos_steps) + 1
@@ -2672,26 +2673,26 @@ def main() -> None:
             oos_metrics=oos,
         )
 
-        # salva CSV incremental (para não perder progresso)
+        # salva CSV incremental (para nÃ£o perder progresso)
         out_csv.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(out_rows).to_csv(out_csv, index=False, encoding="utf-8")
 
         best_prev = best_ind
 
-    print(f"\n[ga] concluído. CSV: {out_csv} | steps: {len(out_rows)}", flush=True)
-    # resumo WF OOS consolidado (portfólio)
+    print(f"\n[ga] concluÃ­do. CSV: {out_csv} | steps: {len(out_rows)}", flush=True)
+    # resumo WF OOS consolidado (portfÃ³lio)
     try:
         if int(wf_oos_steps) > 0:
             eq_total = float(np.exp(float(wf_oos_logeq_portf)))
             eq_gmean_step = float(np.exp(float(wf_oos_logeq_portf) / float(max(1, int(wf_oos_steps)))))
             print(
-                f"[ga] WF-OOS (portfólio): steps={int(wf_oos_steps)} ret_total={_ret_pct(eq_total):+.1f}% ret_gmean_step={_ret_pct(eq_gmean_step):+.1f}%",
+                f"[ga] WF-OOS (portfÃ³lio): steps={int(wf_oos_steps)} ret_total={_ret_pct(eq_total):+.1f}% ret_gmean_step={_ret_pct(eq_gmean_step):+.1f}%",
                 flush=True,
             )
     except Exception:
         pass
 
-    # resumo de variação dos taus entre steps (ajuda a ver instabilidade)
+    # resumo de variaÃ§Ã£o dos taus entre steps (ajuda a ver instabilidade)
     try:
         if out_rows:
             te = np.asarray([float(r.get("tau_entry", np.nan)) for r in out_rows], dtype=np.float64)
@@ -2716,4 +2717,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

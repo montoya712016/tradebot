@@ -14,50 +14,41 @@ class TradeContract:
     """
 
     timeframe_sec: int = 60
-    # TP usado para exit hard/funcoes de exit (nao define entry).
-    tp_min_pct: float = 0.04
-    sl_pct: float = 0.03
-    timeout_hours: float = 6.0
-    # Minimo de duracao do trade (para entry label valido).
-    min_hold_minutes: float = 30.0
-    # Entry label: horizonte de media futura (ex.: 2h) e lucro minimo.
-    entry_horizon_hours: float = 2.0
-    # Entry label: lucro "rápido" dentro de uma janela curta após a entrada.
-    entry_fast_minutes: float = 30.0
-    entry_min_profit_pct: float = 0.03
-    # Exit score (sem modelo): combina pnl, drawdown, tempo e danger
-    exit_score_threshold: float = 10.0
-    exit_score_w_time: float = 1.0   # score por hora em trade
-    exit_score_w_pnl: float = 1.0    # score por 1% de pnl (pnl_pct)
-    exit_score_w_dd: float = 2.0     # score por 1% de drawdown (dd_pct)
-    exit_score_w_danger: float = 4.0 # score extra quando danger >= tau_danger
+    # Heurísticas removidas (mantidas apenas por compatibilidade; não usadas).
+    tp_min_pct: float = 0.0
+    sl_pct: float = 0.0
+    timeout_hours: float = 0.0
+    min_hold_minutes: float = 0.0
+    # Entry labels (janela unica em minutos) e lucro minimo correspondente.
+    # Ajuste manual aqui para calibrar o label.
+    entry_label_windows_minutes: Tuple[int, ...] = (360,)
+    entry_label_min_profit_pcts: Tuple[float, ...] = (0.02,)
+    # Peso dos labels: escala da margem (abs(retorno - min_profit_pct))
+    entry_label_weight_alpha: float = 0.01
+    # Exit EMA: se span > 0, fecha em cross/close < EMA
+    # Default acompanha a janela unica do label.
+    exit_ema_span: int = 360
+    exit_ema_init_offset_pct: float = 0.01
     fee_pct_per_side: float = 0.0005
-    slippage_pct: float = 0.0005
-    max_adds: int = 1
-    add_spacing_pct: float = 0.01
-    add_sizing: Tuple[float, ...] = field(default_factory=lambda: (1.0, 0.5))
-    risk_max_cycle_pct: float = 0.06
-    # IMPORTANTE: para "não comprar antes do mínimo", exigimos MAE pequeno.
-    # Isso força exemplos onde a entrada acontece perto do fundo (ou após estabilização).
-    dd_intermediate_limit_pct: float = 0.005
+    slippage_pct: float = 0.0
+    max_adds: int = 0
+    add_spacing_pct: float = 0.0
+    add_sizing: Tuple[float, ...] = field(default_factory=lambda: (1.0,))
+    risk_max_cycle_pct: float = 0.0
+    dd_intermediate_limit_pct: float = 0.0
     # Danger deve ser um filtro *útil* (não raríssimo):
     # - drop_pct muito alto (ex.: 10% em 2h) vira evento raro e o modelo não aprende.
     # Defaults abaixo miram "queda relevante em poucas horas" (~1%+ de positivos em alts),
     # mantendo estabilidade para não bloquear tudo.
     # Queda "relevante" em poucas horas: use algo na faixa 3%..6%.
     # 3% tende a disparar muito em alts (muito conservador); 5% é um bom ponto de partida.
-    danger_drop_pct: float = 0.04
-    danger_recovery_pct: float = 0.02
-    danger_timeout_hours: float = 6.0
-    # Danger "critico": queda forte em pouco tempo (label mais restritivo).
-    danger_fast_minutes: float = 60.0
-    danger_drop_pct_critical: float = 0.06
-    # Danger "reset" (pós-fundo): se após uma queda o preço estabilizar, queremos danger=0 mais cedo.
-    # A estabilização é detectada por:
-    # - recuperação mínima a partir do mínimo local, OU
-    # - ficar N barras sem fazer novo mínimo
-    danger_stabilize_recovery_pct: float = 0.01
-    danger_stabilize_bars: int = 30
+    danger_drop_pct: float = 0.0
+    danger_recovery_pct: float = 0.0
+    danger_timeout_hours: float = 0.0
+    danger_fast_minutes: float = 0.0
+    danger_drop_pct_critical: float = 0.0
+    danger_stabilize_recovery_pct: float = 0.0
+    danger_stabilize_bars: int = 0
 
     def timeout_bars(self, candle_sec: int) -> int:
         if candle_sec <= 0:
@@ -75,33 +66,24 @@ class TradeContract:
         bars = int(round((mins * 60.0) / float(max(1, candle_sec))))
         return max(0, bars)
 
-    def entry_horizon_bars(self, candle_sec: int) -> int:
-        hours = float(self.entry_horizon_hours or 0.0)
-        bars = int(round((hours * 3600.0) / float(max(1, candle_sec))))
-        return max(1, bars)
-
-    def entry_fast_bars(self, candle_sec: int) -> int:
-        mins = float(self.entry_fast_minutes or 0.0)
-        bars = int(round((mins * 60.0) / float(max(1, candle_sec))))
-        return max(1, bars)
-
-    def exit_score(
-        self,
-        *,
-        pnl_pct: float,
-        dd_pct: float,
-        time_hours: float,
-        danger_hit: bool,
-    ) -> float:
-        score = (self.exit_score_w_time * float(time_hours)) + (self.exit_score_w_pnl * float(max(0.0, pnl_pct))) + (self.exit_score_w_dd * float(max(0.0, dd_pct)))
-        if danger_hit:
-            score += float(self.exit_score_w_danger)
-        return float(score)
-
 
 DEFAULT_TRADE_CONTRACT = TradeContract()
 
 __all__ = [
     "TradeContract",
     "DEFAULT_TRADE_CONTRACT",
+    "exit_ema_span_from_window",
 ]
+
+
+def exit_ema_span_from_window(contract: TradeContract, candle_sec: int = 60) -> int:
+    """
+    Deriva o span da EMA de exit a partir da primeira janela (em minutos).
+    Fallback: usa exit_ema_span do contrato.
+    """
+    windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
+    if not windows:
+        return int(getattr(contract, "exit_ema_span", 0) or 0)
+    candle_sec = int(max(1, candle_sec))
+    w_min = float(windows[0])
+    return int(max(1, round((w_min * 60.0) / float(candle_sec))))

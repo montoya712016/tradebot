@@ -55,13 +55,14 @@ def _ensure_contract_labels(
     *,
     contract: TradeContract,
     candle_sec: int,
+    entry_label_col: str = "sniper_entry_label",
+    exit_code_col: str = "sniper_exit_code",
 ) -> None:
     cols_needed = {
-        "sniper_entry_label",
+        str(entry_label_col),
         "sniper_mae_pct",
-        "sniper_exit_code",
+        str(exit_code_col),
         "sniper_exit_wait_bars",
-        "sniper_danger_label",
     }
     if not cols_needed.issubset(df.columns):
         apply_trade_contract_labels(df, contract=contract, candle_sec=candle_sec)
@@ -86,14 +87,16 @@ def _collect_add_snapshots(
     *,
     contract: TradeContract,
     candle_sec: int,
+    entry_label_col: str = "sniper_entry_label",
+    exit_code_col: str = "sniper_exit_code",
     max_add_starts: int = 20_000,
     seed: int = 42,
 ) -> Dict[str, List[float | int]]:
     close = df["close"].to_numpy(np.float64, copy=False)
     high = df.get("high", df["close"]).to_numpy(np.float64, copy=False)
     low = df.get("low", df["close"]).to_numpy(np.float64, copy=False)
-    entry_label = df["sniper_entry_label"].to_numpy(np.uint8, copy=False)
-    exit_code = df["sniper_exit_code"].to_numpy(np.int8, copy=False)
+    entry_label = df[str(entry_label_col)].to_numpy(np.uint8, copy=False)
+    exit_code = df[str(exit_code_col)].to_numpy(np.int8, copy=False)
 
     n = int(len(df))
     timeout_bars = int(contract.timeout_bars(candle_sec))
@@ -454,6 +457,7 @@ def _collect_exit_snapshots(
     *,
     contract: TradeContract,
     candle_sec: int,
+    entry_label_col: str = "sniper_entry_label",
     max_exit_starts: int = 8_000,
     exit_neg_frac: float = 0.35,
     exit_stride_bars: int = 15,
@@ -464,7 +468,7 @@ def _collect_exit_snapshots(
     close = df["close"].to_numpy(np.float64, copy=False)
     high = df.get("high", df["close"]).to_numpy(np.float64, copy=False)
     low = df.get("low", df["close"]).to_numpy(np.float64, copy=False)
-    entry_label = df["sniper_entry_label"].to_numpy(np.uint8, copy=False)
+    entry_label = df[str(entry_label_col)].to_numpy(np.uint8, copy=False)
 
     timeout_bars = int(contract.timeout_bars(candle_sec))
     spacing = float(contract.add_spacing_pct)
@@ -680,6 +684,8 @@ def build_sniper_datasets(
     *,
     contract: TradeContract | None = None,
     candle_sec: int | None = None,
+    entry_label_col: str = "sniper_entry_label",
+    exit_code_col: str = "sniper_exit_code",
     max_add_starts: int = 20_000,
     max_exit_starts: int = 8_000,
     exit_neg_frac: float = 0.35,
@@ -690,153 +696,56 @@ def build_sniper_datasets(
     seed: int = 42,
 ) -> SniperDataset:
     """
-    Constrói quatro dataframes:
-        - entry: todas as barras com label sniper_entry_label (fora de posição)
-        - add: snapshots capturados quando o ciclo hipotético atinge pontos de add
-        - danger: todas as barras com label sniper_danger_label
-        - exit: snapshots em posição para treinar Exit model (label_exit)
-    Cada dataframe já inclui colunas de estado (cycle_*).
+    Constr?i quatro dataframes:
+        - entry: todas as barras com label sniper_entry_label (fora de posi??o)
+        - add: vazio (adds removidos)
+        - danger: vazio (danger removido)
+        - exit: vazio (exit model removido)
+    Cada dataframe j? inclui colunas de estado (cycle_*).
     """
     contract = contract or DEFAULT_TRADE_CONTRACT
     candle_sec = int(candle_sec or _infer_candle_sec(df.index))
-    _ensure_contract_labels(df, contract=contract, candle_sec=candle_sec)
+    _ensure_contract_labels(
+        df,
+        contract=contract,
+        candle_sec=candle_sec,
+        entry_label_col=str(entry_label_col),
+        exit_code_col=str(exit_code_col),
+    )
 
-    entry_mask = df["sniper_entry_label"].notna()
+    entry_mask = df[str(entry_label_col)].notna()
     entry_df = df.loc[entry_mask].copy()
     entry_df["ts"] = entry_df.index
     entry_df["cycle_is_add"] = 0
     entry_df["cycle_num_adds"] = 0
     entry_df["cycle_time_in_trade"] = 0
     entry_df["cycle_dd_pct"] = 0.0
-    entry_df["cycle_dist_to_tp"] = 1.0
-    entry_df["cycle_dist_to_sl"] = 0.0
     entry_df["cycle_avg_entry_price"] = entry_df["close"]
     entry_df["cycle_last_fill_price"] = entry_df["close"]
-    entry_df["cycle_risk_used_pct"] = contract.sl_pct
-    entry_df["cycle_risk_if_add_pct"] = contract.sl_pct + contract.add_spacing_pct
-    entry_df["label_entry"] = entry_df["sniper_entry_label"].astype(np.uint8)
+    entry_df["label_entry"] = entry_df[str(entry_label_col)].astype(np.uint8)
 
-    add_snap = _collect_add_snapshots(df, contract=contract, candle_sec=candle_sec, max_add_starts=int(max_add_starts), seed=int(seed))
-    if add_snap["idx"]:
-        add_idx = np.array(add_snap["idx"], dtype=int)
-        add_df = df.iloc[add_idx].copy()
-        add_df["ts"] = add_df.index
-        add_df["cycle_is_add"] = 1
-        add_df["cycle_num_adds"] = np.array(add_snap["num_adds"], dtype=np.int32)
-        add_df["cycle_time_in_trade"] = np.array(add_snap["time_in_trade"], dtype=np.int32)
-        add_df["cycle_dd_pct"] = np.array(add_snap["dd_pct"], dtype=np.float32)
-        add_df["cycle_dist_to_tp"] = np.array(add_snap["dist_to_tp"], dtype=np.float32)
-        add_df["cycle_dist_to_sl"] = np.array(add_snap["dist_to_sl"], dtype=np.float32)
-        add_df["cycle_avg_entry_price"] = np.array(add_snap["avg_entry_price"], dtype=np.float64)
-        add_df["cycle_last_fill_price"] = np.array(add_snap["last_fill_price"], dtype=np.float64)
-        add_df["cycle_risk_used_pct"] = np.array(add_snap["risk_used_pct"], dtype=np.float32)
-        add_df["cycle_risk_if_add_pct"] = np.array(add_snap["risk_if_add_pct"], dtype=np.float32)
-        add_df["label_entry"] = np.array(add_snap["label"], dtype=np.uint8)
-        add_df["sniper_exit_code"] = np.array(add_snap["exit_code"], dtype=np.int8)
-    else:
-        add_df = pd.DataFrame(columns=list(df.columns) + [
-            "ts",
-            "cycle_is_add",
-            "cycle_num_adds",
-            "cycle_time_in_trade",
-            "cycle_dd_pct",
-            "cycle_dist_to_tp",
-            "cycle_dist_to_sl",
-            "cycle_avg_entry_price",
-            "cycle_last_fill_price",
-            "cycle_risk_used_pct",
-            "cycle_risk_if_add_pct",
-            "label_entry",
-        ])
-
-    danger_df = df.copy()
-    danger_df["ts"] = danger_df.index
-    danger_df["label_danger"] = danger_df["sniper_danger_label"].fillna(0).astype(np.uint8)
-
-    exit_snap = _collect_exit_snapshots(
-        df,
-        contract=contract,
-        candle_sec=candle_sec,
-        max_exit_starts=int(max_exit_starts),
-        exit_neg_frac=float(exit_neg_frac),
-        exit_stride_bars=int(exit_stride_bars),
-        exit_lookahead_bars=exit_lookahead_bars,
-        exit_margin_pct=float(exit_margin_pct),
-        seed=int(seed),
-    )
-    if exit_snap["idx"]:
-        exit_idx = np.array(exit_snap["idx"], dtype=int)
-        exit_df = df.iloc[exit_idx].copy()
-        exit_df["ts"] = exit_df.index
-        exit_df["cycle_is_add"] = 0
-        exit_df["cycle_num_adds"] = np.array(exit_snap["num_adds"], dtype=np.int32)
-        exit_df["cycle_time_in_trade"] = np.array(exit_snap["time_in_trade"], dtype=np.int32)
-        exit_df["cycle_dd_pct"] = np.array(exit_snap["dd_pct"], dtype=np.float32)
-        exit_df["cycle_dist_to_tp"] = np.array(exit_snap["dist_to_tp"], dtype=np.float32)
-        exit_df["cycle_dist_to_sl"] = np.array(exit_snap["dist_to_sl"], dtype=np.float32)
-        exit_df["cycle_avg_entry_price"] = np.array(exit_snap["avg_entry_price"], dtype=np.float64)
-        exit_df["cycle_last_fill_price"] = np.array(exit_snap["last_fill_price"], dtype=np.float64)
-        exit_df["cycle_risk_used_pct"] = np.array(exit_snap["risk_used_pct"], dtype=np.float32)
-        exit_df["cycle_risk_if_add_pct"] = np.array(exit_snap["risk_if_add_pct"], dtype=np.float32)
-        exit_df["label_exit"] = np.array(exit_snap["label_exit"], dtype=np.uint8)
-    else:
-        exit_df = pd.DataFrame(columns=list(df.columns) + [
-            "ts",
-            "cycle_is_add",
-            "cycle_num_adds",
-            "cycle_time_in_trade",
-            "cycle_dd_pct",
-            "cycle_dist_to_tp",
-            "cycle_dist_to_sl",
-            "cycle_avg_entry_price",
-            "cycle_last_fill_price",
-            "cycle_risk_used_pct",
-            "cycle_risk_if_add_pct",
-            "label_exit",
-        ])
+    empty_cols = list(df.columns) + [
+        "ts",
+        "cycle_is_add",
+        "cycle_num_adds",
+        "cycle_time_in_trade",
+        "cycle_dd_pct",
+        "cycle_avg_entry_price",
+        "cycle_last_fill_price",
+    ]
+    add_df = pd.DataFrame(columns=empty_cols + ["label_entry"])
+    danger_df = pd.DataFrame(columns=empty_cols + ["label_danger"])
+    exit_df = pd.DataFrame(columns=empty_cols + ["label_exit"])
 
     meta = dict(
-        tp_pct=contract.tp_min_pct,
-        sl_pct=contract.sl_pct,
-        timeout_bars=contract.timeout_bars(candle_sec),
-        add_spacing_pct=contract.add_spacing_pct,
-        max_adds=contract.max_adds,
-        risk_max_cycle_pct=contract.risk_max_cycle_pct,
         candle_sec=candle_sec,
-        exit_stride_bars=int(exit_stride_bars),
-        exit_lookahead_bars=int(exit_lookahead_bars) if exit_lookahead_bars is not None else int(min(max(5, contract.timeout_bars(candle_sec)), 240)),
-        exit_margin_pct=float(exit_margin_pct),
     )
     return SniperDataset(entry=entry_df, add=add_df, danger=danger_df, exit=exit_df, meta=meta)
 
 
 def warmup_sniper_dataset_numba() -> None:
-    """
-    A primeira compilação de Numba pode parecer "travada" em datasets grandes.
-    Chamamos um warmup pequeno para compilar o kernel de ADD snapshots antes do treino.
-    """
-    close = np.array([1.0, 0.99, 1.01, 0.98, 1.02], dtype=np.float64)
-    high = close.copy()
-    low = close.copy()
-    entry_label = np.array([0, 1, 0, 1, 0], dtype=np.uint8)
-    exit_code = np.array([0, 0, 0, 0, 0], dtype=np.int8)
-    start_idx = np.array([1, 3], dtype=np.int64)
-    size_sched = np.array([1.0, 0.5, 0.25], dtype=np.float64)
-    _ = _collect_add_snapshots_numba(
-        close,
-        high,
-        low,
-        entry_label,
-        exit_code,
-        start_idx,
-        10,         # timeout_bars
-        0.05,       # tp_pct
-        0.05,       # sl_pct
-        0.01,       # spacing
-        2,          # max_adds
-        0.20,       # risk_cap
-        size_sched,
-    )
+    """Warmup vazio: kernels antigos de add/exit foram removidos."""
+    return
 
 
 __all__ = [

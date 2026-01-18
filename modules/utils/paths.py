@@ -60,13 +60,12 @@ def cache_sniper_root() -> Path:
 
 def generated_root() -> Path:
     """
-    Pasta externa para outputs/artefatos gerados por backtests/GA/analises,
-    evitando `repo_root/data/generated` ficar gigante.
+    Pasta para outputs/artefatos gerados por backtests/GA/analises.
     """
     v = (os.getenv("TRADEBOT_GENERATED_ROOT") or "").strip()
     if v:
         return Path(v).expanduser().resolve()
-    return storage_root() / "generated"
+    return (repo_root() / "data" / "generated").resolve()
 
 
 def feature_cache_root() -> Path:

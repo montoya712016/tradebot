@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Treinamento dos modelos Sniper (EntryScore + DangerScore) usando walk-forward.
+Treinamento dos modelos Sniper (EntryScore) usando walk-forward.
 """
 from __future__ import annotations
 
@@ -22,13 +22,32 @@ try:
 except Exception:
     LogisticRegression = None  # type: ignore
 
-from .sniper_dataflow import (
-    prepare_sniper_dataset,
-    prepare_sniper_dataset_from_cache,
-    ensure_feature_cache,
-    GLOBAL_FLAGS_FULL,
-    SniperBatch,
-)
+try:
+    from .sniper_dataflow import (
+        prepare_sniper_dataset,
+        prepare_sniper_dataset_from_cache,
+        ensure_feature_cache,
+        GLOBAL_FLAGS_FULL,
+        SniperBatch,
+    )
+except Exception:
+    import sys
+    from pathlib import Path
+
+    _HERE = Path(__file__).resolve()
+    for _p in _HERE.parents:
+        if _p.name.lower() == "modules":
+            _sp = str(_p)
+            if _sp not in sys.path:
+                sys.path.insert(0, _sp)
+            break
+    from train.sniper_dataflow import (
+        prepare_sniper_dataset,
+        prepare_sniper_dataset_from_cache,
+        ensure_feature_cache,
+        GLOBAL_FLAGS_FULL,
+        SniperBatch,
+    )
 try:
     from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
 except Exception:
@@ -54,8 +73,8 @@ except Exception:
 @dataclass
 class TrainConfig:
     total_days: int = 365 * 5
-    offsets_days: Sequence[int] = (90, 180, 270, 360, 450, 540, 630, 720)
-    mcap_min_usd: float = 50_000_000.0
+    offsets_days: Sequence[int] = (180, 360, 540, 720, 900, 1_080, 1_260, 1_440, 1_620, 1_800)
+    mcap_min_usd: float = 100_000_000.0
     mcap_max_usd: float = 150_000_000_000.0
     symbols_file: Path = DEFAULT_SYMBOLS_FILE
     # 0 = sem limite (usa todas elegíveis por market cap)
@@ -63,13 +82,10 @@ class TrainConfig:
     # Se o período ficar com poucos símbolos com dados válidos, pula o treino (evita modelo escasso).
     min_symbols_used_per_period: int = 30
     entry_params: dict = None
-    danger_params: dict = None
     contract: TradeContract = DEFAULT_TRADE_CONTRACT
     # dataset sizing (VRAM/RAM)
-    max_rows_entry: int = 4_000_000
-    max_rows_danger: int = 2_000_000
+    max_rows_entry: int = 2_000_000
     entry_ratio_neg_per_pos: float = 6.0
-    danger_ratio_neg_per_pos: float = 4.0
     use_feature_cache: bool = True
     # Thresholds são definidos manualmente em config/thresholds.py (sem calibrar no treino).
 
@@ -83,20 +99,6 @@ DEFAULT_ENTRY_PARAMS = {
     "colsample_bytree": 0.9,
     # Observação: QuantileDMatrix costuma usar 256 bins por padrão; manter consistente evita
     # erro "Inconsistent max_bin (512 vs 256)" e permite treinar na GPU.
-    "max_bin": 256,
-    "lambda": 1.0,
-    "alpha": 0.0,
-    "tree_method": "hist",
-    "device": "cuda:0",
-}
-
-DEFAULT_DANGER_PARAMS = {
-    "objective": "binary:logistic",
-    "eval_metric": "logloss",
-    "eta": 0.03,
-    "max_depth": 8,
-    "subsample": 0.9,
-    "colsample_bytree": 0.9,
     "max_bin": 256,
     "lambda": 1.0,
     "alpha": 0.0,
@@ -150,6 +152,8 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
     ytr = batch.y[tr_idx]
     Xva = batch.X[va_idx]
     yva = batch.y[va_idx]
+    wtr = batch.w[tr_idx] if getattr(batch, "w", None) is not None else None
+    wva = batch.w[va_idx] if getattr(batch, "w", None) is not None else None
 
     # Blindagem: evita erro de base_score quando o dataset ficar com 1-classe por sampling.
     y_mean = float(np.mean(ytr)) if ytr.size else 0.5
@@ -174,20 +178,20 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
         params["max_bin"] = mb
         try:
             # Nem todas as versões expõem max_bin no construtor; por isso try/except.
-            dtrain = xgb.QuantileDMatrix(Xtr, label=ytr, max_bin=mb)
-            dvalid = xgb.QuantileDMatrix(Xva, label=yva, ref=dtrain, max_bin=mb)
+            dtrain = xgb.QuantileDMatrix(Xtr, label=ytr, weight=wtr, max_bin=mb)
+            dvalid = xgb.QuantileDMatrix(Xva, label=yva, weight=wva, ref=dtrain, max_bin=mb)
         except TypeError:
             # fallback: usa default do QuantileDMatrix (geralmente 256) e ajusta params
             params["max_bin"] = 256
-            dtrain = xgb.QuantileDMatrix(Xtr, label=ytr)
-            dvalid = xgb.QuantileDMatrix(Xva, label=yva, ref=dtrain)
+            dtrain = xgb.QuantileDMatrix(Xtr, label=ytr, weight=wtr)
+            dvalid = xgb.QuantileDMatrix(Xva, label=yva, weight=wva, ref=dtrain)
         except Exception as e:
             print(f"[xgb] QuantileDMatrix falhou ({type(e).__name__}: {e}) -> fallback DMatrix", flush=True)
-            dtrain = xgb.DMatrix(Xtr, label=ytr)
-            dvalid = xgb.DMatrix(Xva, label=yva)
+            dtrain = xgb.DMatrix(Xtr, label=ytr, weight=wtr)
+            dvalid = xgb.DMatrix(Xva, label=yva, weight=wva)
     else:
-        dtrain = xgb.DMatrix(Xtr, label=ytr)
-        dvalid = xgb.DMatrix(Xva, label=yva)
+        dtrain = xgb.DMatrix(Xtr, label=ytr, weight=wtr)
+        dvalid = xgb.DMatrix(Xva, label=yva, weight=wva)
     watch = [(dtrain, "train"), (dvalid, "val")]
     print(f"[xgb] train rows={len(tr_idx):,} val rows={len(va_idx):,} feats={batch.X.shape[1]:,}".replace(",", "."), flush=True)
     try:
@@ -239,13 +243,15 @@ def _train_xgb_regressor(batch: SniperBatch, params: dict, *, y_transform: str =
     ytr0 = batch.y[tr_idx].astype(np.float32, copy=False)
     Xva = batch.X[va_idx]
     yva0 = batch.y[va_idx].astype(np.float32, copy=False)
+    wtr = batch.w[tr_idx] if getattr(batch, "w", None) is not None else None
+    wva = batch.w[va_idx] if getattr(batch, "w", None) is not None else None
 
     def _apply_transform(y: np.ndarray) -> np.ndarray:
         yy = np.asarray(y, dtype=np.float32)
-        yy = np.maximum(0.0, yy)
         if y_transform == "none":
             return yy
         if y_transform == "log1p":
+            yy = np.maximum(0.0, yy)
             return np.log1p(yy)
         raise ValueError(f"y_transform inválido: {y_transform}")
 
@@ -265,11 +271,11 @@ def _train_xgb_regressor(batch: SniperBatch, params: dict, *, y_transform: str =
             dvalid = xgb.QuantileDMatrix(Xva, label=yva, ref=dtrain)
         except Exception as e:
             print(f"[xgb] QuantileDMatrix falhou ({type(e).__name__}: {e}) -> fallback DMatrix", flush=True)
-            dtrain = xgb.DMatrix(Xtr, label=ytr)
-            dvalid = xgb.DMatrix(Xva, label=yva)
+            dtrain = xgb.DMatrix(Xtr, label=ytr, weight=wtr)
+            dvalid = xgb.DMatrix(Xva, label=yva, weight=wva)
     else:
-        dtrain = xgb.DMatrix(Xtr, label=ytr)
-        dvalid = xgb.DMatrix(Xva, label=yva)
+        dtrain = xgb.DMatrix(Xtr, label=ytr, weight=wtr)
+        dvalid = xgb.DMatrix(Xva, label=yva, weight=wva)
 
     watch = [(dtrain, "train"), (dvalid, "val")]
     print(f"[xgb] (reg) train rows={len(tr_idx):,} val rows={len(va_idx):,} feats={batch.X.shape[1]:,}".replace(",", "."), flush=True)
@@ -288,8 +294,8 @@ def _train_xgb_regressor(batch: SniperBatch, params: dict, *, y_transform: str =
             params_cpu = dict(params)
             params_cpu["device"] = "cpu"
             params_cpu["tree_method"] = "hist"
-            dtrain = xgb.DMatrix(Xtr, label=ytr)
-            dvalid = xgb.DMatrix(Xva, label=yva)
+            dtrain = xgb.DMatrix(Xtr, label=ytr, weight=wtr)
+            dvalid = xgb.DMatrix(Xva, label=yva, weight=wva)
             watch = [(dtrain, "train"), (dvalid, "val")]
             booster = xgb.train(
                 params=params_cpu,
@@ -368,7 +374,6 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
     print(f"[sniper-train] símbolos={len(symbols)} (max_symbols={cfg.max_symbols})", flush=True)
     run_dir = _next_run_dir(SAVE_ROOT)
     entry_params = dict(DEFAULT_ENTRY_PARAMS if cfg.entry_params is None else cfg.entry_params)
-    danger_params = dict(DEFAULT_DANGER_PARAMS if cfg.danger_params is None else cfg.danger_params)
 
     cache_map = None
     if bool(getattr(cfg, "use_feature_cache", True)):
@@ -391,7 +396,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             raise RuntimeError("Nenhum símbolo restou após gerar cache (ver logs [cache])")
 
     for tail in cfg.offsets_days:
-        print(f"[sniper-train] período T-{tail}d", flush=True)
+        print(f"[sniper-train] periodo T-{tail}d", flush=True)
         if bool(getattr(cfg, "use_feature_cache", True)):
             pack = prepare_sniper_dataset_from_cache(
                 symbols,
@@ -400,11 +405,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 contract=cfg.contract,
                 cache_map=cache_map,
                 entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
-                danger_ratio_neg_per_pos=float(getattr(cfg, "danger_ratio_neg_per_pos", 4.0)),
-                exit_ratio_neg_per_pos=float(getattr(cfg, "exit_ratio_neg_per_pos", 4.0)),
                 max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
-                max_rows_danger=int(getattr(cfg, "max_rows_danger", 1_200_000)),
-                max_rows_exit=int(getattr(cfg, "max_rows_exit", 1_200_000)),
                 seed=1337,
             )
         else:
@@ -414,11 +415,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 remove_tail_days=int(tail),
                 contract=cfg.contract,
                 entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
-                danger_ratio_neg_per_pos=float(getattr(cfg, "danger_ratio_neg_per_pos", 4.0)),
-                exit_ratio_neg_per_pos=float(getattr(cfg, "exit_ratio_neg_per_pos", 4.0)),
                 max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
-                max_rows_danger=int(getattr(cfg, "max_rows_danger", 1_200_000)),
-                max_rows_exit=int(getattr(cfg, "max_rows_exit", 1_200_000)),
                 seed=1337,
             )
         try:
@@ -428,7 +425,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             print(f"[sniper-train] {tail}d: train_end_utc={te} | symbols_used={n_used} skipped={n_skip}", flush=True)
         except Exception:
             pass
-        # proteção anti-escassez: se poucos símbolos sobreviveram nesse tail, não vale treinar.
+        # protecao anti-escassez: se poucos simbolos sobreviveram nesse tail, nao vale treinar.
         try:
             min_used = int(getattr(cfg, "min_symbols_used_per_period", 0) or 0)
         except Exception:
@@ -441,77 +438,86 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             if int(n_used) < int(min_used):
                 print(f"[sniper-train] {tail}d: symbols_used={n_used} < min_symbols_used_per_period={min_used} -> pulando", flush=True)
                 continue
-        if pack.entry.X.size == 0 or pack.danger.X.size == 0:
+        if pack.entry_mid.X.size == 0:
             print(f"[sniper-train] {tail}d: dataset vazio, pulando")
             continue
         try:
-            pos_e = int((pack.entry.y >= 0.5).sum())
-            neg_e = int((pack.entry.y < 0.5).sum())
-            pos_d = int((pack.danger.y >= 0.5).sum())
-            neg_d = int((pack.danger.y < 0.5).sum())
-            print(
-                (f"[sniper-train] dataset entry: pos={pos_e:,} neg={neg_e:,} | danger: pos={pos_d:,} neg={neg_d:,}").replace(",", "."),
-                flush=True,
-            )
+            pos_e = int((pack.entry_mid.y >= 0.5).sum())
+            neg_e = int((pack.entry_mid.y < 0.5).sum())
+            print((f"[sniper-train] dataset entry: pos={pos_e:,} neg={neg_e:,}").replace(",", "."), flush=True)
         except Exception:
             pass
 
-        print("[sniper-train] treinando EntryScore...", flush=True)
-        entry_model, entry_meta = _train_xgb_classifier(pack.entry, entry_params)
-        print(f"[sniper-train] EntryScore: best_iter={entry_meta['best_iteration']}", flush=True)
+        windows = list(getattr(cfg.contract, "entry_label_windows_minutes", []) or [])
+        if not windows:
+            raise RuntimeError("entry_label_windows_minutes vazio")
+        entry_specs = [("mid", int(windows[0]))]
+        entry_batches = {"mid": pack.entry_mid}
+        entry_models: dict[str, tuple[xgb.Booster, dict]] = {}
+        for name, w in entry_specs:
+            b = entry_batches.get(name, pack.entry_mid)
+            if b is None or b.X.size == 0:
+                print(f"[sniper-train] EntryScore {name} ({w}m): dataset vazio, pulando", flush=True)
+                continue
+            print(f"[sniper-train] treinando EntryScore {name} ({w}m)...", flush=True)
+            m, m_meta = _train_xgb_classifier(b, entry_params)
+            entry_models[name] = (m, m_meta)
+            print(f"[sniper-train] EntryScore {name}: best_iter={m_meta['best_iteration']}", flush=True)
 
-        print("[sniper-train] treinando DangerScore...", flush=True)
-        danger_model, danger_meta = _train_xgb_classifier(pack.danger, danger_params)
-        print(f"[sniper-train] DangerScore: best_iter={danger_meta['best_iteration']}", flush=True)
+        if not entry_models:
+            print(f"[sniper-train] {tail}d: nenhum modelo treinado, pulando", flush=True)
+            continue
+
+        period_train_end = None
+        try:
+            if getattr(pack, "train_end_utc", None) is not None:
+                period_train_end = pd.to_datetime(pack.train_end_utc)
+            elif pack.entry_mid.ts.size:
+                period_train_end = pd.to_datetime(pack.entry_mid.ts.max())
+        except Exception:
+            period_train_end = None
 
         period_dir = run_dir / f"period_{int(tail)}d"
-        (period_dir / "entry_model").mkdir(parents=True, exist_ok=True)
-        _save_model(entry_model, period_dir / "entry_model" / "model_entry.json")
-        _save_model(danger_model, period_dir / "danger_model" / "model_danger.json")
-
+        # salva modelo entry (mantem entry_model como alias do "mid")
+        for name, w in entry_specs:
+            if name not in entry_models:
+                continue
+            model, _m_meta = entry_models[name]
+            d = period_dir / f"entry_model_{int(w)}m"
+            d.mkdir(parents=True, exist_ok=True)
+            _save_model(model, d / "model_entry.json")
+        if "mid" in entry_models:
+            (period_dir / "entry_model").mkdir(parents=True, exist_ok=True)
+            _save_model(entry_models["mid"][0], period_dir / "entry_model" / "model_entry.json")
+        base_name = "mid"
+        base_batch = entry_batches[base_name]
+        base_meta = entry_models[base_name][1]
         meta = {
             "entry": {
-                "feature_cols": pack.entry.feature_cols,
-                "calibration": entry_meta["calibrator"],
+                "feature_cols": base_batch.feature_cols,
+                "calibration": base_meta.get("calibrator", {"type": "identity"}),
             },
-            "danger": {
-                "feature_cols": pack.danger.feature_cols,
-                "calibration": danger_meta["calibrator"],
-            },
-            # Ponto final do treino (auditável): preferimos o valor determinístico vindo do dataflow
-            # (cutoff - lookahead). Se não existir, cai no max(ts) do dataset amostrado.
+            # Ponto final do treino (auditavel): preferimos o valor deterministico vindo do dataflow
+            # (cutoff - lookahead). Se nao existir, cai no max(ts) do dataset amostrado.
             "train_end_utc": (
-                str(pd.to_datetime(pack.train_end_utc)) if getattr(pack, "train_end_utc", None) is not None
-                else (
-                    np.datetime_as_string(
-                        np.minimum(
-                            np.max(pack.entry.ts) if pack.entry.ts.size else np.datetime64("NaT"),
-                            np.max(pack.danger.ts) if pack.danger.ts.size else np.datetime64("NaT"),
-                        ),
-                        unit="s",
-                    )
-                    if (pack.entry.ts.size and pack.danger.ts.size)
-                    else None
-                )
+                str(pd.to_datetime(period_train_end))
+                if period_train_end is not None
+                else (np.datetime_as_string(np.max(base_batch.ts), unit="s") if base_batch.ts.size else None)
             ),
-            "contract": {
-                "tp_pct": cfg.contract.tp_min_pct,
-                "sl_pct": cfg.contract.sl_pct,
-                "timeout_hours": cfg.contract.timeout_hours,
-                "add_spacing_pct": cfg.contract.add_spacing_pct,
-                "max_adds": cfg.contract.max_adds,
-                "risk_max_cycle_pct": cfg.contract.risk_max_cycle_pct,
-                "danger_drop_pct": cfg.contract.danger_drop_pct,
-                "danger_recovery_pct": cfg.contract.danger_recovery_pct,
-                "danger_timeout_hours": cfg.contract.danger_timeout_hours,
-                "danger_stabilize_recovery_pct": getattr(cfg.contract, "danger_stabilize_recovery_pct", 0.01),
-                "danger_stabilize_bars": getattr(cfg.contract, "danger_stabilize_bars", 30),
-            },
             "symbols": (pack.symbols_used if getattr(pack, "symbols_used", None) else pack.symbols),
             "symbols_total": int(len(pack.symbols) if getattr(pack, "symbols", None) else 0),
             "symbols_used": (pack.symbols_used or None),
             "symbols_skipped": (pack.symbols_skipped or None),
         }
+        # meta extra por janela
+        for name, w in entry_specs:
+            if name not in entry_models:
+                continue
+            _m, _m_meta = entry_models[name]
+            meta[f"entry_{int(w)}m"] = {
+                "feature_cols": entry_batches[name].feature_cols,
+                "calibration": _m_meta["calibrator"],
+            }
         (period_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[sniper-train] {tail}d salvo em {period_dir}")
 
@@ -520,5 +526,5 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
 
 if __name__ == "__main__":
     run = train_sniper_models()
-    print(f"✓ modelos salvos em: {run}")
+    print(f"[sniper-train] modelos salvos em: {run}")
 

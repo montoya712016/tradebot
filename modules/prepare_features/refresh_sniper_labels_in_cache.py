@@ -6,7 +6,7 @@ Recalcula APENAS os labels sniper_* dentro do cache de features (parquet/pickle)
 sem recomputar features.
 
 Útil quando ajustamos a lógica de Danger/Entry/Exit em `prepare_features/labels.py`
-ou os parâmetros do `TradeContract` (ex.: danger_drop_pct / danger_timeout_hours).
+ou os parâmetros do `TradeContract` (ex.: entry_label_windows_minutes / exit_ema_span).
 
 Uso:
 python modules/prepare_features/refresh_sniper_labels_in_cache.py
@@ -18,6 +18,7 @@ Observação:
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import os
 import sys
 import time
 import uuid
@@ -34,7 +35,8 @@ for _p in _HERE.parents:
             sys.path.insert(0, _sp)
         break
 
-from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract  # noqa: E402
+from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract, exit_ema_span_from_window  # noqa: E402
+from config.symbols import default_top_market_cap_path, load_market_caps  # noqa: E402
 from train.sniper_dataflow import _cache_dir, _cache_format, _symbol_cache_paths  # type: ignore  # noqa: E402
 from prepare_features.labels import apply_trade_contract_labels  # noqa: E402
 
@@ -45,6 +47,11 @@ class RefreshLabelsSettings:
     limit: int = 0
     # se não vazio, processa só estes
     symbols: list[str] | None = None
+    # filtro por market cap (se symbols vazio)
+    symbols_file: Path | None = None
+    mcap_min_usd: float = 100_000_000.0
+    mcap_max_usd: float = 150_000_000_000.0
+    max_symbols: int = 0
     candle_sec: int = 60
     contract: TradeContract = DEFAULT_TRADE_CONTRACT
     # se True, imprime 1 linha por símbolo
@@ -71,34 +78,62 @@ def _list_symbols_from_cache(cache_dir: Path, fmt: str) -> list[str]:
     return out
 
 
+def _select_symbols_by_market_cap(s: RefreshLabelsSettings) -> list[str]:
+    path = Path(s.symbols_file) if s.symbols_file is not None else default_top_market_cap_path()
+    caps = load_market_caps(path)
+    if not caps:
+        return []
+    lo = min(float(s.mcap_min_usd), float(s.mcap_max_usd))
+    hi = max(float(s.mcap_min_usd), float(s.mcap_max_usd))
+    ranked = sorted(caps.items(), key=lambda kv: kv[1], reverse=True)
+    out: list[str] = []
+    for sym, cap in ranked:
+        if cap < lo or cap > hi:
+            continue
+        s_sym = str(sym).upper()
+        if not s_sym.endswith("USDT"):
+            s_sym = s_sym + "USDT"
+        out.append(s_sym)
+        if int(s.max_symbols) > 0 and len(out) >= int(s.max_symbols):
+            break
+    return out
+
+
 def run(settings: RefreshLabelsSettings | None = None) -> dict:
     """
     Recalcula labels `sniper_*` no cache, sem recomputar features.
     Retorna métricas básicas para logging/integração.
     """
     s = settings or RefreshLabelsSettings()
+    try:
+        env_max = os.getenv("SNIPER_REFRESH_MAX_SYMBOLS", "").strip()
+        if env_max and int(s.max_symbols) <= 0:
+            s.max_symbols = int(env_max)
+    except Exception:
+        pass
     cache_dir = _cache_dir()
     fmt = _cache_format()
 
     symbols = [x.strip().upper() for x in (s.symbols or []) if str(x).strip()]
     if not symbols:
+        symbols = _select_symbols_by_market_cap(s)
+    if not symbols:
         symbols = _list_symbols_from_cache(cache_dir, fmt)
     if int(s.limit) > 0:
         symbols = symbols[: int(s.limit)]
 
-    print(f"[labels-refresh] cache_dir={cache_dir} fmt={fmt} symbols={len(symbols)} candle_sec={s.candle_sec}", flush=True)
+    print(
+        f"[labels-refresh] cache_dir={cache_dir} fmt={fmt} symbols={len(symbols)} candle_sec={s.candle_sec} "
+        f"mcap_min={float(s.mcap_min_usd):.0f} mcap_max={float(s.mcap_max_usd):.0f} max_symbols={int(s.max_symbols)}",
+        flush=True,
+    )
+    eff_ema_span = exit_ema_span_from_window(s.contract, int(s.candle_sec))
     print(
         "[labels-refresh] contract: "
-        f"entry_min_profit_pct={s.contract.entry_min_profit_pct} "
-        f"entry_horizon_hours={s.contract.entry_horizon_hours} "
-        f"min_hold_minutes={s.contract.min_hold_minutes} "
-        f"sl_pct={s.contract.sl_pct} "
-        f"exit_score_threshold={getattr(s.contract, 'exit_score_threshold', 10.0)} "
-        f"danger_drop_pct={s.contract.danger_drop_pct} "
-        f"danger_drop_pct_critical={getattr(s.contract, 'danger_drop_pct_critical', s.contract.danger_drop_pct)} "
-        f"danger_fast_minutes={getattr(s.contract, 'danger_fast_minutes', 60.0)} "
-        f"danger_timeout_hours={s.contract.danger_timeout_hours} "
-        f"danger_recovery_pct={s.contract.danger_recovery_pct}",
+        f"entry_label_windows_minutes={s.contract.entry_label_windows_minutes} "
+        f"entry_label_min_profit_pcts={s.contract.entry_label_min_profit_pcts} "
+        f"exit_ema_span={eff_ema_span} "
+        f"exit_ema_init_offset_pct={s.contract.exit_ema_init_offset_pct}",
         flush=True,
     )
 
@@ -146,13 +181,26 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
 
             # recalcula labels (somente sniper_*)
             df_lab = apply_trade_contract_labels(df[["close", "high", "low"]].copy(), contract=s.contract, candle_sec=int(s.candle_sec))
-            for c in [
+            cols = [
                 "sniper_entry_label",
+                "sniper_entry_weight",
                 "sniper_mae_pct",
                 "sniper_exit_code",
                 "sniper_exit_wait_bars",
-                "sniper_danger_label",
-            ]:
+            ]
+            windows = list(getattr(s.contract, "entry_label_windows_minutes", []) or [])
+            for w in windows:
+                suf = f"{int(w)}m"
+                cols.extend(
+                    [
+                        f"sniper_entry_label_{suf}",
+                        f"sniper_entry_weight_{suf}",
+                        f"sniper_mae_pct_{suf}",
+                        f"sniper_exit_code_{suf}",
+                        f"sniper_exit_wait_bars_{suf}",
+                    ]
+                )
+            for c in cols:
                 if c in df_lab.columns:
                     df[c] = df_lab[c]
 
@@ -164,11 +212,6 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 meta = dict(meta or {})
                 meta["labels_refreshed_utc"] = pd.Timestamp.utcnow().tz_localize(None).isoformat()
-                meta["danger_drop_pct"] = float(s.contract.danger_drop_pct)
-                meta["danger_timeout_hours"] = float(s.contract.danger_timeout_hours)
-                meta["danger_recovery_pct"] = float(s.contract.danger_recovery_pct)
-                meta["danger_drop_pct_critical"] = float(getattr(s.contract, "danger_drop_pct_critical", s.contract.danger_drop_pct))
-                meta["danger_fast_minutes"] = float(getattr(s.contract, "danger_fast_minutes", 60.0))
                 meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             except Exception:
                 pass
