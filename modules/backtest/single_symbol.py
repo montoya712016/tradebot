@@ -8,17 +8,17 @@ Regras:
 - parâmetros definidos em código (sem ENV)
 - usa cache parquet/pickle (features+labels) para evitar recalcular features
 - simula walk-forward real (modelo escolhido por train_end_utc no WF)
-- salva plot com: preço + faixas de trades, probs (entry/danger) e equity
+- plota com plotly: candles, faixas de trades, probabilidades, sinais e equity
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import sys
 import time
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
 
 def _ensure_modules_on_sys_path() -> None:
     """
@@ -35,38 +35,80 @@ def _ensure_modules_on_sys_path() -> None:
                 sys.path.insert(0, sp)
             return
 
+
 _ensure_modules_on_sys_path()
 
-from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward, simulate_sniper_from_scores, select_entry_mid
-from backtest.sniper_walkforward import apply_threshold_overrides
-from dataclasses import replace
+from backtest.sniper_walkforward import (
+    load_period_models,
+    predict_scores_walkforward,
+    simulate_sniper_from_scores,
+    select_entry_mid,
+    apply_threshold_overrides,
+)
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL
-from trade_contract import DEFAULT_TRADE_CONTRACT
+from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract
 from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
+from plotting.plotting import plot_backtest_single
+
+
+def _best_run_contract() -> TradeContract:
+    """
+    Contrato alinhado com o melhor WF recente (janela 120m, min_profit 3.2%, alpha 0.5, EMA 120 / offset 0.2%).
+    """
+    base = DEFAULT_TRADE_CONTRACT
+    return TradeContract(
+        timeframe_sec=60,
+        tp_min_pct=base.tp_min_pct,
+        sl_pct=base.sl_pct,
+        timeout_hours=base.timeout_hours,
+        min_hold_minutes=base.min_hold_minutes,
+        entry_label_windows_minutes=(120,),
+        entry_label_min_profit_pcts=(0.032,),
+        entry_label_weight_alpha=0.5,
+        exit_ema_span=120,
+        exit_ema_init_offset_pct=0.002,
+        fee_pct_per_side=base.fee_pct_per_side,
+        slippage_pct=base.slippage_pct,
+        max_adds=base.max_adds,
+        add_spacing_pct=base.add_spacing_pct,
+        add_sizing=base.add_sizing,
+        risk_max_cycle_pct=base.risk_max_cycle_pct,
+        dd_intermediate_limit_pct=base.dd_intermediate_limit_pct,
+        danger_drop_pct=base.danger_drop_pct,
+        danger_recovery_pct=base.danger_recovery_pct,
+        danger_timeout_hours=base.danger_timeout_hours,
+        danger_fast_minutes=base.danger_fast_minutes,
+        danger_drop_pct_critical=base.danger_drop_pct_critical,
+        danger_stabilize_recovery_pct=base.danger_stabilize_recovery_pct,
+        danger_stabilize_bars=base.danger_stabilize_bars,
+    )
 
 
 @dataclass
 class SingleSymbolDemoSettings:
-    symbol: str = "ADAUSDT"
-    days: int = 4 * 360
+    symbol: str = "KAVAUSDT"
+    # janela parecida com o WF campeão (aprox. 6 anos)
+    days: int = 6 * 365 + 30
     candle_sec: int = 60
     # Se quiser fixar um WF específico, preencha; senão, pega o wf_* mais recente.
     run_dir: str | None = None
     # Cache (tamanho total que será carregado/garantido em disco)
-    total_days_cache: int = 365 * 5
+    total_days_cache: int = 365 * 6 + 30
     # Saída/execução
     exit_min_hold_bars: int = 0
-    exit_confirm_bars: int = 1
-    # Plot
+    exit_confirm_bars: int = 2
+    # Plot (html com plotly)
     save_plot: bool = True
-    plot_out: str = "out_sniper_single.png"
+    plot_out: str = "data/generated/plots/single_symbol_plot.html"
     # Diagnóstico (prints)
     print_signal_diagnostics: bool = True
     # Thresholds são definidos manualmente em config/thresholds.py.
-    override_tau_entry: float | None = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
+    override_tau_entry: float | None = 0.775  # campeão do WF recente
     override_tau_danger: float | None = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
     # Danger desativado por enquanto
     use_danger_model: bool = False
+    # Contrato usado para cache/simulação
+    contract: TradeContract = field(default_factory=_best_run_contract)
 
 
 def _find_latest_wf_dir(run_dir: str | None) -> Path:
@@ -91,88 +133,6 @@ def _find_latest_wf_dir(run_dir: str | None) -> Path:
     raise RuntimeError(f"Nenhum wf_* encontrado em {models_root} (verifique treino/paths)")
 
 
-def _plot_result(
-    df: pd.DataFrame,
-    *,
-    equity: np.ndarray,
-    trades,
-    p_entry: np.ndarray,
-    p_danger: np.ndarray,
-    entry_sig: np.ndarray,
-    danger_sig: np.ndarray,
-    tau_entry: float,
-    tau_danger: float,
-    title: str,
-    out_path: str | None,
-    use_danger_model: bool,
-    ema_exit: np.ndarray | None = None,
-) -> None:
-    idx = pd.to_datetime(df.index)
-    close = df["close"].to_numpy(np.float64, copy=False)
-
-    fig = plt.figure(figsize=(14, 11.5))
-    gs = fig.add_gridspec(4, 1, height_ratios=[3, 1.2, 0.9, 1], hspace=0.05)
-    ax0 = fig.add_subplot(gs[0, 0])
-    axp = fig.add_subplot(gs[1, 0], sharex=ax0)
-    axs = fig.add_subplot(gs[2, 0], sharex=ax0)
-    ax1 = fig.add_subplot(gs[3, 0], sharex=ax0)
-
-    ax0.plot(idx, close, linewidth=1.0, color="black", alpha=0.9, label="close")
-    if ema_exit is not None and len(ema_exit) == len(close):
-        ax0.plot(idx, ema_exit, linewidth=1.0, color="tab:orange", alpha=0.8, label="ema_exit")
-    ax0.set_title(title)
-    ax0.grid(True, alpha=0.25)
-    ax0.legend(loc="upper left")
-
-    # faixas dos trades
-    for t in trades:
-        et = pd.to_datetime(t.entry_ts)
-        xt = pd.to_datetime(t.exit_ts)
-        r_net = float(getattr(t, "r_net", 0.0) or 0.0)
-        color = "green" if r_net > 1e-12 else "red"
-        ax0.axvspan(et, xt, color=color, alpha=0.18)
-
-        # marcadores entry/exit (ajuda a ver o que "parece positivo" vs o que foi de fato)
-        try:
-            ei = int(idx.get_indexer([et], method="nearest")[0])
-            xi = int(idx.get_indexer([xt], method="nearest")[0])
-            ax0.scatter([idx[ei]], [close[ei]], marker="^", s=28, color=color, alpha=0.85)
-            ax0.scatter([idx[xi]], [close[xi]], marker="v", s=28, color=color, alpha=0.85)
-        except Exception:
-            pass
-
-
-    # probabilidades + thresholds
-    axp.plot(idx, p_entry, color="#1f77b4", alpha=0.9, linewidth=0.9, label="p_entry")
-    if use_danger_model:
-        axp.plot(idx, p_danger, color="#d62728", alpha=0.9, linewidth=0.9, label="p_danger")
-        axp.axhline(float(tau_danger), color="#d62728", linestyle="--", linewidth=0.8, alpha=0.7)
-    axp.axhline(float(tau_entry), color="#1f77b4", linestyle="--", linewidth=0.8, alpha=0.7)
-    axp.set_ylabel("Prob")
-    axp.legend(loc="upper left", ncol=2, fontsize=9)
-    axp.grid(True, alpha=0.25)
-
-    axs.step(idx, entry_sig.astype(float), where="mid", color="#1f77b4", lw=0.9, label="entry_ok")
-    if use_danger_model:
-        axs.step(idx, danger_sig.astype(float), where="mid", color="#d62728", lw=0.9, label="danger_block")
-    axs.set_ylim(-0.1, 1.1)
-    axs.set_ylabel("Signals")
-    axs.legend(loc="upper left", ncol=2, fontsize=9)
-    axs.grid(True, alpha=0.25)
-
-    ax1.plot(idx, equity, linewidth=1.2, color="#1f77b4")
-    ax1.set_ylabel("Equity")
-    ax1.set_xlabel("Tempo")
-    ax1.grid(True, alpha=0.25)
-
-    fig.tight_layout()
-    if out_path:
-        Path(out_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out_path, dpi=140)
-    plt.show()
-    plt.close(fig)
-
-
 def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     settings = settings or SingleSymbolDemoSettings()
     t0 = time.perf_counter()
@@ -194,7 +154,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     cache_map = ensure_feature_cache(
         [symbol],
         total_days=int(settings.total_days_cache),
-        contract=DEFAULT_TRADE_CONTRACT,
+        contract=settings.contract,
         flags=dict(GLOBAL_FLAGS_FULL, **{"_quiet": True}),
     )
     if symbol not in cache_map:
@@ -258,7 +218,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         thresholds=thresholds,
         periods=periods,
         period_id=pid,
-        contract=DEFAULT_TRADE_CONTRACT,
+        contract=settings.contract,
         candle_sec=int(settings.candle_sec),
         exit_min_hold_bars=int(settings.exit_min_hold_bars),
         exit_confirm_bars=int(settings.exit_confirm_bars),
@@ -276,9 +236,9 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     try:
         from trade_contract import exit_ema_span_from_window
 
-        span = exit_ema_span_from_window(DEFAULT_TRADE_CONTRACT, int(settings.candle_sec))
+        span = exit_ema_span_from_window(settings.contract, int(settings.candle_sec))
         alpha = 2.0 / float(span + 1) if span > 0 else 0.0
-        offset = float(getattr(DEFAULT_TRADE_CONTRACT, "exit_ema_init_offset_pct", 0.0) or 0.0)
+        offset = float(getattr(settings.contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
         close = df["close"].to_numpy(np.float64, copy=False)
         idx = pd.to_datetime(df.index)
         for t in res.trades:
@@ -300,10 +260,10 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         ema_exit = None
 
     if settings.save_plot:
-        _plot_result(
+        plot_backtest_single(
             df,
-            equity=np.asarray(res.equity_curve, dtype=np.float64),
             trades=res.trades,
+            equity=np.asarray(res.equity_curve, dtype=np.float64),
             p_entry=np.asarray(p_entry, dtype=np.float64),
             p_danger=np.asarray(p_danger, dtype=np.float64),
             entry_sig=np.asarray(entry_ok, dtype=bool),
@@ -311,9 +271,12 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             tau_entry=tau_entry,
             tau_danger=tau_danger,
             title=f"{symbol} | days={settings.days} | ret={ret_total:+.2%} | trades={len(res.trades)}",
-            out_path=settings.plot_out,
-            use_danger_model=bool(settings.use_danger_model),
+            save_path=settings.plot_out,
+            show=True,
             ema_exit=ema_exit,
+            plot_probs=False,
+            plot_signals=False,
+            plot_candles=False,
         )
 
 
@@ -323,4 +286,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

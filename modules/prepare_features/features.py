@@ -10,6 +10,7 @@ if "NUMBA_CACHE_DIR" not in os.environ:
     os.environ["NUMBA_CACHE_DIR"] = str(_cache_dir)
 
 from numba import njit
+from . import pf_config as cfg
 from .pf_config import (
     EMA_WINDOWS, EMA_PAIRS,
     ATR_MIN, VOL_MIN, CI_MIN, LOGRET_MIN,
@@ -19,6 +20,9 @@ from .pf_config import (
     # novos
     RUN_WINDOWS_MIN, HHHL_WINDOWS_MIN, EMA_CONFIRM_SPANS_MIN, BREAK_LOOKBACK_MIN,
     SLOPE_DIFF_PAIRS_MIN, WICK_MEAN_WINDOWS_MIN,
+    LIQUIDITY_MIN,
+    VOL_Z_SHORT_MIN, VOL_Z_LONG_MIN,
+    RANGE_RATIO_PAIRS,
 )
 
 warnings.simplefilter("ignore", pd.errors.PerformanceWarning)
@@ -38,10 +42,12 @@ def _minutes_to_candles_from_index(idx: pd.DatetimeIndex, minutes: int) -> int:
 
 
 @njit
-def _ema(x, span):
+def _ema(x, span, minp):
     n = x.size
     out = np.empty(n, np.float64); out[:] = np.nan
     if n == 0: return out
+    if minp < 1: minp = 1
+    if minp > span: minp = span
     alpha = 2.0 / (span + 1.0)
     v = 0.0
     cnt = 0
@@ -52,11 +58,11 @@ def _ema(x, span):
             continue
         if cnt == 0:
             v = xi; cnt = 1
-            out[i] = np.nan if span > 1 else v
+            out[i] = np.nan if minp > 1 else v
         else:
             v = alpha * xi + (1.0 - alpha) * v
             cnt += 1
-            out[i] = v if cnt >= span else np.nan
+            out[i] = v if cnt >= minp else np.nan
     return out
 
 
@@ -115,10 +121,12 @@ def _rolling_std(x, win, minp):
 
 
 @njit
-def _rolling_min(x, win):
+def _rolling_min(x, win, minp):
     n = x.size
     out = np.empty(n, np.float64); out[:] = np.nan
     dq = np.empty(n, np.int64); head = 0; tail = 0
+    if minp < 1: minp = 1
+    if minp > win: minp = win
     for i in range(n):
         while tail > head and x[dq[tail-1]] >= x[i]:
             tail -= 1
@@ -126,16 +134,19 @@ def _rolling_min(x, win):
         left = i - win + 1
         while tail > head and dq[head] < left:
             head += 1
-        if left >= 0:
+        if i + 1 >= minp:
+            if left < 0: left = 0
             out[i] = x[dq[head]]
     return out
 
 
 @njit
-def _rolling_max(x, win):
+def _rolling_max(x, win, minp):
     n = x.size
     out = np.empty(n, np.float64); out[:] = np.nan
     dq = np.empty(n, np.int64); head = 0; tail = 0
+    if minp < 1: minp = 1
+    if minp > win: minp = win
     for i in range(n):
         while tail > head and x[dq[tail-1]] <= x[i]:
             tail -= 1
@@ -143,7 +154,8 @@ def _rolling_max(x, win):
         left = i - win + 1
         while tail > head and dq[head] < left:
             head += 1
-        if left >= 0:
+        if i + 1 >= minp:
+            if left < 0: left = 0
             out[i] = x[dq[head]]
     return out
 
@@ -166,11 +178,20 @@ def _true_range(high, low, close):
 
 
 @njit
-def _slope_pct(logc, win):
+def _slope_pct(logc, win, minp):
     n = logc.size
     out = np.empty(n, np.float64); out[:] = np.nan
-    for i in range(win, n):
-        out[i] = (logc[i] - logc[i-win]) / win * 100.0
+    if minp < 1: minp = 1
+    if minp > win: minp = win
+    for i in range(n):
+        if i + 1 < minp:
+            continue
+        lookback = win
+        if i < win:
+            lookback = i
+        if lookback <= 0:
+            continue
+        out[i] = (logc[i] - logc[i-lookback]) / lookback * 100.0
     return out
 
 
@@ -290,24 +311,31 @@ def _slope_resid_std_lstsq(logc, win):
 
 
 @njit
-def _wilder_ema(x, win):
+def _wilder_ema(x, win, minp):
     n = x.size
     out = np.empty(n, np.float64); out[:] = np.nan
     if n == 0 or win <= 0: return out
+    if minp < 1: minp = 1
+    if minp > win: minp = win
     alpha = 1.0 / win
     started = False
     prev = 0.0
+    cnt = 0
     for i in range(n):
         xi = x[i]
         if np.isnan(xi):
             continue
         if not started:
             prev = xi
-            out[i] = prev
             started = True
+            cnt = 1
+            if cnt >= minp:
+                out[i] = prev
         else:
             prev = (1.0 - alpha) * prev + alpha * xi
-            out[i] = prev
+            cnt += 1
+            if cnt >= minp:
+                out[i] = prev
     return out
 
 
@@ -339,12 +367,14 @@ def _dm_up_dn_numba(high: np.ndarray, low: np.ndarray) -> Tuple[np.ndarray, np.n
 
 
 @njit(cache=True)
-def _rolling_min_and_argmin_dist(x: np.ndarray, win: int) -> Tuple[np.ndarray, np.ndarray]:
+def _rolling_min_and_argmin_dist(x: np.ndarray, win: int, minp: int) -> Tuple[np.ndarray, np.ndarray]:
     """Retorna (rolling_min, barras_desde_min) em um único passe."""
     n = x.size
     vmin = np.empty(n, np.float64); vmin[:] = np.nan
     dist = np.empty(n, np.float64); dist[:] = np.nan
     dq = np.empty(n, np.int64); head = 0; tail = 0
+    if minp < 1: minp = 1
+    if minp > win: minp = win
     for i in range(n):
         while tail > head and x[dq[tail - 1]] >= x[i]:
             tail -= 1
@@ -352,7 +382,8 @@ def _rolling_min_and_argmin_dist(x: np.ndarray, win: int) -> Tuple[np.ndarray, n
         left = i - win + 1
         while tail > head and dq[head] < left:
             head += 1
-        if left >= 0:
+        if i + 1 >= minp:
+            if left < 0: left = 0
             j = dq[head]
             vmin[i] = x[j]
             dist[i] = float(i - j)
@@ -360,12 +391,14 @@ def _rolling_min_and_argmin_dist(x: np.ndarray, win: int) -> Tuple[np.ndarray, n
 
 
 @njit(cache=True)
-def _rolling_max_and_argmax_dist(x: np.ndarray, win: int) -> Tuple[np.ndarray, np.ndarray]:
+def _rolling_max_and_argmax_dist(x: np.ndarray, win: int, minp: int) -> Tuple[np.ndarray, np.ndarray]:
     """Retorna (rolling_max, barras_desde_max) em um único passe."""
     n = x.size
     vmax = np.empty(n, np.float64); vmax[:] = np.nan
     dist = np.empty(n, np.float64); dist[:] = np.nan
     dq = np.empty(n, np.int64); head = 0; tail = 0
+    if minp < 1: minp = 1
+    if minp > win: minp = win
     for i in range(n):
         while tail > head and x[dq[tail - 1]] <= x[i]:
             tail -= 1
@@ -373,7 +406,8 @@ def _rolling_max_and_argmax_dist(x: np.ndarray, win: int) -> Tuple[np.ndarray, n
         left = i - win + 1
         while tail > head and dq[head] < left:
             head += 1
-        if left >= 0:
+        if i + 1 >= minp:
+            if left < 0: left = 0
             j = dq[head]
             vmax[i] = x[j]
             dist[i] = float(i - j)
@@ -516,7 +550,9 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         cols += ["log_volume_ema", "liquidity_ratio"]; feat_counts["regime"] = 2
 
     if flags.get("liquidity"):
-        cols += ["volume_to_range_ema1440"]; feat_counts["liquidity"] = 1
+        for m in LIQUIDITY_MIN:
+            cols.append(f"volume_to_range_ema{m}")
+        feat_counts["liquidity"] = len(LIQUIDITY_MIN)
 
     if flags.get("rev_speed"):
         for m in REV_WINDOWS:
@@ -530,7 +566,9 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         cols += ["shadow_balance", "shadow_balance_raw"]; feat_counts["shadow"] = 2
 
     if flags.get("range_ratio"):
-        cols += ["range_ratio_60_1440"]; feat_counts["range_ratio"] = 1
+        for a, b in RANGE_RATIO_PAIRS:
+            cols.append(f"range_ratio_{a}_{b}")
+        feat_counts["range_ratio"] = len(RANGE_RATIO_PAIRS)
 
     # novos blocos de contexto recente
     if flags.get("runs"):
@@ -583,14 +621,27 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
 
         def w(m):
             return _win_for(sub.index, m)
-        def MP(win):
+        minp_mode = getattr(cfg, "ROLLING_MINP_MODE", "full")
+        ema_mode = getattr(cfg, "EMA_MINP_MODE", minp_mode)
+
+        def _minp_for(win: int, mode: str) -> int:
+            if mode in {"progressive", "min1", "early"}:
+                return 1
+            if mode in {"half", "mid"}:
+                return max(1, win // 2)
             return win
+
+        def MP(win):
+            return _minp_for(win, str(minp_mode))
+
+        def EMP(win):
+            return _minp_for(win, str(ema_mode))
 
         if flags.get("shitidx"):
             _t0 = time.perf_counter()
             ema_map = {}
             for m in EMA_WINDOWS:
-                ema_map[m] = _ema(close, w(m))
+                ema_map[m] = _ema(close, w(m), EMP(w(m)))
             for s, l in EMA_PAIRS:
                 num = ema_map[s] - ema_map[l]
                 df.loc[idxs, f"shitidx_pct_{s}_{l}"] = num / (close + eps) * 100.0
@@ -608,22 +659,22 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
             _t0 = time.perf_counter()
             tr = _true_range(high, low, close)
             for m in KELTNER_WIDTH_MIN:
-                ema_c = _ema(close, w(m))
+                ema_c = _ema(close, w(m), EMP(w(m)))
                 atr_m = _rolling_mean(tr, w(m), MP(w(m)))
                 halfw = 2.0 * atr_m
                 df.loc[idxs, f"keltner_halfwidth_pct_{m}"] = halfw / (close + eps) * 100.0
             for m in KELTNER_CENTER_MIN:
-                ema_c = _ema(close, w(m))
+                ema_c = _ema(close, w(m), EMP(w(m)))
                 df.loc[idxs, f"keltner_center_pct_{m}"] = (ema_c - close) / (close + eps) * 100.0
             for m in KELTNER_POS_MIN:
-                ema_c = _ema(close, w(m))
+                ema_c = _ema(close, w(m), EMP(w(m)))
                 atr_m = _rolling_mean(tr, w(m), MP(w(m)))
                 upper = ema_c + 2.0 * atr_m
                 lower = ema_c - 2.0 * atr_m
                 pos = (close - lower) / ((upper - lower) + eps)
                 df.loc[idxs, f"keltner_pos_{m}"] = pos
             for m in KELTNER_Z_MIN:
-                ema_c = _ema(close, w(m))
+                ema_c = _ema(close, w(m), EMP(w(m)))
                 atr_m = _rolling_mean(tr, w(m), MP(w(m)))
                 width_pct = ((ema_c + 2.0*atr_m) - (ema_c - 2.0*atr_m)) / (close + eps) * 100.0
                 win_z = w(int(m * 2))
@@ -646,7 +697,7 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
                 rs = g / (l + eps)
                 df.loc[idxs, f"rsi_price_{m}"] = 100.0 - 100.0 / (1.0 + rs)
             for span, m in RSI_EMA_PAIRS:
-                smooth = _ema(close, w(span))
+                smooth = _ema(close, w(span), EMP(w(span)))
                 d2 = np.empty_like(smooth); d2[:] = np.nan
                 d2[1:] = smooth[1:] - smooth[:-1]; d2[0] = 0.0
                 g2 = np.where(d2 > 0.0, d2, 0.0)
@@ -660,7 +711,7 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         if flags.get("slope"):
             _t0 = time.perf_counter()
             for m in SLOPE_MIN:
-                df.loc[idxs, f"slope_pct_{m}"] = _slope_pct(logc, w(m))
+                df.loc[idxs, f"slope_pct_{m}"] = _slope_pct(logc, w(m), MP(w(m)))
             timings["slope"] += (time.perf_counter() - _t0)
 
         if flags.get("vol"):
@@ -675,8 +726,8 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
             _t0 = time.perf_counter()
             for m in CI_MIN:
                 mov = _rolling_sum_absdiff_fast(close, w(m), MP(w(m)))
-                hi  = _rolling_max(close, w(m))
-                lo  = _rolling_min(close, w(m))
+                hi  = _rolling_max(close, w(m), MP(w(m)))
+                lo  = _rolling_min(close, w(m), MP(w(m)))
                 rng = (hi - lo)
                 ci  = 100.0 * np.log10(mov / (rng + eps) + eps) / np.log10(w(m))
                 df.loc[idxs, f"ci_{m}"] = ci
@@ -712,7 +763,7 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
                 pdi = (sum_up / (sum_tr + eps)) * 100.0
                 mdi = (sum_dn / (sum_tr + eps)) * 100.0
                 dx  = (np.abs(pdi - mdi) / (pdi + mdi + eps)) * 100.0
-                adx = _wilder_ema(dx, w(m))
+                adx = _wilder_ema(dx, w(m), MP(w(m)))
                 df.loc[idxs, f"adx_{m}"] = adx
             timings["adx"] += (time.perf_counter() - _t0)
 
@@ -720,8 +771,8 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
             _t0 = time.perf_counter()
             for m in MINMAX_MIN:
                 win = w(m)
-                rmin, tmin = _rolling_min_and_argmin_dist(close, win)
-                rmax, tmax = _rolling_max_and_argmax_dist(close, win)
+                rmin, tmin = _rolling_min_and_argmin_dist(close, win, MP(win))
+                rmax, tmax = _rolling_max_and_argmax_dist(close, win, MP(win))
                 df.loc[idxs, f"pct_from_min_{m}"] = (close - rmin) / (rmin + eps) * 100.0
                 df.loc[idxs, f"pct_from_max_{m}"] = (rmax - close) / (rmax + eps) * 100.0
                 df.loc[idxs, f"time_since_min_{m}"] = tmin
@@ -765,12 +816,12 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
             else:
                 vol_arr = np.full_like(close, np.nan)
             notional_vol = vol_arr * close
-            ema_vol = _ema(notional_vol, w(1440))
+            ema_vol = _ema(notional_vol, w(1440), EMP(w(1440)))
             df.loc[idxs, "log_volume_ema"] = np.log1p(ema_vol)
             tr = _true_range(high, low, close)
             tr_pct = tr / (close + 1e-9)
-            ema_nv_60  = _ema(notional_vol, w(60))
-            ema_trp_60 = _ema(tr_pct, w(60))
+            ema_nv_60  = _ema(notional_vol, w(60), EMP(w(60)))
+            ema_trp_60 = _ema(tr_pct, w(60), EMP(w(60)))
             vol_liq = ema_nv_60 / (ema_trp_60 + 1e-9)
             df.loc[idxs, "liquidity_ratio"] = np.log1p(np.maximum(0.0, vol_liq))
             timings["regime"] += (time.perf_counter() - _t0)
@@ -783,21 +834,22 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
                 vol_arr = np.full_like(close, np.nan)
             notional_vol = vol_arr * close
             range_pct = (high - low) / (close + 1e-9)
-            ema_nv   = _ema(notional_vol, max(2, w(10)))
-            ema_rpct = _ema(range_pct,   max(2, w(10)))
+            ema_nv   = _ema(notional_vol, max(2, w(10)), EMP(max(2, w(10))))
+            ema_rpct = _ema(range_pct,   max(2, w(10)), EMP(max(2, w(10))))
             vtr_usdt = np.log1p(ema_nv / (ema_rpct + 1e-9))
-            df.loc[idxs, "volume_to_range_ema1440"] = _ema(vtr_usdt, w(1440))
+            for m in LIQUIDITY_MIN:
+                df.loc[idxs, f"volume_to_range_ema{m}"] = _ema(vtr_usdt, w(m), EMP(w(m)))
             timings["liquidity"] += (time.perf_counter() - _t0)
 
         if flags.get("rev_speed"):
             _t0 = time.perf_counter()
             for m in REV_WINDOWS:
                 win = w(m)
-                rmin, tmin = _rolling_min_and_argmin_dist(close, win)
+                rmin, tmin = _rolling_min_and_argmin_dist(close, win, MP(win))
                 pct_up = (close / (rmin + 1e-9) - 1.0) * 100.0
                 rs_up = pct_up / (tmin + 1.0)
                 df.loc[idxs, f"rev_speed_up_{m}"] = rs_up
-                rmax, tmax = _rolling_max_and_argmax_dist(close, win)
+                rmax, tmax = _rolling_max_and_argmax_dist(close, win, MP(win))
                 pct_dn = (rmax / (close + 1e-9) - 1.0) * 100.0
                 rs_dn = pct_dn / (tmax + 1.0)
                 df.loc[idxs, f"rev_speed_down_{m}"] = rs_dn
@@ -808,10 +860,14 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
             if "volume" in sub.columns:
                 vol = sub["volume"].to_numpy(np.float64)
                 lv = np.log1p(vol)
-                ema_s = _ema(lv, w(60))
-                ema_l = _ema(lv, w(720))
+                s_win = VOL_Z_SHORT_MIN[0] if isinstance(VOL_Z_SHORT_MIN, (list, tuple)) and VOL_Z_SHORT_MIN else VOL_Z_SHORT_MIN
+                l_win = VOL_Z_LONG_MIN[0] if isinstance(VOL_Z_LONG_MIN, (list, tuple)) and VOL_Z_LONG_MIN else VOL_Z_LONG_MIN
+                s_win = int(s_win or 60)
+                l_win = int(l_win or 720)
+                ema_s = _ema(lv, w(s_win), EMP(w(s_win)))
+                ema_l = _ema(lv, w(l_win), EMP(w(l_win)))
                 num = (lv - ema_s)
-                denom = _ema(np.abs(lv - ema_l), w(720)) + 1e-9
+                denom = _ema(np.abs(lv - ema_l), w(l_win), EMP(w(l_win))) + 1e-9
                 z = num / denom
                 df.loc[idxs, "vol_z"] = z
                 ret1_sign = np.empty_like(close); ret1_sign[:] = 0.0
@@ -826,17 +882,18 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
             range_all = (high - low) + 1e-9
             sb_raw = (up_wick - low_wick) / range_all
             sb_clip = np.clip(sb_raw, -1.0, 1.0)
-            sb_smooth = _ema(sb_clip, max(2, w(10)))
+            sb_smooth = _ema(sb_clip, max(2, w(10)), EMP(max(2, w(10))))
             df.loc[idxs, "shadow_balance_raw"] = sb_raw
             df.loc[idxs, "shadow_balance"] = sb_smooth
             timings["shadow"] += (time.perf_counter() - _t0)
 
         if flags.get("range_ratio"):
             _t0 = time.perf_counter()
-            r_short = _rolling_max(high, w(60)) - _rolling_min(low, w(60))
-            r_long  = _rolling_max(high, w(1440)) - _rolling_min(low, w(1440))
-            rr = r_short / (r_long + 1e-9)
-            df.loc[idxs, "range_ratio_60_1440"] = rr
+            for a, b in RANGE_RATIO_PAIRS:
+                r_short = _rolling_max(high, w(a), MP(w(a))) - _rolling_min(low, w(a), MP(w(a)))
+                r_long = _rolling_max(high, w(b), MP(w(b))) - _rolling_min(low, w(b), MP(w(b)))
+                rr = r_short / (r_long + 1e-9)
+                df.loc[idxs, f"range_ratio_{a}_{b}"] = rr
             timings["range_ratio"] += (time.perf_counter() - _t0)
 
         # ── novos blocos ────────────────────────────────────────────────────────
@@ -868,7 +925,7 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         if flags.get("ema_cross"):
             _t0 = time.perf_counter()
             for s in EMA_CONFIRM_SPANS_MIN:
-                ema_s = _ema(close, w(s))
+                ema_s = _ema(close, w(s), EMP(w(s)))
                 diff  = close - ema_s
                 above_b = (diff > 0.0)
                 below_b = (diff < 0.0)
@@ -880,8 +937,8 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         if flags.get("breakout"):
             _t0 = time.perf_counter()
             for n in BREAK_LOOKBACK_MIN:
-                prev_max = _rolling_max(high, w(n))
-                prev_min = _rolling_min(low,  w(n))
+                prev_max = _rolling_max(high, w(n), MP(w(n)))
+                prev_min = _rolling_min(low,  w(n), MP(w(n)))
                 # usar janela "passada": desloca 1 para trás para não contar a própria vela
                 prev_max = np.concatenate(([np.nan], prev_max[:-1]))
                 prev_min = np.concatenate(([np.nan], prev_min[:-1]))
@@ -897,8 +954,8 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         if flags.get("mom_short"):
             _t0 = time.perf_counter()
             for a, b in SLOPE_DIFF_PAIRS_MIN:
-                sl_a = _slope_pct(logc, w(a))
-                sl_b = _slope_pct(logc, w(b))
+                sl_a = _slope_pct(logc, w(a), MP(w(a)))
+                sl_b = _slope_pct(logc, w(b), MP(w(b)))
                 df.loc[idxs, f"slope_diff_{a}_{b}"] = sl_a - sl_b
             timings["mom_short"] = timings.get("mom_short", 0.0) + (time.perf_counter() - _t0)
 

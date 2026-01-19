@@ -18,6 +18,24 @@ from pathlib import Path
 from typing import Any
 
 
+def _add_repo_paths() -> None:
+    here = Path(__file__).resolve()
+    root = None
+    for p in here.parents:
+        if p.name.lower() == "tradebot":
+            root = p
+            break
+    if root:
+        for cand in (root, root / "modules"):
+            sp = str(cand)
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
+
+
+if __package__ in (None, ""):
+    _add_repo_paths()
+
+
 BASE_URL = "https://api.tiingo.com"
 
 

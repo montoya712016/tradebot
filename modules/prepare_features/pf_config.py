@@ -27,4 +27,10 @@ EMA_CONFIRM_SPANS_MIN = [10]
 BREAK_LOOKBACK_MIN = [30, 60]
 SLOPE_DIFF_PAIRS_MIN = [(3, 10), (5, 15)]
 WICK_MEAN_WINDOWS_MIN = [5, 15]
+LIQUIDITY_MIN = [1440]
+VOL_Z_SHORT_MIN = [60]
+VOL_Z_LONG_MIN = [720]
+RANGE_RATIO_PAIRS = [(60, 1440)]
+ROLLING_MINP_MODE = "full"  # full|half|progressive
+EMA_MINP_MODE = "full"      # full|half|progressive
 

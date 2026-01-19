@@ -1,3 +1,0 @@
-"""
-Stock data utilities.
-"""

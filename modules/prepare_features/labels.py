@@ -147,6 +147,20 @@ def apply_trade_contract_labels(
     if len(windows) < 1 or len(profits) < 1 or len(windows) != len(profits):
         raise ValueError("entry_label_windows_minutes e entry_label_min_profit_pcts devem ter o mesmo tamanho (>=1)")
     labels_by_win = []
+    # gap detection (stocks: evita overnight)
+    forbid_gap = bool(getattr(contract, "forbid_exit_on_gap", False))
+    gap_hours = float(getattr(contract, "gap_hours_forbidden", 0.0) or 0.0)
+    gap_next = None
+    if forbid_gap and gap_hours > 0:
+        idx = pd.to_datetime(df.index)
+        gth = pd.Timedelta(hours=gap_hours)
+        n = len(idx)
+        gap_next = np.full(n, -1, dtype=np.int32)
+        next_gap = -1
+        for i in range(n - 1, 0, -1):
+            if idx[i] - idx[i - 1] >= gth:
+                next_gap = i
+            gap_next[i - 1] = next_gap
     for w_min, pmin in zip(windows, profits):
         hb = int(max(1, round((float(w_min) * 60.0) / float(candle_seconds))))
         entry_label, mae_pct, exit_code, exit_wait, weight = _simulate_entry_contract_numba(
@@ -158,6 +172,14 @@ def apply_trade_contract_labels(
             float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
             float(getattr(contract, "entry_label_weight_alpha", 1.0) or 1.0),
         )
+        if gap_next is not None:
+            exit_bar = np.arange(exit_wait.size, dtype=np.int64) + exit_wait.astype(np.int64)
+            hit_gap = (gap_next >= 0) & (gap_next <= exit_bar)
+            if hit_gap.any():
+                entry_label = entry_label.copy()
+                exit_code = exit_code.copy()
+                entry_label[hit_gap] = 0
+                exit_code[hit_gap] = -4
         suffix = f"{int(w_min)}m"
         df[f"sniper_entry_label_{suffix}"] = pd.Series(entry_label.astype(np.uint8), index=df.index)
         df[f"sniper_mae_pct_{suffix}"] = pd.Series(mae_pct.astype(np.float32), index=df.index)

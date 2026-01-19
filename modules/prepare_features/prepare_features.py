@@ -59,16 +59,16 @@ FLAGS_DEFAULT: Dict[str, bool] = default_flags(label=True)
 
 # Exemplo pronto (compatível com o estilo antigo) — pode importar direto como FLAGS
 FLAGS: Dict[str, bool] = {
-    "shitidx":      False,
+    "shitidx":      True,
     "atr":          False,
-    "rsi":          False,
+    "rsi":          True,
     "slope":        False,
     "vol":          False,
     "ci":           False,
     "cum_logret":   False,
     "keltner":      False,
     "cci":          False,
-    "adx":          False,
+    "adx":          True,
     "time_since":   False,
     "zlog":         False,
     "slope_reserr": False,
@@ -85,8 +85,8 @@ FLAGS: Dict[str, bool] = {
     "breakout":     False,
     "mom_short":    False,
     "wick_stats":   False,
-    "label":        True,
-    "plot_candles": False,
+    "label":        False,
+    "plot_candles": True,
 }
 
 # Flags para rodar somente labels (sem features).
@@ -174,6 +174,7 @@ def run(
     apply_precision: bool = False,
     default_decimals: int = 5,
     trade_contract: TradeContract | None = None,
+    mark_gaps: bool = True,
 ) -> pd.DataFrame:
     """Pipeline simples: features selecionadas + labels antigos + plot opcional.
 
@@ -258,6 +259,7 @@ def run(
             grey_zone=grey_zone,
             show=show,
             save_path=plot_path,
+            mark_gaps=bool(mark_gaps),
         )
 
     return df_ohlc
@@ -275,6 +277,7 @@ def run_from_flags_dict(
     show: bool = True,
     verbose_features: bool = True,
     trade_contract: TradeContract | None = None,
+    mark_gaps: bool = True,
 ) -> pd.DataFrame:
     """Compat com o estilo antigo usando um único dict FLAGS (True/False por feature).
 
@@ -297,6 +300,7 @@ def run_from_flags_dict(
         show=show,
         verbose_features=verbose_features,
         trade_contract=trade_contract,
+        mark_gaps=mark_gaps,
     )
 
 
