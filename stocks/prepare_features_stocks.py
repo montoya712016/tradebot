@@ -92,7 +92,7 @@ CFG_STOCK_WINDOWS = {
     "ADX_MIN": (7, 14, 28),
     "CI_MIN": (10, 20, 30, 60),
     "LOGRET_MIN": (15, 30, 60, 120),
-    "MINMAX_MIN": (10, 20, 30, 60, 120),
+    "MINMAX_MIN": (15, 30, 60),
     "SLOPE_RESERR_MIN": (30, 60, 120),
     "ZLOG_MIN": (30, 60, 120),
     "REV_WINDOWS": (10, 20, 30, 60),
@@ -115,19 +115,14 @@ CFG_STOCK_WINDOWS = {
 def _insert_daily_breaks(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or not isinstance(df.index, pd.DatetimeIndex):
         return df.copy()
+    # Adiciona uma única linha NaN logo após o último candle de cada dia para quebrar continuidade.
     day_keys = df.index.normalize()
-    frames = []
-    prev_last = None
-    for _, sub in df.groupby(day_keys, sort=True):
-        if prev_last is not None:
-            gap_ts = prev_last + pd.Timedelta(seconds=1)
-            while gap_ts in sub.index:
-                gap_ts += pd.Timedelta(seconds=1)
-            nan_row = pd.DataFrame({c: [np.nan] for c in df.columns}, index=pd.DatetimeIndex([gap_ts]))
-            frames.append(nan_row)
-        frames.append(sub)
-        prev_last = sub.index[-1]
-    out = pd.concat(frames).sort_index()
+    last_idx = df.groupby(day_keys, sort=False).tail(1).index
+    gap_idx = (last_idx + pd.Timedelta(seconds=1)).difference(df.index)
+    if gap_idx.empty:
+        return df.copy()
+    nan_block = pd.DataFrame(np.nan, index=gap_idx, columns=df.columns)
+    out = pd.concat([df, nan_block]).sort_index()
     return out
 
 
@@ -138,14 +133,16 @@ def _maybe_fill_day_start(df: pd.DataFrame, cols: list[str]) -> None:
     if mode not in {"ffill", "bfill", "both"}:
         return
     day_keys = df.index.normalize()
-    for c in cols:
-        if c in df.columns:
-            if mode == "ffill":
-                df[c] = df[c].groupby(day_keys).transform(lambda s: s.ffill())
-            elif mode == "bfill":
-                df[c] = df[c].groupby(day_keys).transform(lambda s: s.bfill())
-            else:
-                df[c] = df[c].groupby(day_keys).transform(lambda s: s.ffill().bfill())
+    sel = [c for c in cols if c in df.columns]
+    if not sel:
+        return
+    grp = df[sel].groupby(day_keys)
+    if mode == "ffill":
+        df[sel] = grp.transform("ffill")
+    elif mode == "bfill":
+        df[sel] = grp.transform("bfill")
+    else:
+        df[sel] = grp.transform("ffill").groupby(day_keys).transform("bfill")
 
 
 def _parse_tuple_env(name: str) -> tuple[int, ...] | None:
@@ -165,6 +162,16 @@ def _parse_tuple_env(name: str) -> tuple[int, ...] | None:
 
 
 def _apply_stock_windows() -> None:
+    # aplica em ambos namespaces (modules.prepare_features e prepare_features)
+    extra_cfg = None
+    extra_featmod = None
+    try:
+        from prepare_features import pf_config as extra_cfg  # type: ignore
+        from prepare_features import features as extra_featmod  # type: ignore
+    except Exception:
+        extra_cfg = None
+        extra_featmod = None
+
     for key, default_val in CFG_STOCK_WINDOWS.items():
         if isinstance(default_val, str):
             env_val = os.getenv(f"PF_STOCK_{key}", "").strip()
@@ -177,11 +184,19 @@ def _apply_stock_windows() -> None:
                 setattr(cfg, key, str(val))
             if hasattr(featmod, key):
                 setattr(featmod, key, str(val))
+            if extra_cfg is not None and hasattr(extra_cfg, key):
+                setattr(extra_cfg, key, str(val))
+            if extra_featmod is not None and hasattr(extra_featmod, key):
+                setattr(extra_featmod, key, str(val))
         else:
             if hasattr(cfg, key):
                 setattr(cfg, key, tuple(val))
             if hasattr(featmod, key):
                 setattr(featmod, key, tuple(val))
+            if extra_cfg is not None and hasattr(extra_cfg, key):
+                setattr(extra_cfg, key, tuple(val))
+            if extra_featmod is not None and hasattr(extra_featmod, key):
+                setattr(extra_featmod, key, tuple(val))
 
 
 def _add_time_features(df: pd.DataFrame) -> None:
@@ -195,16 +210,17 @@ def _add_time_features(df: pd.DataFrame) -> None:
     df["minute_of_day_cos"] = np.cos((minutes / 1440.0) * 2.0 * np.pi)
     bars_since_open = df.groupby(day_keys).cumcount().astype(np.int32)
     df["bars_since_open"] = bars_since_open
-    df["session_progress"] = df.groupby(day_keys)["bars_since_open"].transform(
-        lambda s: s / max(1.0, float(s.max()))
-    ).astype(np.float32)
+    day_sizes = df.groupby(day_keys)["bars_since_open"].transform("max").astype(np.int32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        prog = bars_since_open.to_numpy(np.float32, copy=False) / np.maximum(1.0, day_sizes.to_numpy(np.float32, copy=False))
+    df["session_progress"] = prog.astype(np.float32, copy=False)
 
 
 def main() -> None:
     _apply_stock_windows()
     # overrides via ENV (ex.: PF_STOCK_SYMBOL=AAPL PF_STOCK_DAYS=90)
     sym = os.getenv("PF_STOCK_SYMBOL", "COIN").strip().upper()
-    days = int(os.getenv("PF_STOCK_DAYS", DEFAULT_DAYS) or DEFAULT_DAYS)
+    days = int(os.getenv("PF_STOCK_DAYS", "0") or 0)
     tail = int(os.getenv("PF_STOCK_TAIL_DAYS", DEFAULT_REMOVE_TAIL_DAYS) or DEFAULT_REMOVE_TAIL_DAYS)
     candle_sec = int(os.getenv("PF_STOCK_CANDLE_SEC", DEFAULT_CANDLE_SEC) or DEFAULT_CANDLE_SEC)
     feat_list_raw = os.getenv("PF_STOCK_FEATURES", os.getenv("PF_STOCK_FEATURE", "")).strip()
@@ -230,7 +246,7 @@ def main() -> None:
     # Se PF_STOCK_FEATURES/FEATURE for definido, liga apenas esses. Senao, usa FLAGS_STOCKS do arquivo.
     if feats:
         flags = {k: False for k in FLAGS_STOCKS}
-        flags.update({"label": label_on, "plot_candles": True})
+        flags.update({"label": label_on, "plot_candles": True, "feature_timings": True})
         feats_on = []
         for ft in feats:
             if ft in flags:
@@ -240,7 +256,7 @@ def main() -> None:
             print("[stocks] aviso: nenhuma feature valida informada; seguindo sem indicadores.", flush=True)
     else:
         flags = dict(FLAGS_STOCKS)
-        flags.update({"label": label_on, "plot_candles": True})
+        flags.update({"label": label_on, "plot_candles": True, "feature_timings": True})
         feats_on = [k for k, v in flags.items() if v and k not in {"label", "plot_candles"}]
     print(f"[stocks] símbolo={sym} dias={days} features_on={feats_on}", flush=True)
 

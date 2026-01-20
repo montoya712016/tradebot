@@ -21,7 +21,8 @@ DB_CFG_STOCKS = dict(
     database=os.getenv("PF_DB_STOCKS_NAME", "stocks_us"),
 )
 
-_prefer = os.getenv("PF_PREFER_PURE_FOR_THREADS", "1").strip().lower()
+# Prefira driver C mesmo com várias threads (mais rápido para volumes grandes).
+_prefer = os.getenv("PF_PREFER_PURE_FOR_THREADS", "0").strip().lower()
 PREFER_PURE_FOR_THREADS = _prefer in {"1", "true", "yes", "y", "on"}
 
 
@@ -113,7 +114,7 @@ def load_ohlc_1m_series_stock(sym: str, days: int, *, remove_tail_days: int = 0)
                 conn.close()
                 return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
             raise
-        CHUNK = 1_000_000
+        CHUNK = 2_000_000
         ts_list, o_list, h_list, l_list, c_list, v_list = [], [], [], [], [], []
         while True:
             rows = cur.fetchmany(CHUNK)

@@ -4,7 +4,7 @@ Treinamento dos modelos Sniper (EntryScore) usando walk-forward.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
@@ -62,6 +62,7 @@ except Exception:
     # fallback antigo
     SAVE_ROOT = Path(__file__).resolve().parents[2].parent / "models_sniper"
 DEFAULT_SYMBOLS_FILE = Path(__file__).resolve().parents[1] / "top_market_cap.txt"
+DEFAULT_STOCKS_SYMBOLS_FILE = Path(__file__).resolve().parents[2] / "data" / "generated" / "tiingo_universe_seed.txt"
 
 try:
     from config.symbols import load_market_caps
@@ -76,7 +77,7 @@ class TrainConfig:
     offsets_days: Sequence[int] = (180, 360, 540, 720, 900, 1_080, 1_260, 1_440, 1_620, 1_800)
     mcap_min_usd: float = 100_000_000.0
     mcap_max_usd: float = 150_000_000_000.0
-    symbols_file: Path = DEFAULT_SYMBOLS_FILE
+    symbols_file: Path | None = None
     # 0 = sem limite (usa todas elegíveis por market cap)
     max_symbols: int = 0
     # Se o período ficar com poucos símbolos com dados válidos, pula o treino (evita modelo escasso).
@@ -87,6 +88,14 @@ class TrainConfig:
     max_rows_entry: int = 2_000_000
     entry_ratio_neg_per_pos: float = 6.0
     use_feature_cache: bool = True
+    # modo/asset
+    asset_class: str = "crypto"
+    # lista explícita de símbolos (prioritária a symbols_file/top_market_cap)
+    symbols: Sequence[str] | None = None
+    # flags de features custom (senão escolhe default por asset)
+    feature_flags: dict | None = None
+    # onde salvar/ler cache de features (senão usa padrão por asset)
+    feature_cache_dir: Path | None = None
     # Thresholds são definidos manualmente em config/thresholds.py (sem calibrar no treino).
 
 
@@ -107,14 +116,53 @@ DEFAULT_ENTRY_PARAMS = {
 }
 
 
+def _default_symbols_file(asset_class: str) -> Path:
+    asset = str(asset_class or "crypto").lower()
+    if asset == "stocks":
+        return DEFAULT_STOCKS_SYMBOLS_FILE
+    return DEFAULT_SYMBOLS_FILE
+
+
 def _select_symbols(cfg: TrainConfig) -> List[str]:
-    cap_map = load_market_caps(cfg.symbols_file)
+    # prioridade: lista explícita
+    if getattr(cfg, "symbols", None):
+        raw = [str(s).strip().upper() for s in cfg.symbols if str(s).strip()]
+        uniq: List[str] = []
+        for s in raw:
+            if s and s not in uniq:
+                uniq.append(s)
+        max_symbols = int(getattr(cfg, "max_symbols", 0) or 0)
+        if max_symbols > 0:
+            uniq = uniq[:max_symbols]
+        return uniq
+
+    asset = str(getattr(cfg, "asset_class", "crypto") or "crypto").lower()
+    symbols_file = cfg.symbols_file or _default_symbols_file(asset)
+    max_symbols = int(getattr(cfg, "max_symbols", 0) or 0)
+
+    if asset == "stocks":
+        if not symbols_file.exists():
+            raise RuntimeError(f"Lista de símbolos para stocks não encontrada: {symbols_file}")
+        lines = [line.strip().upper() for line in symbols_file.read_text(encoding="utf-8").splitlines()]
+        syms: List[str] = []
+        for line in lines:
+            if not line or line.startswith("#"):
+                continue
+            tok = line.split(",", 1)[0].split(":", 1)[0].strip()
+            if tok and tok not in syms:
+                syms.append(tok)
+            if max_symbols > 0 and len(syms) >= max_symbols:
+                break
+        if not syms:
+            raise RuntimeError("Nenhum símbolo encontrado no arquivo de stocks")
+        return syms
+
+    cap_map = load_market_caps(symbols_file)
     lo = min(cfg.mcap_min_usd, cfg.mcap_max_usd)
     hi = max(cfg.mcap_min_usd, cfg.mcap_max_usd)
     # ordena por market cap desc
     ranked = sorted(cap_map.items(), key=lambda kv: kv[1], reverse=True)
     symbols: List[str] = []
-    max_symbols = int(getattr(cfg, "max_symbols", 0) or 0)
     for sym, cap in ranked:
         if cap < lo or cap > hi:
             continue
@@ -370,10 +418,28 @@ def _save_model(booster: xgb.Booster, path: Path) -> None:
 
 def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
     cfg = cfg or TrainConfig()
+    asset_class = str(getattr(cfg, "asset_class", "crypto") or "crypto").lower()
+
     symbols = _select_symbols(cfg)
-    print(f"[sniper-train] símbolos={len(symbols)} (max_symbols={cfg.max_symbols})", flush=True)
+    print(
+        f"[sniper-train] símbolos={len(symbols)} asset={asset_class} (max_symbols={cfg.max_symbols})",
+        flush=True,
+    )
     run_dir = _next_run_dir(SAVE_ROOT)
     entry_params = dict(DEFAULT_ENTRY_PARAMS if cfg.entry_params is None else cfg.entry_params)
+
+    def _default_feature_flags() -> dict:
+        if asset_class == "stocks":
+            try:
+                from stocks.prepare_features_stocks import FLAGS_STOCKS  # type: ignore
+
+                return dict(FLAGS_STOCKS)
+            except Exception:
+                pass
+        return dict(GLOBAL_FLAGS_FULL)
+
+    feature_flags = dict(cfg.feature_flags or _default_feature_flags())
+    contract = cfg.contract
 
     cache_map = None
     if bool(getattr(cfg, "use_feature_cache", True)):
@@ -384,8 +450,10 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         cache_map = ensure_feature_cache(
             symbols,
             total_days=int(cfg.total_days),
-            contract=cfg.contract,
-            flags=GLOBAL_FLAGS_FULL,
+            contract=contract,
+            flags=feature_flags,
+            cache_dir=getattr(cfg, "feature_cache_dir", None),
+            asset_class=asset_class,
             # Se você pediu histórico completo (total_days<=0), garanta que o cache também foi feito assim.
             strict_total_days=(int(cfg.total_days) <= 0),
         )
@@ -402,21 +470,25 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 symbols,
                 total_days=int(cfg.total_days),
                 remove_tail_days=int(tail),
-                contract=cfg.contract,
+                contract=contract,
                 cache_map=cache_map,
                 entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
                 max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
                 seed=1337,
+                asset_class=asset_class,
+                feature_flags=feature_flags,
             )
         else:
             pack = prepare_sniper_dataset(
                 symbols,
                 total_days=int(cfg.total_days),
                 remove_tail_days=int(tail),
-                contract=cfg.contract,
+                contract=contract,
                 entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
                 max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
                 seed=1337,
+                asset_class=asset_class,
+                feature_flags=feature_flags,
             )
         try:
             n_used = len(pack.symbols_used) if getattr(pack, "symbols_used", None) else len(pack.symbols)

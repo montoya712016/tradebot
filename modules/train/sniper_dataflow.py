@@ -45,6 +45,35 @@ except Exception:
 
 GLOBAL_FLAGS_FULL = build_flags(enable=FEATURE_KEYS, label=True)
 
+def _stock_helper_bundle() -> tuple[dict | None, object | None, object | None, object | None, object | None]:
+    try:
+        from stocks import prepare_features_stocks as pfs  # type: ignore
+
+        return (
+            dict(getattr(pfs, "FLAGS_STOCKS", {})),
+            getattr(pfs, "_apply_stock_windows", None),
+            getattr(pfs, "_insert_daily_breaks", None),
+            getattr(pfs, "_maybe_fill_day_start", None),
+            getattr(pfs, "_add_time_features", None),
+            getattr(pfs, "CFG_STOCK_WINDOWS", None),
+        )
+    except Exception:
+        return None, None, None, None, None, None
+
+
+def _default_flags_for_asset(asset_class: str) -> dict:
+    asset = str(asset_class or "crypto").lower()
+    if asset == "stocks":
+        flags, _, _, _, _ = _stock_helper_bundle()
+        if flags:
+            return dict(flags)
+    return dict(GLOBAL_FLAGS_FULL)
+
+
+_STOCK_WINDOWS_APPLIED = False
+_STOCK_WINDOWS_LOGGED = False
+
+
 DROP_COL_PREFIXES = (
     "exit_",
     # IMPORTANT: evitar vazamento de label/simulação futura
@@ -145,22 +174,26 @@ def _repo_root() -> Path:
         return p.parents[2]
 
 
-def _cache_dir() -> Path:
+def _cache_dir(asset_class: str | None = None) -> Path:
     v = os.getenv("SNIPER_FEATURE_CACHE_DIR", "").strip()
     if v:
         return Path(v).expanduser().resolve()
+    asset = str(asset_class or "crypto").lower()
     try:
         from utils.paths import feature_cache_root  # type: ignore
 
-        return feature_cache_root()
+        base = feature_cache_root()
     except Exception:
         try:
             from utils.paths import feature_cache_root  # type: ignore[import]
 
-            return feature_cache_root()
+            base = feature_cache_root()
         except Exception:
             # fallback extremo (mantém compat)
-            return _repo_root() / "cache_sniper" / "features_pf_1m"
+            base = _repo_root() / "cache_sniper" / "features_pf_1m"
+    if asset and asset != "crypto":
+        return base / asset
+    return base
 
 
 def _cache_refresh() -> bool:
@@ -249,6 +282,114 @@ def _save_feature_cache(df: pd.DataFrame, path: Path, *, fmt: str) -> Path:
         return pkl
 
 
+def _build_stock_features(df_all: pd.DataFrame, flags: Dict[str, bool], contract: TradeContract) -> pd.DataFrame:
+    flags_local = dict(flags)
+    stock_flags, apply_windows, insert_breaks, fill_day_start, add_time_features, stock_windows = _stock_helper_bundle()
+    global _STOCK_WINDOWS_APPLIED, _STOCK_WINDOWS_LOGGED
+    # Ajusta janelas defaults dos indicadores de stocks (permite override por ENV) apenas 1x.
+    if apply_windows and (not _STOCK_WINDOWS_APPLIED):
+        try:
+            apply_windows()
+            _STOCK_WINDOWS_APPLIED = True
+        except Exception:
+            pass
+    # Opcional: logar janelas ativas para auditoria (1x)
+    if (not _STOCK_WINDOWS_LOGGED):
+        try:
+            if stock_windows and isinstance(stock_windows, dict):
+                print("[stocks] CFG windows: " + ", ".join(f"{k}={v}" for k, v in stock_windows.items()), flush=True)
+            _STOCK_WINDOWS_LOGGED = True
+        except Exception:
+            _STOCK_WINDOWS_LOGGED = True
+    try:
+        from prepare_features.features import make_features  # type: ignore
+        from prepare_features.labels import apply_trade_contract_labels  # type: ignore
+    except Exception:
+        from prepare_features.features import make_features  # type: ignore
+        from prepare_features.labels import apply_trade_contract_labels  # type: ignore
+
+    df_day = insert_breaks(df_all) if insert_breaks else df_all.copy()
+    quiet = bool(flags_local.get("_quiet") or flags_local.get("quiet"))
+    make_features(df_day, flags_local, verbose=not quiet)
+    new_cols = [c for c in df_day.columns if c not in df_all.columns]
+    if new_cols:
+        df_all[new_cols] = df_day.loc[df_all.index, new_cols].to_numpy()
+        if fill_day_start:
+            try:
+                fill_day_start(df_all, new_cols)
+            except Exception:
+                pass
+    if bool(flags_local.get("label", True)):
+        candle_sec = int(getattr(contract, "timeframe_sec", 60) or 60)
+        apply_trade_contract_labels(
+            df_all,
+            contract=contract,
+            candle_sec=candle_sec,
+        )
+    if add_time_features:
+        try:
+            add_time_features(df_all)
+        except Exception:
+            pass
+    return df_all
+
+
+def _build_features_for_symbol(
+    symbol: str,
+    *,
+    total_days: int,
+    remove_tail_days: int,
+    contract: TradeContract,
+    flags: Dict[str, bool],
+    asset_class: str = "crypto",
+) -> tuple[pd.DataFrame, Dict[str, float]]:
+    """
+    Carrega OHLC e calcula features/labels respeitando o asset_class.
+    Retorna (df_pf, timings parciais).
+    """
+    asset = str(asset_class or "crypto").lower()
+    t0 = time.perf_counter()
+    if asset == "stocks":
+        try:
+            from prepare_features.data_stocks import load_ohlc_1m_series_stock  # type: ignore
+        except Exception:
+            raise
+        raw = load_ohlc_1m_series_stock(symbol, int(total_days), remove_tail_days=0)
+    else:
+        raw = load_ohlc_1m_series(symbol, int(total_days), remove_tail_days=0)
+    t_load = time.perf_counter()
+    if raw.empty:
+        raise RuntimeError("sem dados 1m no intervalo solicitado")
+
+    df_all = to_ohlc_from_1m(raw, 60)
+    if remove_tail_days > 0:
+        cutoff = df_all.index[-1] - pd.Timedelta(days=int(remove_tail_days))
+        df_all = df_all[df_all.index < cutoff]
+    if df_all.empty or int(len(df_all)) < 500:
+        raise RuntimeError(f"sem OHLC suficiente (rows={len(df_all)})")
+    if df_all[["open", "high", "low", "close"]].isna().all(axis=None):
+        raise RuntimeError("OHLC inválido (todos NaN)")
+    t_ohlc = time.perf_counter()
+
+    if asset == "stocks":
+        df_pf = _build_stock_features(df_all, flags, contract)
+    else:
+        df_pf = pf_run(
+            df_all,
+            flags=flags,
+            plot=False,
+            trade_contract=contract,
+        )
+    t_feat = time.perf_counter()
+    df_pf = _try_downcast_df(df_pf)
+    timings = {
+        "load_s": float(t_load - t0),
+        "ohlc_s": float(t_ohlc - t_load),
+        "features_s": float(t_feat - t_ohlc),
+    }
+    return df_pf, timings
+
+
 def ensure_feature_cache(
     symbols: Sequence[str],
     *,
@@ -262,18 +403,22 @@ def ensure_feature_cache(
     # Se True, o cache só conta como "hit" se a meta indicar que foi construído
     # com `total_days` compatível com o solicitado (inclui o caso total_days<=0 => histórico completo).
     strict_total_days: bool = False,
+    asset_class: str = "crypto",
 ) -> Dict[str, Path]:
     """
     Garante que existe um cache de features+labels Sniper por símbolo (computado 1x).
     Retorna mapa symbol -> caminho do arquivo cache.
     """
-    cache_dir = cache_dir or _cache_dir()
+    cache_dir = cache_dir or _cache_dir(asset_class)
     cache_dir.mkdir(parents=True, exist_ok=True)
     fmt = _cache_format()
     refresh = _cache_refresh() if refresh is None else bool(refresh)
     flags_run = dict(flags)
-    # evita quebrar barra de progresso com logs de features
-    flags_run["_quiet"] = True
+    # evita quebrar barra de progresso com logs de features; pode ser desativado via env
+    want_timings = _env_bool("SNIPER_FEATURE_TIMINGS", default=False)
+    flags_run["_quiet"] = False if want_timings else True
+    if want_timings:
+        flags_run["_feature_timings"] = True
 
     out: Dict[str, Path] = {}
     symbols = list(symbols)
@@ -331,7 +476,7 @@ def ensure_feature_cache(
             to_build.append(sym)
 
     print(
-        f"[cache] features sniper: dir={cache_dir} fmt={fmt} refresh={bool(refresh)} | total={len(symbols)} hit={len(hits)} build={len(to_build)}",
+        f"[cache] features sniper: dir={cache_dir} fmt={fmt} refresh={bool(refresh)} asset={asset_class} | total={len(symbols)} hit={len(hits)} build={len(to_build)}",
         flush=True,
     )
 
@@ -356,24 +501,14 @@ def ensure_feature_cache(
         data_path, meta_path = _symbol_cache_paths(sym, cache_dir, fmt)
         try:
             t0 = time.perf_counter()
-            raw = load_ohlc_1m_series(sym, int(total_days), remove_tail_days=0)
-            t_load = time.perf_counter()
-            if raw.empty:
-                raise RuntimeError("sem dados 1m no intervalo solicitado")
-            df_all = to_ohlc_from_1m(raw, 60)
-            t_ohlc = time.perf_counter()
-            if df_all.empty or int(len(df_all)) < 500:
-                raise RuntimeError(f"sem OHLC suficiente (rows={len(df_all)})")
-            if df_all[["open", "high", "low", "close"]].isna().all(axis=None):
-                raise RuntimeError("OHLC inválido (todos NaN)")
-
-            df_pf = pf_run(
-                df_all,
+            df_pf, t_stats = _build_features_for_symbol(
+                sym,
+                total_days=int(total_days),
+                remove_tail_days=0,
+                contract=contract,
                 flags=flags_run,
-                plot=False,
-                trade_contract=contract,
+                asset_class=asset_class,
             )
-            df_pf = _try_downcast_df(df_pf)
             t_pf = time.perf_counter()
             real_path = _save_feature_cache(df_pf, data_path, fmt=fmt)
             t_save = time.perf_counter()
@@ -388,6 +523,7 @@ def ensure_feature_cache(
                 "total_days": int(total_days),
                 "format": real_fmt,
                 "path": str(real_path),
+                "asset_class": asset_class,
             }
             meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -396,28 +532,20 @@ def ensure_feature_cache(
                     {
                         "symbol": sym,
                         "rows": int(len(df_pf)),
-                        "load_s": float(t_load - t0),
-                        "ohlc_s": float(t_ohlc - t_load),
-                        "features_s": float(t_pf - t_ohlc),
+                        "load_s": float(t_stats.get("load_s", 0.0)),
+                        "ohlc_s": float(t_stats.get("ohlc_s", 0.0)),
+                        "features_s": float(t_stats.get("features_s", 0.0)),
                         "save_s": float(t_save - t_pf),
                         "total_s": float(t_save - t0),
                     }
                 )
 
-            del df_pf, df_all, raw
+            del df_pf
             gc.collect()
             return sym, real_path, None
         except Exception as e:
             try:
                 del df_pf  # type: ignore[name-defined]
-            except Exception:
-                pass
-            try:
-                del df_all  # type: ignore[name-defined]
-            except Exception:
-                pass
-            try:
-                del raw  # type: ignore[name-defined]
             except Exception:
                 pass
             gc.collect()
@@ -600,27 +728,16 @@ def _prepare_symbol(
     remove_tail_days: int,
     flags: Dict[str, bool],
     contract: TradeContract,
+    asset_class: str = "crypto",
     entry_label_name: str | None = None,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame, dict[str, List[str]], List[str], List[str]]:
-    raw = load_ohlc_1m_series(symbol, int(total_days), remove_tail_days=0)
-    if raw.empty:
-        raise RuntimeError(f"{symbol}: sem dados 1m no intervalo solicitado")
-    df_all = to_ohlc_from_1m(raw, 60)
-    if remove_tail_days > 0:
-        cutoff = df_all.index[-1] - pd.Timedelta(days=int(remove_tail_days))
-        df_all = df_all[df_all.index < cutoff]
-    # evita rodar features em df vazio (gera rows=0 e atrapalha o treino)
-    if df_all.empty or int(len(df_all)) < 500:
-        raise RuntimeError(f"{symbol}: sem OHLC suficiente após corte (rows={len(df_all)})")
-    # se OHLC estiver todo NaN, pula
-    if df_all[["open","high","low","close"]].isna().all(axis=None):
-        raise RuntimeError(f"{symbol}: OHLC inválido (todos NaN) após corte")
-
-    df_pf = pf_run(
-        df_all,
+    df_pf, _ = _build_features_for_symbol(
+        symbol,
+        total_days=int(total_days),
+        remove_tail_days=int(remove_tail_days),
+        contract=contract,
         flags=flags,
-        plot=False,
-        trade_contract=contract,
+        asset_class=asset_class,
     )
     seed = _env_int("SNIPER_SEED", 1337)
     entry_specs = _entry_label_specs(contract)
@@ -701,11 +818,14 @@ def prepare_sniper_dataset(
     entry_ratio_neg_per_pos: float = 6.0,
     max_rows_entry: int = 600_000,
     seed: int = 42,
+    feature_flags: Dict[str, bool] | None = None,
+    asset_class: str = "crypto",
 ) -> SniperDataPack:
     contract = contract or DEFAULT_TRADE_CONTRACT
     symbols = list(symbols)
     if not symbols:
         raise RuntimeError("symbols vazio")
+    flags = dict(feature_flags or _default_flags_for_asset(asset_class))
 
     rng = np.random.default_rng(int(seed) + int(remove_tail_days))
     # cap por simbolo: proporcional ao tamanho total para reduzir custo
@@ -917,24 +1037,13 @@ def prepare_sniper_dataset(
         fallback_pos = None
         fallback_neg = None
         try:
-            raw = load_ohlc_1m_series(symbol, int(total_days), remove_tail_days=0)
-            if raw.empty:
-                raise RuntimeError(f"{symbol}: sem dados 1m no intervalo solicitado")
-            df_all = to_ohlc_from_1m(raw, 60)
-            if remove_tail_days > 0:
-                cutoff = df_all.index[-1] - pd.Timedelta(days=int(remove_tail_days))
-                df_all = df_all[df_all.index < cutoff]
-            if df_all.empty or int(len(df_all)) < 500:
-                raise RuntimeError(f"{symbol}: sem OHLC suficiente apos corte (rows={len(df_all)})")
-            if df_all[["open", "high", "low", "close"]].isna().all(axis=None):
-                raise RuntimeError(f"{symbol}: OHLC invalido (todos NaN) apos corte")
-
-            df_all = _try_downcast_df(df_all)
-            df_pf = pf_run(
-                df_all,
-                flags=GLOBAL_FLAGS_FULL,
-                plot=False,
-                trade_contract=contract,
+            df_pf, _ = _build_features_for_symbol(
+                symbol,
+                total_days=int(total_days),
+                remove_tail_days=int(remove_tail_days),
+                contract=contract,
+                flags=flags,
+                asset_class=asset_class,
             )
             for spec in entry_specs:
                 name = str(spec["name"])
@@ -1103,17 +1212,20 @@ def prepare_sniper_dataset_from_cache(
     entry_ratio_neg_per_pos: float = 6.0,
     max_rows_entry: int = 2_000_000,
     seed: int = 42,
+    feature_flags: Dict[str, bool] | None = None,
+    asset_class: str = "crypto",
 ) -> SniperDataPack:
     """
     Calcula features 1x por simbolo (cache em disco) e, no walk-forward, apenas
     recorta o final por `remove_tail_days` antes de montar o dataset de entry.
     """
     contract = contract or DEFAULT_TRADE_CONTRACT
+    flags = dict(feature_flags or _default_flags_for_asset(asset_class))
     symbols = list(symbols)
     if not symbols:
         raise RuntimeError("symbols vazio")
 
-    cache_dir = _cache_dir()
+    cache_dir = _cache_dir(asset_class)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     if cache_map is None:
@@ -1121,7 +1233,8 @@ def prepare_sniper_dataset_from_cache(
             symbols,
             total_days=int(total_days),
             contract=contract,
-            flags=GLOBAL_FLAGS_FULL,
+            flags=flags,
+            asset_class=asset_class,
         )
     symbols = [s for s in symbols if s in cache_map]
     if not symbols:

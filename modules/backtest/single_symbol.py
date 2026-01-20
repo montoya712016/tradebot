@@ -86,7 +86,7 @@ def _best_run_contract() -> TradeContract:
 
 @dataclass
 class SingleSymbolDemoSettings:
-    symbol: str = "KAVAUSDT"
+    symbol: str = "ADAUSDT"
     # janela parecida com o WF campeão (aprox. 6 anos)
     days: int = 6 * 365 + 30
     candle_sec: int = 60
