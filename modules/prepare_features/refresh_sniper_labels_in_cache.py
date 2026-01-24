@@ -30,12 +30,22 @@ import pandas as pd
 _HERE = Path(__file__).resolve()
 for _p in _HERE.parents:
     if _p.name.lower() == "modules":
-        _sp = str(_p)
-        if _sp not in sys.path:
-            sys.path.insert(0, _sp)
+        _repo = _p.parent
+        for _cand in (_repo, _p):
+            _sp = str(_cand)
+            if _sp not in sys.path:
+                sys.path.insert(0, _sp)
         break
 
-from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract, exit_ema_span_from_window  # noqa: E402
+_asset = os.getenv("SNIPER_ASSET_CLASS", "").strip().lower()
+if _asset == "stocks":
+    from stocks.trade_contract import (  # noqa: E402
+        DEFAULT_TRADE_CONTRACT,
+        TradeContract,
+        exit_ema_span_from_window,
+    )
+else:
+    from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract, exit_ema_span_from_window  # noqa: E402
 from config.symbols import default_top_market_cap_path, load_market_caps  # noqa: E402
 from train.sniper_dataflow import _cache_dir, _cache_format, _symbol_cache_paths  # type: ignore  # noqa: E402
 from prepare_features.labels import apply_trade_contract_labels  # noqa: E402
@@ -111,19 +121,23 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
             s.max_symbols = int(env_max)
     except Exception:
         pass
-    cache_dir = _cache_dir()
+    asset_class = os.getenv("SNIPER_ASSET_CLASS", "").strip().lower()
+    cache_dir = _cache_dir(asset_class or None)
     fmt = _cache_format()
 
     symbols = [x.strip().upper() for x in (s.symbols or []) if str(x).strip()]
     if not symbols:
-        symbols = _select_symbols_by_market_cap(s)
-    if not symbols:
-        symbols = _list_symbols_from_cache(cache_dir, fmt)
+        if asset_class == "stocks":
+            symbols = _list_symbols_from_cache(cache_dir, fmt)
+        else:
+            symbols = _select_symbols_by_market_cap(s)
+            if not symbols:
+                symbols = _list_symbols_from_cache(cache_dir, fmt)
     if int(s.limit) > 0:
         symbols = symbols[: int(s.limit)]
 
     print(
-        f"[labels-refresh] cache_dir={cache_dir} fmt={fmt} symbols={len(symbols)} candle_sec={s.candle_sec} "
+        f"[labels-refresh] cache_dir={cache_dir} fmt={fmt} asset={asset_class or 'crypto'} symbols={len(symbols)} candle_sec={s.candle_sec} "
         f"mcap_min={float(s.mcap_min_usd):.0f} mcap_max={float(s.mcap_max_usd):.0f} max_symbols={int(s.max_symbols)}",
         flush=True,
     )
@@ -150,12 +164,31 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
         n = int(round(width * (done / total)))
         return ("#" * n) + ("-" * (width - n))
 
+    def _fmt_eta(seconds: float) -> str:
+        if not np.isfinite(seconds) or seconds <= 0:
+            return "0s"
+        sec = int(round(seconds))
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        s2 = sec % 60
+        if h > 0:
+            return f"{h}h{m:02d}m"
+        if m > 0:
+            return f"{m}m{s2:02d}s"
+        return f"{s2}s"
+
     def _print_progress(current_sym: str) -> None:
         nonlocal last_len
         nonlocal last_progress_ts
         done = ok + fail
         pct = 100.0 * done / max(1, total)
-        line = f"[labels-refresh] [{_bar(done, total)}] {done:>3}/{total:<3} {pct:5.1f}% | {current_sym}"
+        elapsed = time.perf_counter() - t0
+        rate = elapsed / max(1, done)
+        eta = rate * max(0, total - done)
+        line = (
+            f"[labels-refresh] [{_bar(done, total)}] {done:>3}/{total:<3} "
+            f"{pct:5.1f}% ETA {_fmt_eta(eta)} | {current_sym}"
+        )
         if sys.stderr.isatty():
             sys.stderr.write("\r" + line + (" " * max(0, last_len - len(line))))
             sys.stderr.flush()

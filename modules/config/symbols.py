@@ -56,6 +56,7 @@ def load_top_market_cap_symbols(
     *,
     path: str | Path | None = None,
     limit: int | None = None,
+    min_cap: float | None = None,
     ensure_usdt: bool = True,
     exclude: Iterable[str] | None = None,
 ) -> list[str]:
@@ -65,8 +66,10 @@ def load_top_market_cap_symbols(
     exclude_set = {str(s).upper() for s in (exclude or [])}
     ranked = sorted(caps.items(), key=lambda kv: kv[1], reverse=True)
     out: list[str] = []
-    for sym, _cap in ranked:
+    for sym, cap in ranked:
         s = str(sym).upper()
+        if min_cap is not None and float(cap) < float(min_cap):
+            continue
         if ensure_usdt and (not s.endswith("USDT")):
             s = s + "USDT"
         if s in exclude_set:

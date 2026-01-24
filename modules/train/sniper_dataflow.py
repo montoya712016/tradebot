@@ -93,6 +93,15 @@ DROP_COLS_EXACT = {
 }
 
 
+def _frozen_ohlc_mask(df: pd.DataFrame) -> pd.Series:
+    cols = ["open", "high", "low", "close"]
+    if df.empty or any(c not in df.columns for c in cols):
+        return pd.Series(False, index=df.index)
+    cur = df[cols]
+    prev = cur.shift(1)
+    return (cur == prev).all(axis=1)
+
+
 def _list_feature_columns(df: pd.DataFrame) -> List[str]:
     cols: List[str] = []
     for c in df.columns:
@@ -101,6 +110,9 @@ def _list_feature_columns(df: pd.DataFrame) -> List[str]:
         if any(c.startswith(pref) for pref in DROP_COL_PREFIXES):
             continue
         if pd.api.types.is_numeric_dtype(df[c]):
+            # evita colunas sempre NaN que zerariam o dataset no dropna
+            if not df[c].notna().any():
+                continue
             cols.append(c)
     return cols
 
@@ -221,9 +233,10 @@ def _symbol_cache_paths(symbol: str, cache_dir: Path, fmt: str) -> Tuple[Path, P
 
 def _try_downcast_df(df: pd.DataFrame) -> pd.DataFrame:
     # reduz bastante RAM/disco sem quebrar as labels
+    df = df.copy()
     for c in df.columns:
         if pd.api.types.is_float_dtype(df[c]):
-            df[c] = df[c].astype(np.float32, copy=False)
+            df.loc[:, c] = df[c].astype(np.float32, copy=False)
     return df
 
 
@@ -430,6 +443,41 @@ def ensure_feature_cache(
 
     for sym in symbols:
         data_path, meta_path = _symbol_cache_paths(sym, cache_dir, fmt)
+        if data_path.exists() and (not refresh) and _is_valid_cache_file(data_path):
+            if not meta_path.exists():
+                try:
+                    if data_path.suffix.lower() in {".pkl", ".pickle"}:
+                        df_meta = pd.read_pickle(data_path)
+                        real_fmt = "pickle"
+                    else:
+                        df_meta = pd.read_parquet(data_path)
+                        real_fmt = "parquet"
+                    idx = pd.to_datetime(df_meta.index, errors="coerce")
+                    if isinstance(idx, pd.DatetimeIndex) and (idx.tz is not None):
+                        idx = idx.tz_convert(None)
+                    idx = idx[idx.notna()]
+                    if len(idx) > 0:
+                        start_ts = pd.Timestamp(idx.min()).tz_localize(None).to_pydatetime().isoformat()
+                        end_ts = pd.Timestamp(idx.max()).tz_localize(None).to_pydatetime().isoformat()
+                        total_days_meta = int(max(0, ((idx.max() - idx.min()) / pd.Timedelta(days=1))))
+                        meta = {
+                            "symbol": sym,
+                            "rows": int(len(df_meta)),
+                            "start_ts_utc": str(start_ts),
+                            "end_ts_utc": str(end_ts),
+                            "candle_sec": 60,
+                            "total_days": int(total_days_meta),
+                            "format": real_fmt,
+                            "path": str(data_path),
+                            "asset_class": asset_class,
+                        }
+                        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                        out[sym] = data_path
+                        hits.append(sym)
+                        continue
+                except Exception:
+                    pass
+
         if data_path.exists() and meta_path.exists() and (not refresh) and _is_valid_cache_file(data_path):
             ok_hit = True
             if bool(strict_total_days):
@@ -684,7 +732,13 @@ def _read_cache_meta_end_ts(symbol: str, cache_dir: Path) -> pd.Timestamp | None
 
 
 def _max_label_lookahead_bars(contract: TradeContract, candle_sec: int) -> int:
-    return int(max(contract.timeout_bars(candle_sec), contract.danger_horizon_bars(candle_sec)))
+    windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
+    if windows:
+        w_min = float(max(windows))
+        label_bars = int(max(1, round((w_min * 60.0) / float(max(1, candle_sec)))))
+    else:
+        label_bars = 0
+    return int(max(label_bars, contract.danger_horizon_bars(candle_sec)))
 
 
 def _env_int(name: str, default: int) -> int:
@@ -699,19 +753,9 @@ def _default_exit_margin_pct(contract: "TradeContract") -> float:
     """
     Default do Exit margin:
     - 0.2% (antigo) deixa o label_exit praticamente morto -> modelo com scores baixos.
-    - usamos um default ligado ao contrato (tp/sl), com um piso mínimo.
+    - valor fixo para evitar dependência de parâmetros do contrato.
     """
-    try:
-        tp = float(getattr(contract, "tp_min_pct", 0.02) or 0.02)
-    except Exception:
-        tp = 0.02
-    try:
-        sl = float(getattr(contract, "sl_pct", 0.03) or 0.03)
-    except Exception:
-        sl = 0.03
-    # NOTE: tp/sl podem ser 5% dependendo do contrato; usar frações menores pra não inflar demais o label_exit.
-    # Limiar mais permissivo para gerar mais positivos no ExitScore.
-    return float(max(0.008, 0.20 * tp, 0.12 * sl))
+    return 0.008
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -739,6 +783,7 @@ def _prepare_symbol(
         flags=flags,
         asset_class=asset_class,
     )
+    frozen_mask = _frozen_ohlc_mask(df_pf) if str(asset_class or "crypto").lower() == "stocks" else None
     seed = _env_int("SNIPER_SEED", 1337)
     entry_specs = _entry_label_specs(contract)
     if entry_label_name:
@@ -759,6 +804,8 @@ def _prepare_symbol(
             seed=int(seed),
         )
         entry_df = sniper_ds.entry
+        if frozen_mask is not None and not entry_df.empty:
+            entry_df = entry_df.loc[~frozen_mask.reindex(entry_df.index).fillna(False)].copy()
         entry_map[str(spec["name"])] = entry_df
         feat_cols_entry_map[str(spec["name"])] = _list_feature_columns(entry_df)
         if danger_df is None:
@@ -830,7 +877,9 @@ def prepare_sniper_dataset(
     rng = np.random.default_rng(int(seed) + int(remove_tail_days))
     # cap por simbolo: proporcional ao tamanho total para reduzir custo
     per_sym = int(max_rows_entry // max(1, len(symbols))) if max_rows_entry > 0 else 0
-    symbol_cap = max(20_000, min(100_000, per_sym if per_sym > 0 else 100_000))
+    min_cap = _env_int("SNIPER_SYMBOL_CAP_MIN", 20_000)
+    max_cap = _env_int("SNIPER_SYMBOL_CAP_MAX", 100_000)
+    symbol_cap = max(int(min_cap), min(int(max_cap), per_sym if per_sym > 0 else int(max_cap)))
     entry_specs = _entry_label_specs(contract)
     if entry_label_name:
         want = str(entry_label_name).strip().lower()
@@ -901,92 +950,37 @@ def prepare_sniper_dataset(
         y = df_in[label_col].to_numpy()
         pos_idx = np.flatnonzero(y >= 0.5)
         neg_idx = np.flatnonzero(y < 0.5)
-        max_rows = int(max_rows)
-        if max_rows <= 0 or (pos_idx.size + neg_idx.size) <= max_rows:
-            return df_in
         if pos_idx.size == 0:
-            keep = neg_idx
-            if keep.size > max_rows:
-                keep = rng.choice(keep, size=max_rows, replace=False)
-            return df_in.iloc[np.sort(keep)].copy()
-        denom = 1.0 + float(max(0.0, ratio_neg_per_pos))
-        pos_target = int(max(1, round(max_rows / denom)))
-        pos_keep_n = int(min(pos_idx.size, pos_target))
-        # sampling sempre pelo label para evitar viés por pesos
-        vals = y.astype(np.float32, copy=False)
+            # sem positivos -> evita gerar dataset extremamente enviesado
+            return df_in.iloc[0:0].copy()
 
-        def _sample_by_bins(idx: np.ndarray, v: np.ndarray, target: int) -> np.ndarray:
-            if target <= 0 or idx.size == 0:
-                return np.array([], dtype=idx.dtype)
-            if idx.size <= target:
-                return idx
-            vv = v.astype(np.float32, copy=False)
-            mask = np.isfinite(vv)
-            if not bool(np.any(mask)):
-                return rng.choice(idx, size=target, replace=False)
-            idx = idx[mask]
-            vv = vv[mask]
-            if idx.size <= target:
-                return idx
-            vmin = float(np.min(vv))
-            vmax = float(np.max(vv))
-            if vmin == vmax:
-                return rng.choice(idx, size=target, replace=False)
-            n_bins = 12
-            edges = np.linspace(vmin, vmax, n_bins + 1, dtype=np.float32)
-            bin_ids = np.digitize(vv, edges, right=False) - 1
-            bin_ids = np.clip(bin_ids, 0, n_bins - 1)
-            keep = []
-            extreme_bins = {0, n_bins - 1}
-            for b in extreme_bins:
-                b_idx = idx[bin_ids == b]
-                if b_idx.size:
-                    keep.append(b_idx)
-            keep_idx = np.concatenate(keep) if keep else np.array([], dtype=idx.dtype)
-            if keep_idx.size >= target:
-                return rng.choice(keep_idx, size=target, replace=False)
-            remaining = int(target - keep_idx.size)
-            mid_bins = [b for b in range(1, n_bins - 1)]
-            counts = np.array([int(np.sum(bin_ids == b)) for b in mid_bins], dtype=np.int64)
-            total_mid = int(np.sum(counts))
-            if total_mid <= 0:
-                return keep_idx
-            alloc = np.floor(remaining * (counts / total_mid)).astype(np.int64)
-            while int(np.sum(alloc)) < remaining:
-                b = int(np.argmax(counts - alloc))
-                alloc[b] += 1
-            while int(np.sum(alloc)) > remaining:
-                b = int(np.argmax(alloc))
-                if alloc[b] <= 0:
-                    break
-                alloc[b] -= 1
-            mid_keep = []
-            for b, take in zip(mid_bins, alloc):
-                if take <= 0:
-                    continue
-                b_idx = idx[bin_ids == b]
-                if b_idx.size <= take:
-                    mid_keep.append(b_idx)
-                else:
-                    mid_keep.append(rng.choice(b_idx, size=int(take), replace=False))
-            if mid_keep:
-                keep_idx = np.concatenate([keep_idx] + mid_keep)
-            return keep_idx
+        ratio = float(max(0.0, ratio_neg_per_pos))
+        max_rows = int(max_rows)
+        pos_keep_n = int(pos_idx.size)
+        if max_rows > 0:
+            max_pos = int(max(1, round(max_rows / (1.0 + ratio))))
+            pos_keep_n = min(pos_keep_n, max_pos)
 
-        pos_keep = _sample_by_bins(pos_idx, vals[pos_idx], pos_keep_n)
-        remain = int(max_rows - pos_keep.size)
-        if remain <= 0:
-            return df_in.iloc[np.sort(pos_keep)].copy()
-        neg_target = int(min(neg_idx.size, remain))
-        if neg_target > 0:
-            neg_keep = _sample_by_bins(neg_idx, vals[neg_idx], neg_target)
-            keep = np.unique(np.concatenate([pos_keep, neg_keep]))
+        if pos_keep_n < pos_idx.size:
+            pos_keep = rng.choice(pos_idx, size=pos_keep_n, replace=False)
         else:
-            keep = pos_keep
-        if keep.size > max_rows:
-            keep = rng.choice(keep, size=max_rows, replace=False)
-        return df_in.iloc[np.sort(keep)].copy()
+            pos_keep = pos_idx
 
+        neg_target = int(round(pos_keep_n * ratio))
+        if max_rows > 0:
+            max_neg_allowed = max_rows - pos_keep_n
+            if max_neg_allowed < neg_target:
+                neg_target = max(0, max_neg_allowed)
+
+        if neg_target <= 0 or neg_idx.size == 0:
+            keep = pos_keep
+        else:
+            if neg_target >= neg_idx.size:
+                neg_keep = neg_idx
+            else:
+                neg_keep = rng.choice(neg_idx, size=neg_target, replace=False)
+            keep = np.concatenate([pos_keep, neg_keep])
+        return df_in.iloc[np.sort(keep)].copy()
     def _to_numpy(
         df: pd.DataFrame,
         feats: List[str],
@@ -1243,7 +1237,9 @@ def prepare_sniper_dataset_from_cache(
     rng = np.random.default_rng(int(seed) + int(remove_tail_days))
     # cap por simbolo: proporcional ao tamanho total para reduzir custo
     per_sym = int(max_rows_entry // max(1, len(symbols))) if max_rows_entry > 0 else 0
-    symbol_cap = max(20_000, min(100_000, per_sym if per_sym > 0 else 100_000))
+    min_cap = _env_int("SNIPER_SYMBOL_CAP_MIN", 20_000)
+    max_cap = _env_int("SNIPER_SYMBOL_CAP_MAX", 100_000)
+    symbol_cap = max(int(min_cap), min(int(max_cap), per_sym if per_sym > 0 else int(max_cap)))
     entry_specs = _entry_label_specs(contract)
     if entry_label_name:
         want = str(entry_label_name).strip().lower()
@@ -1313,92 +1309,37 @@ def prepare_sniper_dataset_from_cache(
         y = df_in[label_col].to_numpy()
         pos_idx = np.flatnonzero(y >= 0.5)
         neg_idx = np.flatnonzero(y < 0.5)
-        max_rows = int(max_rows)
-        if max_rows <= 0 or (pos_idx.size + neg_idx.size) <= max_rows:
-            return df_in
         if pos_idx.size == 0:
-            keep = neg_idx
-            if keep.size > max_rows:
-                keep = rng.choice(keep, size=max_rows, replace=False)
-            return df_in.iloc[np.sort(keep)].copy()
-        denom = 1.0 + float(max(0.0, ratio_neg_per_pos))
-        pos_target = int(max(1, round(max_rows / denom)))
-        pos_keep_n = int(min(pos_idx.size, pos_target))
-        # sampling sempre pelo label para evitar viés por pesos
-        vals = y.astype(np.float32, copy=False)
+            # sem positivos -> evita gerar dataset extremamente enviesado
+            return df_in.iloc[0:0].copy()
 
-        def _sample_by_bins(idx: np.ndarray, v: np.ndarray, target: int) -> np.ndarray:
-            if target <= 0 or idx.size == 0:
-                return np.array([], dtype=idx.dtype)
-            if idx.size <= target:
-                return idx
-            vv = v.astype(np.float32, copy=False)
-            mask = np.isfinite(vv)
-            if not bool(np.any(mask)):
-                return rng.choice(idx, size=target, replace=False)
-            idx = idx[mask]
-            vv = vv[mask]
-            if idx.size <= target:
-                return idx
-            vmin = float(np.min(vv))
-            vmax = float(np.max(vv))
-            if vmin == vmax:
-                return rng.choice(idx, size=target, replace=False)
-            n_bins = 12
-            edges = np.linspace(vmin, vmax, n_bins + 1, dtype=np.float32)
-            bin_ids = np.digitize(vv, edges, right=False) - 1
-            bin_ids = np.clip(bin_ids, 0, n_bins - 1)
-            keep = []
-            extreme_bins = {0, n_bins - 1}
-            for b in extreme_bins:
-                b_idx = idx[bin_ids == b]
-                if b_idx.size:
-                    keep.append(b_idx)
-            keep_idx = np.concatenate(keep) if keep else np.array([], dtype=idx.dtype)
-            if keep_idx.size >= target:
-                return rng.choice(keep_idx, size=target, replace=False)
-            remaining = int(target - keep_idx.size)
-            mid_bins = [b for b in range(1, n_bins - 1)]
-            counts = np.array([int(np.sum(bin_ids == b)) for b in mid_bins], dtype=np.int64)
-            total_mid = int(np.sum(counts))
-            if total_mid <= 0:
-                return keep_idx
-            alloc = np.floor(remaining * (counts / total_mid)).astype(np.int64)
-            while int(np.sum(alloc)) < remaining:
-                b = int(np.argmax(counts - alloc))
-                alloc[b] += 1
-            while int(np.sum(alloc)) > remaining:
-                b = int(np.argmax(alloc))
-                if alloc[b] <= 0:
-                    break
-                alloc[b] -= 1
-            mid_keep = []
-            for b, take in zip(mid_bins, alloc):
-                if take <= 0:
-                    continue
-                b_idx = idx[bin_ids == b]
-                if b_idx.size <= take:
-                    mid_keep.append(b_idx)
-                else:
-                    mid_keep.append(rng.choice(b_idx, size=int(take), replace=False))
-            if mid_keep:
-                keep_idx = np.concatenate([keep_idx] + mid_keep)
-            return keep_idx
+        ratio = float(max(0.0, ratio_neg_per_pos))
+        max_rows = int(max_rows)
+        pos_keep_n = int(pos_idx.size)
+        if max_rows > 0:
+            max_pos = int(max(1, round(max_rows / (1.0 + ratio))))
+            pos_keep_n = min(pos_keep_n, max_pos)
 
-        pos_keep = _sample_by_bins(pos_idx, vals[pos_idx], pos_keep_n)
-        remain = int(max_rows - pos_keep.size)
-        if remain <= 0:
-            return df_in.iloc[np.sort(pos_keep)].copy()
-        neg_target = int(min(neg_idx.size, remain))
-        if neg_target > 0:
-            neg_keep = _sample_by_bins(neg_idx, vals[neg_idx], neg_target)
-            keep = np.unique(np.concatenate([pos_keep, neg_keep]))
+        if pos_keep_n < pos_idx.size:
+            pos_keep = rng.choice(pos_idx, size=pos_keep_n, replace=False)
         else:
-            keep = pos_keep
-        if keep.size > max_rows:
-            keep = rng.choice(keep, size=max_rows, replace=False)
-        return df_in.iloc[np.sort(keep)].copy()
+            pos_keep = pos_idx
 
+        neg_target = int(round(pos_keep_n * ratio))
+        if max_rows > 0:
+            max_neg_allowed = max_rows - pos_keep_n
+            if max_neg_allowed < neg_target:
+                neg_target = max(0, max_neg_allowed)
+
+        if neg_target <= 0 or neg_idx.size == 0:
+            keep = pos_keep
+        else:
+            if neg_target >= neg_idx.size:
+                neg_keep = neg_idx
+            else:
+                neg_keep = rng.choice(neg_idx, size=neg_target, replace=False)
+            keep = np.concatenate([pos_keep, neg_keep])
+        return df_in.iloc[np.sort(keep)].copy()
     def _to_numpy(
         df: pd.DataFrame,
         feats: List[str],
@@ -1450,6 +1391,7 @@ def prepare_sniper_dataset_from_cache(
         if df.empty:
             raise RuntimeError(f"{symbol}: sem dados apos corte")
         df = _try_downcast_df(df)
+        frozen_mask = _frozen_ohlc_mask(df) if str(asset_class or "crypto").lower() == "stocks" else None
 
         frames_local: dict[str, tuple[pd.DataFrame, List[str]]] = {}
         for spec in entry_specs:
@@ -1465,6 +1407,10 @@ def prepare_sniper_dataset_from_cache(
             entry_df = sniper_ds.entry
             if entry_df.empty:
                 continue
+            if frozen_mask is not None:
+                entry_df = entry_df.loc[~frozen_mask.reindex(entry_df.index).fillna(False)].copy()
+                if entry_df.empty:
+                    continue
             entry_df = _try_downcast_df(entry_df)
             entry_df["sym_id"] = int(sym_idx)
             feat_cols = _list_feature_columns(entry_df)

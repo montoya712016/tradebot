@@ -51,6 +51,7 @@ class DashboardState:
     recent_trades: list[Trade] = field(default_factory=list)
     allocation: dict[str, float] = field(default_factory=dict)  # symbol -> notional_usd
     meta: dict[str, Any] = field(default_factory=dict)
+    equity_history: list[dict[str, Any]] = field(default_factory=list)  # [{ts_utc, equity_usd, exposure_usd}]
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -85,23 +86,40 @@ class StateStore:
         - recent_trades: [...]
         - allocation: {...}
         - meta: {...}
+        - equity_history: [...]  (opcional; se ausente, será alimentada com summary)
         """
         with self._lock:
             cur = self._state.to_dict()
             cur.update(payload or {})
+
             summary_in = cur.get("summary") or {}
             summary = AccountSummary(**summary_in)
-
             positions = [Position(**p) for p in (cur.get("positions") or [])]
             trades = [Trade(**t) for t in (cur.get("recent_trades") or [])]
             allocation = dict(cur.get("allocation") or {})
             meta = dict(cur.get("meta") or {})
+            hist_in = list(cur.get("equity_history") or self._state.equity_history or [])
+            # acrescenta ponto atual se summary disponível
+            if summary.equity_usd is not None:
+                hist_in.append(
+                    {
+                        "ts_utc": summary.updated_at_utc or _utc_iso(),
+                        "equity_usd": float(summary.equity_usd),
+                        "exposure_usd": float(summary.exposure_usd),
+                    }
+                )
+            # limita tamanho para evitar crescimento ilimitado
+            MAX_POINTS = 500
+            if len(hist_in) > MAX_POINTS:
+                hist_in = hist_in[-MAX_POINTS:]
+
             self._state = DashboardState(
                 summary=summary,
                 positions=positions,
                 recent_trades=trades,
                 allocation=allocation,
                 meta=meta,
+                equity_history=hist_in,
             )
 
 
@@ -153,12 +171,21 @@ def create_demo_state() -> DashboardState:
         Trade(ts_utc=_utc_iso(), symbol="ETHUSDT", action="BUY", qty=0.35, price=2210.0),
         Trade(ts_utc=_utc_iso(), symbol="SOLUSDT", action="BUY", qty=7.0, price=96.0),
     ]
+    # histórico sintético
+    equity_history: list[dict[str, Any]] = []
+    base_eq = summary.equity_usd
+    for i in range(40):
+        ts = _utc_iso()
+        drift = (i - 20) * 0.001
+        eq = base_eq * (1.0 + drift)
+        equity_history.append({"ts_utc": ts, "equity_usd": float(eq), "exposure_usd": float(exposure)})
     return DashboardState(
         summary=summary,
         positions=positions,
         recent_trades=trades,
         allocation=allocation,
         meta={"mode": "demo"},
+        equity_history=equity_history,
     )
 
 
@@ -232,4 +259,3 @@ class DemoStateGenerator:
                     meta=st.meta,
                 )
             )
-

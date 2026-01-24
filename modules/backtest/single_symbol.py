@@ -58,10 +58,6 @@ def _best_run_contract() -> TradeContract:
     base = DEFAULT_TRADE_CONTRACT
     return TradeContract(
         timeframe_sec=60,
-        tp_min_pct=base.tp_min_pct,
-        sl_pct=base.sl_pct,
-        timeout_hours=base.timeout_hours,
-        min_hold_minutes=base.min_hold_minutes,
         entry_label_windows_minutes=(120,),
         entry_label_min_profit_pcts=(0.032,),
         entry_label_weight_alpha=0.5,
@@ -84,8 +80,35 @@ def _best_run_contract() -> TradeContract:
     )
 
 
+def _default_flags_for_asset(asset_class: str) -> dict:
+    asset = str(asset_class or "crypto").lower()
+    if asset == "stocks":
+        try:
+            from stocks import prepare_features_stocks as pfs  # type: ignore
+
+            flags = dict(getattr(pfs, "FLAGS_STOCKS", {}))
+            if flags:
+                return flags
+        except Exception:
+            pass
+    return dict(GLOBAL_FLAGS_FULL)
+
+
+def _default_contract_for_asset(asset_class: str) -> TradeContract:
+    asset = str(asset_class or "crypto").lower()
+    if asset == "stocks":
+        try:
+            from stocks.trade_contract import DEFAULT_TRADE_CONTRACT as STOCKS_CONTRACT  # type: ignore
+
+            return STOCKS_CONTRACT
+        except Exception:
+            return DEFAULT_TRADE_CONTRACT
+    return _best_run_contract()
+
+
 @dataclass
 class SingleSymbolDemoSettings:
+    asset_class: str = "crypto"
     symbol: str = "ADAUSDT"
     # janela parecida com o WF campeão (aprox. 6 anos)
     days: int = 6 * 365 + 30
@@ -100,6 +123,7 @@ class SingleSymbolDemoSettings:
     # Plot (html com plotly)
     save_plot: bool = True
     plot_out: str = "data/generated/plots/single_symbol_plot.html"
+    plot_candles: bool = True
     # Diagnóstico (prints)
     print_signal_diagnostics: bool = True
     # Thresholds são definidos manualmente em config/thresholds.py.
@@ -108,10 +132,10 @@ class SingleSymbolDemoSettings:
     # Danger desativado por enquanto
     use_danger_model: bool = False
     # Contrato usado para cache/simulação
-    contract: TradeContract = field(default_factory=_best_run_contract)
+    contract: TradeContract | None = None
 
 
-def _find_latest_wf_dir(run_dir: str | None) -> Path:
+def _find_latest_wf_dir(run_dir: str | None, asset_class: str | None = None) -> Path:
     if run_dir:
         p = Path(run_dir).expanduser().resolve()
         if not p.is_dir():
@@ -119,13 +143,13 @@ def _find_latest_wf_dir(run_dir: str | None) -> Path:
         return p
     # usa paths oficiais do projeto (workspace/models_sniper)
     try:
-        from utils.paths import models_root as _models_root  # type: ignore
+        from utils.paths import models_root_for_asset as _models_root_for_asset  # type: ignore
 
-        models_root = _models_root().resolve()
+        models_root = _models_root_for_asset(asset_class).resolve()
     except Exception:
         # fallback (layout inesperado)
-        models_root = (Path(__file__).resolve().parents[2].parent / "models_sniper").resolve()
-
+        asset = str(asset_class or "crypto").lower()
+        models_root = (Path(__file__).resolve().parents[2].parent / "models_sniper" / asset).resolve()
     if models_root.is_dir():
         wf_list = sorted([p for p in models_root.glob("wf_*") if p.is_dir()], key=lambda p: p.stat().st_mtime)
         if wf_list:
@@ -137,11 +161,12 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     settings = settings or SingleSymbolDemoSettings()
     t0 = time.perf_counter()
 
+    asset = str(settings.asset_class or "crypto").lower()
     symbol = settings.symbol.strip().upper()
-    if not symbol.endswith("USDT"):
+    if asset != "stocks" and not symbol.endswith("USDT"):
         symbol = symbol + "USDT"
 
-    run_dir = _find_latest_wf_dir(settings.run_dir)
+    run_dir = _find_latest_wf_dir(settings.run_dir, asset_class=asset)
     periods = load_period_models(run_dir)
     # aplica overrides (opcional)
     periods = apply_threshold_overrides(
@@ -151,11 +176,15 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     )
 
     # garante cache do símbolo e carrega df (features+labels+ohlc)
+    contract = settings.contract or _default_contract_for_asset(asset)
+    flags = _default_flags_for_asset(asset)
+    flags["_quiet"] = True
     cache_map = ensure_feature_cache(
         [symbol],
         total_days=int(settings.total_days_cache),
-        contract=settings.contract,
-        flags=dict(GLOBAL_FLAGS_FULL, **{"_quiet": True}),
+        contract=contract,
+        flags=flags,
+        asset_class=asset,
     )
     if symbol not in cache_map:
         raise RuntimeError(f"Cache indisponível para {symbol} (ver logs [cache])")
@@ -218,7 +247,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         thresholds=thresholds,
         periods=periods,
         period_id=pid,
-        contract=settings.contract,
+        contract=contract,
         candle_sec=int(settings.candle_sec),
         exit_min_hold_bars=int(settings.exit_min_hold_bars),
         exit_confirm_bars=int(settings.exit_confirm_bars),
@@ -236,9 +265,9 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     try:
         from trade_contract import exit_ema_span_from_window
 
-        span = exit_ema_span_from_window(settings.contract, int(settings.candle_sec))
+        span = exit_ema_span_from_window(contract, int(settings.candle_sec))
         alpha = 2.0 / float(span + 1) if span > 0 else 0.0
-        offset = float(getattr(settings.contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
+        offset = float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
         close = df["close"].to_numpy(np.float64, copy=False)
         idx = pd.to_datetime(df.index)
         for t in res.trades:
@@ -274,9 +303,9 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             save_path=settings.plot_out,
             show=True,
             ema_exit=ema_exit,
-            plot_probs=False,
+            plot_probs=True,
             plot_signals=False,
-            plot_candles=False,
+            plot_candles=bool(settings.plot_candles),
         )
 
 

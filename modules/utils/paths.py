@@ -35,6 +35,11 @@ def models_root() -> Path:
     return workspace_root() / "models_sniper"
 
 
+def models_root_for_asset(asset_class: str | None = None) -> Path:
+    asset = (str(asset_class or os.getenv("SNIPER_ASSET_CLASS", "crypto")) or "crypto").strip().lower()
+    return models_root() / asset
+
+
 def storage_root() -> Path:
     """
     Pasta externa para artefatos grandes (cache, etc.) fora do repo/pasta tradebot.
@@ -119,6 +124,7 @@ __all__ = [
     "repo_root",
     "workspace_root",
     "models_root",
+    "models_root_for_asset",
     "storage_root",
     "cache_sniper_root",
     "generated_root",

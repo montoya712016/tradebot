@@ -22,6 +22,7 @@ def _add_repo_paths() -> None:
 _add_repo_paths()
 
 from train.train_sniper_wf import TrainSniperWFSettings, run  # type: ignore
+from train.sniper_trainer import DEFAULT_ENTRY_PARAMS  # type: ignore
 from train.sniper_trainer import DEFAULT_STOCKS_SYMBOLS_FILE  # type: ignore
 from stocks.trade_contract import DEFAULT_TRADE_CONTRACT as STOCKS_CONTRACT  # type: ignore
 
@@ -34,6 +35,14 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name, "")
+    try:
+        return float(v) if v else float(default)
+    except Exception:
+        return float(default)
+
+
 def main() -> None:
     # Defaults mais leves para ações (histórico muito maior que crypto)
     os.environ.setdefault("SNIPER_CACHE_WORKERS", "8")
@@ -42,6 +51,9 @@ def main() -> None:
     os.environ.setdefault("SNIPER_FEATURE_TIMINGS", "1")
     # Força driver C do MySQL (mais rápido) a menos que o usuário sobrescreva
     os.environ.setdefault("PF_FORCE_DRIVER", "cext")
+    # Cap por símbolo (stocks) para aplicar sampling com razão neg/pos
+    os.environ.setdefault("SNIPER_SYMBOL_CAP_MIN", "5000")
+    os.environ.setdefault("SNIPER_SYMBOL_CAP_MAX", "50000")
 
     total_days = _env_int("STK_TOTAL_DAYS", 0)  # 0 => todo o histórico disponível
     offsets_step = _env_int("STK_OFFSETS_STEP_DAYS", 180)
@@ -49,7 +61,11 @@ def main() -> None:
     max_symbols = _env_int("STK_MAX_SYMBOLS", 0)  # 0 => todos os símbolos
     min_used = _env_int("STK_MIN_SYMBOLS_USED_PER_PERIOD", 30)
     max_rows_entry = _env_int("STK_MAX_ROWS_ENTRY", 6_000_000)
+    entry_ratio = _env_float("STK_ENTRY_RATIO_NEG_PER_POS", 6.0)
     symbols_file = os.getenv("STK_SYMBOLS_FILE", "").strip() or str(DEFAULT_STOCKS_SYMBOLS_FILE)
+
+    metric_mode = os.getenv("STK_ENTRY_METRIC_MODE", "aucpr").strip() or "aucpr"
+    entry_params = dict(DEFAULT_ENTRY_PARAMS)
 
     settings = TrainSniperWFSettings(
         asset_class="stocks",
@@ -61,6 +77,9 @@ def main() -> None:
         max_symbols=max_symbols,
         min_symbols_used_per_period=min_used,
         max_rows_entry=max_rows_entry,
+        entry_ratio_neg_per_pos=entry_ratio,
+        entry_params=entry_params,
+        entry_metric_mode=metric_mode,
     )
     run_dir = run(settings)
     print(f"[train-wf-stocks] run_dir: {run_dir}", flush=True)

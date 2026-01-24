@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import asdict
 from typing import Any
 
 from flask import Flask, jsonify, render_template, request
 
 from .dashboard_state import DemoStateGenerator, StateStore, create_demo_state
+
+# OHLC helpers (opcionais)
+try:  # pragma: no cover - dependência dinâmica
+    from prepare_features.data import load_ohlc_1m_series
+except Exception:  # pragma: no cover
+    load_ohlc_1m_series = None  # type: ignore
+try:  # pragma: no cover
+    import pandas as pd
+except Exception:  # pragma: no cover
+    pd = None  # type: ignore
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -69,10 +80,59 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
             }
         )
 
+    @app.get("/api/ohlc_window")
+    def api_ohlc_window() -> Any:
+        """
+        Retorna OHLC+EMA para um símbolo.
+        Params:
+        - symbol (obrigatório)
+        - end_ms (epoch ms, opcional; default=agora)
+        - lookback_min (minutos, opcional; default=30)
+        """
+        if load_ohlc_1m_series is None or pd is None:
+            return jsonify({"ok": False, "error": "ohlc_loader_unavailable"}), 500
+        sym = (request.args.get("symbol") or "").upper().strip()
+        if not sym:
+            return jsonify({"ok": False, "error": "symbol_required"}), 400
+        try:
+            end_ms = int(request.args.get("end_ms") or int(pd.Timestamp.utcnow().value // 1_000_000))
+        except Exception:
+            end_ms = int(pd.Timestamp.utcnow().value // 1_000_000)
+        try:
+            lookback_min = int(request.args.get("lookback_min") or 30)
+        except Exception:
+            lookback_min = 30
+        start_ms = end_ms - max(1, lookback_min) * 60_000
+        days = max(1, int((lookback_min / 1440.0) + 2))
+        df = load_ohlc_1m_series(sym, days, remove_tail_days=0)
+        if df is None or df.empty:
+            return jsonify({"ok": False, "error": "no_data"}), 404
+        df = df[(df.index.view("int64") // 1_000_000 >= start_ms) & (df.index.view("int64") // 1_000_000 <= end_ms)]
+        if df.empty:
+            # fallback: usa os últimos 120 candles disponíveis
+            df = load_ohlc_1m_series(sym, days, remove_tail_days=0)
+            if df is None or df.empty:
+                return jsonify({"ok": False, "error": "no_data_in_range"}), 404
+            df = df.sort_index().tail(120)
+        df = df.sort_index()
+        df["ema_trend"] = df["close"].ewm(span=55, adjust=False).mean()
+        payload = [
+            {
+                "ts": int(ts.value // 1_000_000),
+                "open": float(r.open),
+                "high": float(r.high),
+                "low": float(r.low),
+                "close": float(r.close),
+                "volume": float(r.volume),
+                "ema": float(r.ema_trend),
+            }
+            for ts, r in df.iterrows()
+        ]
+        return jsonify({"ok": True, "symbol": sym, "data": payload})
+
     # Só pra evitar "unused variable" e deixar explícito:
     _ = asdict  # noqa: F841
     _ = _bool_env  # noqa: F841
     _ = demo_gen  # noqa: F841
 
     return app, store
-

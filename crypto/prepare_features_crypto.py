@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import os
+import pandas as pd
 
 
 def _add_repo_paths() -> None:
@@ -29,6 +30,8 @@ from modules.prepare_features.prepare_features import run_from_flags_dict
 from modules.prepare_features.data import load_ohlc_1m_series, to_ohlc_from_1m
 from modules.prepare_features import pf_config as cfg
 from modules.prepare_features import features as featmod
+from modules.prepare_features.plotting import plot_all
+from modules.prepare_features.feature_studio import render_feature_studio
 from crypto.trade_contract import DEFAULT_TRADE_CONTRACT as CRYPTO_CONTRACT
 from modules.prepare_features.prepare_features import (
     DEFAULT_SYMBOL,
@@ -114,6 +117,173 @@ def _apply_crypto_windows() -> None:
             setattr(featmod, key, tuple(val))
 
 
+def _build_panels_from_flags(flags: dict[str, bool]) -> list[str]:
+    panels = ["candles"]
+    if flags.get("shitidx"):
+        panels.append("shitidx")
+    if flags.get("keltner"):
+        panels.extend(["keltner_width", "keltner_center", "keltner_pos", "keltner_squeeze"])
+    if flags.get("atr"):
+        panels.append("atr")
+    if flags.get("rsi"):
+        panels.append("rsi")
+    if flags.get("slope"):
+        panels.append("slope")
+    if flags.get("vol"):
+        panels.append("vol")
+    if flags.get("ci"):
+        panels.append("ci")
+    if flags.get("cum_logret"):
+        panels.append("logret")
+    if flags.get("cci"):
+        panels.append("cci")
+    if flags.get("adx"):
+        panels.append("adx")
+    if flags.get("time_since"):
+        panels.extend(["pctmm", "timesince"])
+    if flags.get("zlog"):
+        panels.append("zlog")
+    if flags.get("slope_reserr"):
+        panels.append("slope_reserr")
+    if flags.get("vol_ratio"):
+        panels.append("vol_ratio")
+    if flags.get("regime"):
+        panels.append("regime")
+    if flags.get("liquidity"):
+        panels.append("liquidity")
+    if flags.get("rev_speed"):
+        panels.append("rev_speed")
+    if flags.get("vol_z"):
+        panels.append("vol_z")
+    if flags.get("shadow"):
+        panels.append("shadow")
+    if flags.get("range_ratio"):
+        panels.append("range_ratio")
+    if flags.get("runs"):
+        panels.append("runs")
+    if flags.get("hh_hl"):
+        panels.append("hh_hl")
+    if flags.get("ema_cross"):
+        panels.append("ema_conf")
+    if flags.get("breakout"):
+        panels.append("breakout")
+    if flags.get("mom_short"):
+        panels.append("mom_short")
+    if flags.get("wick_stats"):
+        panels.append("wick_stats")
+    if flags.get("label"):
+        panels.append("entry_weights")
+    return panels
+
+
+def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_sec: int, *, title: str = "Crypto Feature Studio") -> None:
+    flags_all = dict(flags)
+    for k in flags_all:
+        if k != "plot_candles":
+            flags_all[k] = True
+
+    fig = plot_all(
+        df,
+        flags_all,
+        candle_sec=int(candle_sec),
+        plot_candles=True,
+        show=False,
+        mark_gaps=True,
+        show_price_ema=True,
+        price_ema_span=30,
+    )
+    if fig is None:
+        return
+
+    for tr in fig.data:
+        name = str(getattr(tr, "name", "") or "")
+        if name not in {"candles", "ema_30"}:
+            tr.visible = False
+
+    panels = _build_panels_from_flags(flags_all)
+    panel_to_group = {
+        "candles": "price",
+        "shitidx": "shitidx",
+        "keltner_width": "keltner",
+        "keltner_center": "keltner",
+        "keltner_pos": "keltner",
+        "keltner_squeeze": "keltner",
+        "atr": "atr",
+        "rsi": "rsi",
+        "slope": "slope",
+        "vol": "vol",
+        "ci": "ci",
+        "logret": "cum_logret",
+        "cci": "cci",
+        "adx": "adx",
+        "pctmm": "time_since",
+        "timesince": "time_since",
+        "zlog": "zlog",
+        "slope_reserr": "slope_reserr",
+        "vol_ratio": "vol_ratio",
+        "regime": "regime",
+        "liquidity": "liquidity",
+        "rev_speed": "rev_speed",
+        "vol_z": "vol_z",
+        "shadow": "shadow",
+        "range_ratio": "range_ratio",
+        "runs": "runs",
+        "hh_hl": "hh_hl",
+        "ema_conf": "ema_cross",
+        "breakout": "breakout",
+        "mom_short": "mom_short",
+        "wick_stats": "wick_stats",
+        "entry_weights": "label",
+    }
+
+    trace_meta = []
+    for i, tr in enumerate(fig.data):
+        yaxis = getattr(tr, "yaxis", "y")
+        if isinstance(yaxis, str) and yaxis.startswith("y"):
+            try:
+                row = int(yaxis[1:]) if len(yaxis) > 1 else 1
+            except Exception:
+                row = 1
+        else:
+            row = 1
+        panel = panels[row - 1] if 0 <= row - 1 < len(panels) else "candles"
+        group = panel_to_group.get(panel, panel)
+        trace_meta.append(
+            {
+                "i": i,
+                "name": str(getattr(tr, "name", "") or ""),
+                "panel": panel,
+                "group": group,
+                "type": str(getattr(tr, "type", "")),
+                "yaxis": yaxis,
+            }
+        )
+
+    groups = {}
+    for tr in trace_meta:
+        if tr["group"] == "price":
+            continue
+        groups.setdefault(tr["group"], []).append(tr)
+
+    out_dir = Path(__file__).resolve().parents[1] / "data" / "generated" / "plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env_out = os.getenv("PF_CRYPTO_PLOT_OUT", "crypto_prepare_features.html")
+    out_path = Path(env_out)
+    if not out_path.is_absolute():
+        out_path = (out_dir / out_path).resolve()
+
+    render_feature_studio(
+        fig=fig,
+        panels=panels,
+        panel_to_group=panel_to_group,
+        trace_meta=trace_meta,
+        groups=groups,
+        title=title,
+        out_path=out_path,
+        open_browser=True,
+    )
+
+
 def main() -> None:
     _apply_crypto_windows()
     sym = os.getenv("PF_CRYPTO_SYMBOL", DEFAULT_SYMBOL).strip().upper()
@@ -151,15 +321,41 @@ def main() -> None:
 
     print(f"[crypto] símbolo={sym} dias={days} features_on={feats_on}", flush=True)
 
+    # Calcula todas as features para habilitar os controles, mas inicia os painéis ocultos.
+    flags_all = dict(flags)
+    for k in flags_all:
+        if k != "plot_candles":
+            flags_all[k] = True
+
     df = run_from_flags_dict(
         df_ohlc,
-        flags,
-        plot=True,
+        flags_all,
+        plot=False,
         u_threshold=float(DEFAULT_U_THRESHOLD),
         grey_zone=DEFAULT_GREY_ZONE,
-        show=True,
+        show=False,
         trade_contract=CRYPTO_CONTRACT,
+        mark_gaps=True,
     )
+    plot_days = int(os.getenv("PF_CRYPTO_PLOT_DAYS", "30") or 30)
+    df_plot = df
+    if plot_days > 0 and isinstance(df.index, pd.DatetimeIndex):
+        cutoff = df.index.max() - pd.Timedelta(days=plot_days)
+        df_plot = df.loc[df.index >= cutoff]
+    interactive = os.getenv("PF_CRYPTO_PLOT_INTERACTIVE", "1").strip().lower() not in {"0", "false", "no", "off"}
+    if interactive:
+        _plot_interactive_features(df_plot.copy(), flags, int(candle_sec), title=f"{sym} Feature Studio")
+    else:
+        plot_all(
+            df_plot,
+            flags,
+            candle_sec=int(candle_sec),
+            plot_candles=True,
+            show=True,
+            mark_gaps=True,
+            show_price_ema=True,
+            price_ema_span=30,
+        )
     try:
         print(f"OK: rows={len(df):,} | cols={len(df.columns):,}".replace(",", "."), flush=True)
     except Exception:

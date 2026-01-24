@@ -62,7 +62,7 @@ class NgrokConfig:
     domain: str = field(default_factory=lambda: _env_or_default("NGROK_DOMAIN", "astra-assistent.ngrok.app"))
     port: int = field(default_factory=lambda: int(_env_or_default("NGROK_PORT", "5000")))
     username: str = field(default_factory=lambda: _env_or_default("NGROK_BASIC_USER", "astra"))
-    password: str = field(default_factory=lambda: _env_or_default("NGROK_BASIC_PASS", "SenhaUltraSecreta!"))
+    password: str = field(default_factory=lambda: _env_or_default("NGROK_BASIC_PASS", "Peixe_2017."))
     authtoken: Optional[str] = field(default_factory=lambda: os.getenv("NGROK_AUTHTOKEN"))
 
     def build_command(self) -> list[str]:

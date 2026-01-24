@@ -6,14 +6,14 @@ Backtest WALK-FORWARD (portfolio multi-cripto) com taus base e opcional otimizac
 
 Objetivo:
 - Rodar um backtest por passos (step_days) ao longo de um range de anos
-- Usar os modelos wf_* para Entry/Danger (Exit via EMA)
-- Operar portfÃ³lio (capital compartilhado) com taus base: tau_entry/tau_danger/tau_exit
+- Usar os modelos wf_* apenas para Entry (Exit via EMA)
+- Operar portfÃ³lio (capital compartilhado) com taus base: tau_entry/tau_exit
 - Manter universo baseado em top_market_cap.txt, mas filtrar por "tem barras suficientes no step"
 - Mostrar progresso por passo (percentual do tempo do step processado)
 - Enviar Pushover a cada passo
 
 Executar:
-  python modules/backtest/wf_portfolio.py --run-dir D:/astra/models_sniper/wf_022 --tau-entry 0.80 --tau-danger 0.40 --tau-exit 0.85
+  python modules/backtest/wf_portfolio.py --run-dir D:/astra/models_sniper/wf_022 --tau-entry 0.80 --tau-exit 0.85
 """
 
 import sys
@@ -212,7 +212,6 @@ def _needed_feature_columns(periods) -> list[str]:
         cols.update([str(c) for c in (pm.entry_cols or [])])
         for v in (pm.entry_cols_map or {}).values():
             cols.update([str(c) for c in (v or [])])
-        cols.update([str(c) for c in (pm.danger_cols or [])])
         cols.update([str(c) for c in (getattr(pm, "exit_cols", None) or [])])
     return sorted(cols)
 
@@ -249,17 +248,16 @@ def _prepare_symbol_frame_for_window(
     if df.empty:
         return df
     try:
-        pe_map, pdg, _pex, _used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+        pe_map, _pdg, _pex, _used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
     except RuntimeError:
         return df.iloc[0:0].copy()
     df = df.copy()
     for name, w in _entry_specs_from_contract(contract):
         if name in pe_map:
             df[f"__p_entry_{int(w)}m"] = np.asarray(pe_map[name], dtype=np.float32)
-    df["__p_danger"] = np.asarray(pdg, dtype=np.float32)
     df["__period_id"] = np.asarray(pid, dtype=np.int16)
     # MantÃ©m somente OHLCV + colunas nÃ£o-cycle do Exit + colunas internas
-    keep: set[str] = {"open", "high", "low", "close", "volume", "__p_danger", "__period_id"}
+    keep: set[str] = {"open", "high", "low", "close", "volume", "__period_id"}
     for _, w in _entry_specs_from_contract(contract):
         keep.add(f"__p_entry_{int(w)}m")
     for pm in periods:
@@ -342,19 +340,25 @@ def _mk_progress_cb(step_start: pd.Timestamp, step_end: pd.Timestamp) -> Callabl
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", type=str, required=False, default=None)
+    ap.add_argument("--run-dir", type=str, required=False, default="D:/astra/models_sniper/crypto/wf_002")
     ap.add_argument("--symbols", type=str, default="", help="CSV. Se vazio, usa top_market_cap.txt")
     ap.add_argument("--max-symbols", type=int, default=0)
+    ap.add_argument(
+        "--min-market-cap",
+        type=float,
+        default=50_000_000,
+        help="Market cap mЧnimo (USD) para entrar no universo via top_market_cap.txt.",
+    )
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--years", type=int, default=6)
-    ap.add_argument("--step-days", type=int, default=90)
+    ap.add_argument("--step-days", type=int, default=180)
     # IMPORTANTE: para backtest "verÃ­dico" em 1m, use 1.
     # Valores >1 fazem downsample (ex.: 5 => ~5m) e alteram a escala temporal efetiva do sistema.
     ap.add_argument("--bar-stride", type=int, default=1)
     ap.add_argument("--refresh-cache", action="store_true")
+    ap.add_argument("--strict-cache-total-days", action="store_true")
 
-    ap.add_argument("--tau-entry", type=float, default=DEFAULT_THRESHOLD_OVERRIDES.tau_entry)
-    ap.add_argument("--tau-danger", type=float, default=DEFAULT_THRESHOLD_OVERRIDES.tau_danger)
+    ap.add_argument("--tau-entry", type=float, default=0.775)
     ap.add_argument("--tau-exit", type=float, default=DEFAULT_THRESHOLD_OVERRIDES.tau_exit)
 
     # Universo: usar histÃ³rico ao invÃ©s de sÃ³ o step atual (mais robusto)
@@ -370,7 +374,7 @@ def main() -> None:
     ap.add_argument(
         "--universe-history-days",
         type=int,
-        default=730,
+        default=455,
         help="Janela (dias) quando universe-history-mode=rolling. Ex.: 730 ~ 2 anos.",
     )
 
@@ -381,7 +385,7 @@ def main() -> None:
         default="none",
         choices=["none", "entry_grid"],
         help="Otimiza thresholds por step para aplicar no step seguinte. "
-        "'entry_grid' faz grid search apenas em tau_entry (tau_danger e tau_exit ficam fixos).",
+        "'entry_grid' faz grid search apenas em tau_entry (tau_exit fica fixo).",
     )
     ap.add_argument("--tau-opt-lookback-days", type=int, default=730, help="Janela histÃ³rica (dias) para otimizar tau (ex.: 730 ~ 2 anos).")
     ap.add_argument("--tau-opt-bar-stride", type=int, default=10, help="Downsample sÃ³ para otimizaÃ§Ã£o de tau (reduz custo).")
@@ -392,10 +396,10 @@ def main() -> None:
     ap.add_argument("--tau-opt-min-trades", type=int, default=20, help="Exige mÃ­nimo de trades no histÃ³rico para aceitar o tau Ã³timo.")
     ap.add_argument("--tau-opt-ewm-decay", type=float, default=0.80, help="Suaviza mudanÃ§as de tau entre steps (0..1).")
 
-    ap.add_argument("--max-positions", type=int, default=20)
-    ap.add_argument("--total-exposure", type=float, default=0.75)
-    ap.add_argument("--max-trade-exposure", type=float, default=0.10)
-    ap.add_argument("--min-trade-exposure", type=float, default=0.03)
+    ap.add_argument("--max-positions", type=int, default=22)
+    ap.add_argument("--total-exposure", type=float, default=0.90)
+    ap.add_argument("--max-trade-exposure", type=float, default=0.05)
+    ap.add_argument("--min-trade-exposure", type=float, default=0.04)
     ap.add_argument("--exit-min-hold-bars", type=int, default=0)
     ap.add_argument("--exit-confirm-bars", type=int, default=2)
 
@@ -445,9 +449,9 @@ def main() -> None:
         default=0.0,
         help="Filtro opcional: score mÃ­nimo para entrar no universo do prÃ³ximo step (penaliza baixa atividade).",
     )
-    ap.add_argument("--universe-min-pf", type=float, default=1.0, help="Filtro principal: remove sÃ­mbolos com PF abaixo disso.")
-    ap.add_argument("--universe-min-win", type=float, default=0.30, help="Filtro opcional de win_rate (0..1).")
-    ap.add_argument("--universe-max-dd", type=float, default=1.0, help="Filtro opcional de drawdown (0..1).")
+    ap.add_argument("--universe-min-pf", type=float, default=1.1, help="Filtro principal: remove sÃ­mbolos com PF abaixo disso.")
+    ap.add_argument("--universe-min-win", type=float, default=0.40, help="Filtro opcional de win_rate (0..1).")
+    ap.add_argument("--universe-max-dd", type=float, default=0.8, help="Filtro opcional de drawdown (0..1).")
     ap.add_argument(
         "--universe-min-active",
         type=int,
@@ -461,7 +465,7 @@ def main() -> None:
     ap.add_argument(
         "--step-cache-mode",
         type=str,
-        default="auto",
+        default="memory",
         choices=["auto", "disk", "memory"],
         help="Como armazenar dataset por step. 'auto' tenta disco e faz fallback para memÃ³ria se faltar espaÃ§o.",
     )
@@ -469,6 +473,7 @@ def main() -> None:
     ap.add_argument("--pushover-user-env", type=str, default="PUSHOVER_USER_KEY")
     ap.add_argument("--pushover-token-env", type=str, default="PUSHOVER_TOKEN_TRADE")
     ap.add_argument("--pushover-title", type=str, default="tradebot WF backtest")
+    ap.add_argument("--pushover-steps", action="store_true", help="Envia Pushover a cada step (default: off).")
     ap.add_argument("--no-pushover", action="store_true")
     ap.add_argument("--out-dir", type=str, default="wf_backtest_fixed_tau")
     ap.add_argument("--no-plot", action="store_true", help="NÃ£o exibir/salvar grÃ¡fico ao final.")
@@ -481,6 +486,7 @@ def main() -> None:
     _set_thread_limits(int(getattr(args, "xgb_threads", 8) or 8))
 
     pushover_on = not bool(getattr(args, "no_pushover", False))
+    pushover_steps = bool(getattr(args, "pushover_steps", False))
     pushover_cfg = None
     if pushover_on and (_pushover_load_default is not None) and (_pushover_send is not None):
         try:
@@ -504,11 +510,12 @@ def main() -> None:
     # Auto-detect run_dir
     if args.run_dir is None:
         try:
+            asset = os.getenv("SNIPER_ASSET_CLASS", "crypto").strip().lower()
             paths_to_check = [
-                Path("D:/astra/models_sniper"),
-                Path(__file__).resolve().parents[2].parent / "models_sniper",
-                Path.cwd().parent / "models_sniper",
-                Path.cwd() / "models_sniper",
+                Path(f"D:/astra/models_sniper/{asset}"),
+                Path(__file__).resolve().parents[2].parent / "models_sniper" / asset,
+                Path.cwd().parent / "models_sniper" / asset,
+                Path.cwd() / "models_sniper" / asset,
             ]
             for models_root in paths_to_check:
                 if models_root.is_dir():
@@ -530,12 +537,16 @@ def main() -> None:
     total_days_cache = int(args.years) * 365 + int(args.step_days) * 2 + 60
     syms_arg = [s.strip().upper() for s in str(getattr(args, "symbols", "")).split(",") if s.strip()]
     if not syms_arg:
-        syms_arg = _list_cached_symbols()
-        if syms_arg:
-            print(f"[wf] symbols: cache={len(syms_arg)}", flush=True)
-        else:
-            syms_arg = load_top_market_cap_symbols(limit=int(args.limit) if int(args.limit) > 0 else None)
-            syms_arg = [s.strip().upper() for s in syms_arg if str(s).strip()]
+        syms_arg = load_top_market_cap_symbols(
+            limit=int(args.limit) if int(args.limit) > 0 else None,
+            min_cap=float(getattr(args, "min_market_cap", 0.0) or 0.0) or None,
+        )
+        syms_arg = [s.strip().upper() for s in syms_arg if str(s).strip()]
+        if not bool(getattr(args, "refresh_cache", False)):
+            cached = set(_list_cached_symbols())
+            if cached:
+                missing = [s for s in syms_arg if s not in cached]
+                print(f"[wf] symbols: total={len(syms_arg)} cache={len(cached)} missing={len(missing)}", flush=True)
     if int(args.max_symbols) > 0:
         syms_arg = syms_arg[: int(args.max_symbols)]
     if not syms_arg:
@@ -547,7 +558,7 @@ def main() -> None:
         contract=contract,
         flags=dict(GLOBAL_FLAGS_FULL, **{"_quiet": True}),
         refresh=bool(getattr(args, "refresh_cache", False)),
-        strict_total_days=True,
+        strict_total_days=bool(getattr(args, "strict_cache_total_days", False)),
         parallel=True,
         max_workers=32,
     )
@@ -567,11 +578,12 @@ def main() -> None:
                 pm.entry_model.set_param({"nthread": int(getattr(args, "xgb_threads", 8) or 8), "device": "cpu"})
             except Exception:
                 pass
-            if pm.danger_model is not None:
-                try:
-                    pm.danger_model.set_param({"nthread": int(getattr(args, "xgb_threads", 8) or 8), "device": "cpu"})
-                except Exception:
-                    pass
+            try:
+                pm.danger_model = None
+                pm.danger_cols = []
+                pm.danger_calib = {}
+            except Exception:
+                pass
             try:
                 em = getattr(pm, "exit_model", None)
                 if em is not None:
@@ -616,10 +628,8 @@ def main() -> None:
         raise RuntimeError("Sem janelas (windows=0).")
 
     tau_e = float(args.tau_entry)
-    tau_d = float(args.tau_danger)
     tau_x = float(args.tau_exit)
     tau_add = float(min(0.99, max(0.01, tau_e * 1.10)))
-    tau_dadd = float(min(0.99, max(0.01, tau_d * 0.90)))
 
     out_dir = resolve_generated_path(str(args.out_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -638,7 +648,7 @@ def main() -> None:
     if pushover_on:
         _notify(
             f"WF backtest iniciado: run={run_dir.name} steps={len(windows)} "
-            f"tau=(E{tau_e:.2f},D{tau_d:.2f},X{tau_x:.2f}) step={int(args.step_days)}d years={int(args.years)} syms={len(syms)}"
+            f"tau=(E{tau_e:.2f},X{tau_x:.2f}) step={int(args.step_days)}d years={int(args.years)} syms={len(syms)}"
         )
 
     # Equity contÃ­nua (stitch por multiplicaÃ§Ã£o)
@@ -690,7 +700,6 @@ def main() -> None:
 
         # taus "planejados" para o prÃ³ximo step (podem ser atualizados via tau-opt)
         tau_e_next = float(tau_e)
-        tau_d_next = float(tau_d)
         tau_x_next = float(tau_x)
         tau_opt_mode_step = str(getattr(args, "tau_opt_mode", "none") or "none").strip().lower()
         uni_hist_mode_step = str(getattr(args, "universe_history_mode", "step") or "step").strip().lower()
@@ -810,7 +819,6 @@ def main() -> None:
         sym_data: dict[str, SymbolData] = {}
         for sym, df in frames.items():
             try:
-                pdg = df["__p_danger"].to_numpy(np.float32, copy=False)
                 pid = df["__period_id"].to_numpy(np.int16, copy=False)
             except Exception:
                 continue
@@ -821,17 +829,18 @@ def main() -> None:
                     pe = df[col].to_numpy(np.float32, copy=False)
                     break
             if pe is None:
-                pe = pdg * 0.0
+                pe = np.zeros(int(len(df)), dtype=np.float32)
             n = int(len(df))
+            pdg = np.zeros(n, dtype=np.float32)
             sym_data[sym] = SymbolData(
                 df=df,
                 p_entry=pe,
                 p_danger=pdg,
                 p_exit=np.full(n, np.nan, dtype=np.float32),
                 tau_entry=float(tau_e),
-                tau_danger=float(tau_d),
                 tau_add=float(tau_add),
-                tau_danger_add=float(tau_dadd),
+                tau_danger=1.0,
+                tau_danger_add=1.0,
                 tau_exit=float(tau_x),
                 entry_windows_minutes=(int(entry_specs[0][1]),) if entry_specs else None,
                 period_id=pid,
@@ -880,7 +889,7 @@ def main() -> None:
                 min_trade_exposure=0.0,
                 exit_min_hold_bars=int(cfg.exit_min_hold_bars),
                 exit_confirm_bars=int(cfg.exit_confirm_bars),
-                rank_mode=str(getattr(cfg, "rank_mode", "p_entry_minus_p_danger")),
+                rank_mode=str(getattr(cfg, "rank_mode", "p_entry")),
             )
             pres_eval = simulate_portfolio(sym_data, cfg=cfg_eval, contract=contract, candle_sec=60)  # type: ignore[arg-type]
             eval_trades = list(getattr(pres_eval, "trades", []) or [])
@@ -1229,16 +1238,15 @@ def main() -> None:
                             continue
                         entry_specs = _entry_specs_from_contract(contract)
                         mid_w = int(entry_specs[0][1])
-                        need_cols = {"close", f"__p_entry_{mid_w}m", "__p_danger", "__period_id"}
+                        need_cols = {"close", f"__p_entry_{mid_w}m", "__period_id"}
                         if not need_cols.issubset(set(dfh.columns)):
                             continue
                         try:
                             pe = dfh[f"__p_entry_{mid_w}m"].to_numpy(np.float32, copy=False)
-                            pdg = dfh["__p_danger"].to_numpy(np.float32, copy=False)
                             pid = dfh["__period_id"].to_numpy(np.int16, copy=False)
                         except Exception:
                             continue
-                        base_frames[str(sym).upper()] = (dfh, pe, pdg, pid)
+                        base_frames[str(sym).upper()] = (dfh, pe, pid)
 
                     if base_frames:
                         # grid de tau_entry
@@ -1256,20 +1264,19 @@ def main() -> None:
                         for te in grid:
                             te = float(min(float(te_max), max(float(te_min), float(te))))
                             ta = float(min(0.99, max(0.01, te * 1.10)))
-                            tda = float(min(0.99, max(0.01, float(tau_d) * 0.90)))
 
                             sym_data_opt: dict[str, SymbolData] = {}
-                            for sym, (dfh, pe, pdg, pid) in base_frames.items():
+                            for sym, (dfh, pe, pid) in base_frames.items():
                                 n = int(len(dfh))
                                 sym_data_opt[sym] = SymbolData(
                                     df=dfh,
                                     p_entry=pe,
-                                    p_danger=pdg,
+                                    p_danger=np.zeros(n, dtype=np.float32),
                                     p_exit=np.full(n, np.nan, dtype=np.float32),
                                     tau_entry=float(te),
-                                    tau_danger=float(tau_d),
                                     tau_add=float(ta),
-                                    tau_danger_add=float(tda),
+                                    tau_danger=1.0,
+                                    tau_danger_add=1.0,
                                     tau_exit=float(tau_x),
                                     entry_windows_minutes=(int(entry_specs[0][1]),) if entry_specs else None,
                                     period_id=pid,
@@ -1388,10 +1395,8 @@ def main() -> None:
                 df_full["score_mode"] = str(getattr(args, "universe_score_mode", "log_pf_x_trades"))
                 # taus e modos (para auditoria / consistÃªncia)
                 df_full["tau_entry"] = float(tau_e)
-                df_full["tau_danger"] = float(tau_d)
                 df_full["tau_exit"] = float(tau_x)
                 df_full["tau_entry_next"] = float(tau_e_next)
-                df_full["tau_danger_next"] = float(tau_d_next)
                 df_full["tau_exit_next"] = float(tau_x_next)
                 df_full["tau_opt_mode"] = str(tau_opt_mode_step)
                 df_full["universe_history_mode"] = str(uni_hist_mode_step)
@@ -1428,10 +1433,8 @@ def main() -> None:
                     "filter_min_score",
                     "score_mode",
                     "tau_entry",
-                    "tau_danger",
                     "tau_exit",
                     "tau_entry_next",
-                    "tau_danger_next",
                     "tau_exit_next",
                     "tau_opt_mode",
                     "universe_history_mode",
@@ -1614,10 +1617,8 @@ def main() -> None:
             "symbols_step": int(len(syms_step)),
             "symbols_active": int(len(sym_data_active)),
             "tau_entry": float(tau_e),
-            "tau_danger": float(tau_d),
             "tau_exit": float(tau_x),
             "tau_entry_next": float(tau_e_next),
-            "tau_danger_next": float(tau_d_next),
             "tau_exit_next": float(tau_x_next),
             "tau_opt_mode": str(tau_opt_mode_step),
             "universe_history_mode": str(uni_hist_mode_step),
@@ -1637,12 +1638,12 @@ def main() -> None:
             f"syms_active={row['symbols_active']}/{row['symbols_step']}",
             flush=True,
         )
-        if pushover_on:
+        if pushover_on and pushover_steps:
             _notify(
                 f"WF step {step_idx+1}/{len(windows)}: ret={row['ret_pct']:+.2f}% dd={row['max_dd']:.0%} "
                 f"pf={row['profit_factor']:.2f} win={row['win_rate']:.2f} "
                 f"tr={row['trades']} syms_active={row['symbols_active']}/{row['symbols_step']} "
-                f"tau=(E{tau_e:.2f},D{tau_d:.2f},X{tau_x:.2f})"
+                f"tau=(E{tau_e:.2f},X{tau_x:.2f})"
             )
 
         # salva incremental
@@ -1653,16 +1654,14 @@ def main() -> None:
             eq_join.to_csv(out_dir / "wf_equity_curve.csv", index=True, encoding="utf-8")
 
         # aplica taus planejados (para o prÃ³ximo step)
-        if float(tau_e_next) != float(tau_e) or float(tau_d_next) != float(tau_d) or float(tau_x_next) != float(tau_x):
+        if float(tau_e_next) != float(tau_e) or float(tau_x_next) != float(tau_x):
             print(
                 f"[wf] taus_next aplicados: "
                 f"E {float(tau_e):.2f}->{float(tau_e_next):.2f} | "
-                f"D {float(tau_d):.2f}->{float(tau_d_next):.2f} | "
                 f"X {float(tau_x):.2f}->{float(tau_x_next):.2f}",
                 flush=True,
             )
         tau_e = float(tau_e_next)
-        tau_d = float(tau_d_next)
         tau_x = float(tau_x_next)
 
     print(f"\n[wf] concluÃ­do. out_dir={out_dir}", flush=True)

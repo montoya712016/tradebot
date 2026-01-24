@@ -79,7 +79,11 @@ class TrainSniperWFSettings:
     entry_ratio_neg_per_pos: float = 6.0
 
     # device
+
     xgb_device: str = "cuda:0"  # "cpu" se quiser forÃ§ar
+
+    # metrica de treino: "loss" (logloss) ou "aucpr"
+    entry_metric_mode: str = "loss"
 
     # thresholds são definidos manualmente em config/thresholds.py
     # params xgb
@@ -118,6 +122,12 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
 
     entry_params = dict(settings.entry_params)
     entry_params["device"] = settings.xgb_device
+    metric_mode = str(getattr(settings, "entry_metric_mode", "loss") or "loss").strip().lower()
+    if metric_mode in {"aucpr", "aucpr_weighted", "pr"}:
+        entry_params["eval_metric"] = "aucpr"
+    else:
+        entry_params["eval_metric"] = "logloss"
+    print(f"[train-wf] entry_metric={entry_params.get('eval_metric')}", flush=True)
     contract_obj = settings.contract or DEFAULT_TRADE_CONTRACT
 
     cfg = TrainConfig(

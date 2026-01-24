@@ -9,7 +9,7 @@ Notas:
 - NÃO versionar segredos (API key/senha). Use placeholders e preencha localmente.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -21,19 +21,24 @@ import sys
 import aiohttp
 import mysql.connector
 from mysql.connector import pooling
+from mysql.connector.errors import PoolError
+import threading
 
 # permitir rodar como script direto (sem PYTHONPATH)
 if __package__ in (None, ""):
     here = Path(__file__).resolve()
+    repo_root = here
     for p in here.parents:
-        if p.name.lower() == "modules":
-            sp = str(p)
-            if sp not in sys.path:
-                sys.path.insert(0, sp)
+        if p.name.lower() == "tradebot":
+            repo_root = p
             break
+    for cand in (repo_root, repo_root / "modules"):
+        sp = str(cand)
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
 
 try:
-    from config.symbols import default_top_market_cap_path
+    from modules.config.symbols import default_top_market_cap_path
 except Exception:
     from config.symbols import default_top_market_cap_path  # type: ignore[import]
 
@@ -81,7 +86,7 @@ class DownloadSettings:
     page_seconds: float = 2.0
 
     # DB
-    db: MySQLConfig = MySQLConfig()
+    db: MySQLConfig = field(default_factory=MySQLConfig)
 
 
 def _repo_root() -> Path:
@@ -224,6 +229,7 @@ class MySQLStore:
             self.pool = pooling.MySQLConnectionPool(pool_name="binance_pool", pool_size=int(cfg.pool_size), **cfg.__dict__)
         except Exception:
             self.pool = None
+        self.sem = threading.Semaphore(int(cfg.pool_size))
 
     def get_conn(self):
         if self.pool:
@@ -263,9 +269,21 @@ class MySQLStore:
     def insert_batch(self, sym: str, rows: List[Tuple]) -> int:
         if not rows:
             return 0
-        conn = self.get_conn()
-        cur = conn.cursor()
+        self.sem.acquire()
+        conn = None
+        cur = None
         try:
+            tries = 0
+            while True:
+                try:
+                    conn = self.get_conn()
+                    break
+                except PoolError:
+                    tries += 1
+                    if tries >= 5:
+                        raise
+                    time.sleep(0.2 * tries)
+            cur = conn.cursor()
             cur.executemany(
                 f"INSERT IGNORE INTO `{sym}` (dates, open_prices, high_prices, low_prices, closing_prices, volume) "
                 f"VALUES (%s,%s,%s,%s,%s,%s)",
@@ -274,8 +292,11 @@ class MySQLStore:
             conn.commit()
             return cur.rowcount
         finally:
-            cur.close()
-            conn.close()
+            if cur is not None:
+                cur.close()
+            if conn is not None:
+                conn.close()
+            self.sem.release()
 
 
 async def download_symbol(
@@ -423,8 +444,7 @@ async def amain(settings: DownloadSettings) -> None:
         return
 
     if not settings.api_key:
-        console.print("[red]API key vazia. Preencha DownloadSettings.api_key antes de rodar.[/]")
-        return
+        console.print("[yellow]API key vazia. Continuando sem chave (endpoint publico).[/]")
 
     console.print(f"[bold]Símbolos:[/] {len(symbols)}  •  Concurrency={settings.max_conc_requests}  •  Batch={settings.insert_batch_size}")
     console.print("[green]Iniciando downloads (INSERT DIRETO no MySQL)...[/]")
@@ -463,8 +483,16 @@ def run(settings: DownloadSettings | None = None) -> None:
 
 def main() -> None:
     # Edite aqui (sem ENV):
+    try:
+        from modules.config import secrets as _secrets
+    except Exception:
+        try:
+            from config import secrets as _secrets  # type: ignore[import]
+        except Exception:
+            _secrets = None
+    api_key = str(getattr(_secrets, "BINANCE_API_KEY", "") or "")
     settings = DownloadSettings(
-        api_key="",
+        api_key=api_key,
         quote_symbols_file="",  # "" => usa top_market_cap.txt
         db=MySQLConfig(host="localhost", user="root", password="2017", database="crypto"),
     )

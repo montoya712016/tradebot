@@ -55,12 +55,12 @@ except Exception:
 
 
 try:
-    from utils.paths import models_root as _models_root  # type: ignore
+    from utils.paths import models_root_for_asset as _models_root_for_asset  # type: ignore
 
-    SAVE_ROOT = _models_root()
+    SAVE_ROOT = _models_root_for_asset
 except Exception:
     # fallback antigo
-    SAVE_ROOT = Path(__file__).resolve().parents[2].parent / "models_sniper"
+    SAVE_ROOT = None
 DEFAULT_SYMBOLS_FILE = Path(__file__).resolve().parents[1] / "top_market_cap.txt"
 DEFAULT_STOCKS_SYMBOLS_FILE = Path(__file__).resolve().parents[2] / "data" / "generated" / "tiingo_universe_seed.txt"
 
@@ -425,7 +425,12 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         f"[sniper-train] símbolos={len(symbols)} asset={asset_class} (max_symbols={cfg.max_symbols})",
         flush=True,
     )
-    run_dir = _next_run_dir(SAVE_ROOT)
+    if SAVE_ROOT is None:
+        base_root = Path(__file__).resolve().parents[2].parent / "models_sniper"
+        save_root = base_root / asset_class
+    else:
+        save_root = SAVE_ROOT(asset_class)
+    run_dir = _next_run_dir(save_root)
     entry_params = dict(DEFAULT_ENTRY_PARAMS if cfg.entry_params is None else cfg.entry_params)
 
     def _default_feature_flags() -> dict:

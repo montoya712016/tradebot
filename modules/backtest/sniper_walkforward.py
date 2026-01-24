@@ -558,7 +558,7 @@ def simulate_sniper_from_scores(
             trigger = last_fill * (1.0 - float(contract.add_spacing_pct))
             if trigger > 0 and lo <= trigger:
                 next_size = size_sched[num_adds + 1]
-                risk_after = (total_size + next_size) * contract.sl_pct
+                risk_after = 0.0
                 if (
                     (pe >= pm.tau_add)
                     and (pdg < pm.tau_danger_add)

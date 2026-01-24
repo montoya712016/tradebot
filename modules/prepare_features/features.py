@@ -645,7 +645,7 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
     if missing:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", pd.errors.PerformanceWarning)
-            for c in missing: df[c] = np.nan
+            for c in missing: df.loc[:, c] = np.nan
 
     timings = {k: 0.0 for k in [
         "shitidx","atr","keltner","rsi","slope","vol","ci","cum_logret",
@@ -785,7 +785,7 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
                 atr_m = _rolling_mean_cached(tr, win)
                 width_pct = ((ema_c + 2.0*atr_m) - (ema_c - 2.0*atr_m)) / (close + eps) * 100.0
                 win_z = w(int(m * 2))
-                minp_z = max(win_z // 2, w(60))
+                minp_z = max(1, min(win_z, max(win_z // 2, w(60))))
                 mu = _rolling_mean_cached(width_pct, win_z, minp_z)
                 sd = _rolling_std_cached(width_pct, win_z, minp_z)
                 z = (width_pct - mu) / (sd + 1e-9)

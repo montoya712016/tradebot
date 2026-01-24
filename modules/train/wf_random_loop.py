@@ -91,11 +91,13 @@ def _max_drawdown(eq: np.ndarray) -> float:
 
 def _find_latest_wf_dir() -> Path | None:
     try:
-        from utils.paths import models_root as _models_root  # type: ignore
+        from utils.paths import models_root_for_asset as _models_root_for_asset  # type: ignore
 
-        models_root = _models_root().resolve()
+        asset = os.getenv("SNIPER_ASSET_CLASS", "crypto")
+        models_root = _models_root_for_asset(asset).resolve()
     except Exception:
-        models_root = (Path(__file__).resolve().parents[2].parent / "models_sniper").resolve()
+        asset = os.getenv("SNIPER_ASSET_CLASS", "crypto").strip().lower()
+        models_root = (Path(__file__).resolve().parents[2].parent / "models_sniper" / asset).resolve()
     if not models_root.is_dir():
         return None
     wf_list = sorted([p for p in models_root.glob("wf_*") if p.is_dir()], key=lambda p: p.stat().st_mtime)

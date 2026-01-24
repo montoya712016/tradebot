@@ -8,7 +8,7 @@
         <div>
           <h1 class="h4 mb-1">Painel em tempo real</h1>
           <div class="text-secondary small">
-            Posições, PnL, alocação e trades recentes (modo demo por enquanto).
+            Posições, PnL, alocação e trades reais (modo demo quando vazio).
           </div>
         </div>
         <div class="d-flex gap-2">
@@ -99,6 +99,26 @@
       </div>
     </div>
 
+    <!-- Equity History -->
+    <div class="col-12">
+      <div class="card card-glass">
+        <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
+          <div class="d-flex align-items-center justify-content-between">
+            <div class="fw-semibold">Evolução da carteira (USDT)</div>
+            <span class="badge text-bg-secondary" id="equity-badge">—</span>
+          </div>
+        </div>
+        <div class="card-body p-3">
+          <div class="chart-wrap">
+            <canvas id="equity-chart"></canvas>
+          </div>
+          <div class="text-secondary small mt-2">
+            Saldo total (cash + posições) ao longo do tempo.
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Allocation + Positions -->
     <div class="col-12 col-xl-5">
       <div class="card card-glass h-100">
@@ -149,8 +169,8 @@
     </div>
 
     <!-- Trades -->
-    <div class="col-12">
-      <div class="card card-glass">
+    <div class="col-12 col-xl-7">
+      <div class="card card-glass h-100">
         <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
           <div class="d-flex align-items-center justify-content-between">
             <div class="fw-semibold">Trades recentes</div>
@@ -176,6 +196,104 @@
         </div>
       </div>
     </div>
+
+    <!-- Feed status + Ranking de sinais -->
+    <div class="col-12 col-xl-5">
+      <div class="card card-glass h-100">
+        <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
+          <div class="d-flex align-items-center justify-content-between">
+            <div class="fw-semibold">Coleta de dados</div>
+            <span class="badge text-bg-secondary" id="feed-delay-badge">—</span>
+          </div>
+        </div>
+        <div class="card-body p-3">
+          <div class="d-flex flex-column gap-2 small">
+            <div class="d-flex justify-content-between">
+              <span>Último candle</span>
+              <span id="feed-last">—</span>
+            </div>
+            <div class="d-flex justify-content-between">
+              <span>Atraso estimado</span>
+              <span id="feed-delay">—</span>
+            </div>
+            <div class="d-flex justify-content-between">
+              <span>Mensagens WS</span>
+              <span id="feed-ws-msgs">—</span>
+            </div>
+            <div class="d-flex justify-content-between">
+              <span>Símbolos ativos</span>
+              <span id="feed-symbols">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12">
+      <div class="card card-glass">
+        <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
+          <div class="d-flex align-items-center justify-content-between">
+            <div class="fw-semibold">Sinais do modelo (ordenado por score)</div>
+            <span class="badge text-bg-secondary" id="signals-badge">—</span>
+          </div>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-head">
+                <tr>
+                  <th>Ativo</th>
+                  <th class="text-end">Score</th>
+                  <th class="text-end">Preço</th>
+                  <th class="text-end">Hora (UTC)</th>
+                </tr>
+              </thead>
+              <tbody id="signals-tbody"></tbody>
+            </table>
+          </div>
+          <div class="p-2 text-center">
+            <button class="btn btn-outline-secondary btn-sm" id="signals-load-more">Carregar mais</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detalhe do trade/sinal -->
+    <div class="col-12">
+      <div class="card card-glass">
+        <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
+          <div class="d-flex align-items-center justify-content-between">
+            <div class="fw-semibold">Detalhe do trade / sinal</div>
+            <span class="badge text-bg-secondary" id="trade-detail-badge">Selecione um trade ou símbolo</span>
+          </div>
+        </div>
+        <div class="card-body p-3">
+          <div class="d-flex flex-wrap gap-3 align-items-start">
+            <div class="flex-grow-1 chart-wrap" style="min-height: 320px;">
+              <div id="trade-chart"></div>
+            </div>
+            <div class="card card-glass shadow-sm" style="min-width: 260px;">
+              <div class="card-body p-3">
+                <div class="small text-secondary">Símbolo</div>
+                <div class="fw-semibold" id="trade-info-symbol">—</div>
+                <div class="small text-secondary mt-2">Lado</div>
+                <div class="fw-semibold" id="trade-info-side">—</div>
+                <div class="small text-secondary mt-2">Qtd</div>
+                <div class="fw-semibold" id="trade-info-qty">—</div>
+                <div class="small text-secondary mt-2">Preço entrada</div>
+                <div class="fw-semibold" id="trade-info-entry">—</div>
+                <div class="small text-secondary mt-2">Preço saída</div>
+                <div class="fw-semibold" id="trade-info-exit">—</div>
+                <div class="small text-secondary mt-2">PnL</div>
+                <div class="fw-semibold" id="trade-info-pnl">—</div>
+                <div class="small text-secondary mt-2">Hora</div>
+                <div class="fw-semibold" id="trade-info-time">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -185,6 +303,6 @@
 
 {% block scripts %}
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+  <script src="{{ url_for('static', filename='dashboard.js') }}?v=20260123d"></script>
 {% endblock %}
-

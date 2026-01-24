@@ -12,10 +12,6 @@ class TradeContract:
     """
 
     timeframe_sec: int = 60
-    tp_min_pct: float = 0.0
-    sl_pct: float = 0.0
-    timeout_hours: float = 0.0
-    min_hold_minutes: float = 0.0
     entry_label_windows_minutes: Tuple[int, ...] = (360,)
     entry_label_min_profit_pcts: Tuple[float, ...] = (0.02,)
     entry_label_weight_alpha: float = 0.01
@@ -39,21 +35,12 @@ class TradeContract:
     forbid_exit_on_gap: bool = False
     gap_hours_forbidden: float = 0.0
 
-    def timeout_bars(self, candle_sec: int) -> int:
-        if candle_sec <= 0:
-            candle_sec = self.timeframe_sec
-        bars = int(round((self.timeout_hours * 3600.0) / float(candle_sec)))
-        return max(1, bars)
-
     def danger_horizon_bars(self, candle_sec: int) -> int:
-        hours = self.danger_timeout_hours or self.timeout_hours
+        hours = self.danger_timeout_hours
+        if hours <= 0:
+            return 0
         bars = int(round((hours * 3600.0) / float(max(1, candle_sec))))
         return max(1, bars)
-
-    def min_hold_bars(self, candle_sec: int) -> int:
-        mins = float(self.min_hold_minutes or 0.0)
-        bars = int(round((mins * 60.0) / float(max(1, candle_sec))))
-        return max(0, bars)
 
 
 DEFAULT_TRADE_CONTRACT = TradeContract()

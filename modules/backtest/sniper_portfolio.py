@@ -10,7 +10,7 @@ Objetivo:
 - Aumentar exposição quando há poucas posições abertas e distribuir quando há muitas
 
 Estratégia (sem vazamento):
-- Em cada timestamp de sinal, ranqueia candidatos por um score contemporâneo (ex.: p_entry - p_danger)
+- Em cada timestamp de sinal, ranqueia candidatos por um score contemporâneo (ex.: p_entry)
 - Aceita até max_positions e respeita orçamento de exposição total (total_exposure)
 - Tamanho por trade é definido no momento da entrada usando apenas estado atual:
     desired = total_exposure / (open_positions + 1)
@@ -43,7 +43,7 @@ class PortfolioConfig:
     total_exposure: float = 1.0
     max_trade_exposure: float = 0.25
     min_trade_exposure: float = 0.02
-    rank_mode: str = "p_entry_minus_p_danger"
+    rank_mode: str = "p_entry"
     exit_min_hold_bars: int = 0
     exit_confirm_bars: int = 1
 
@@ -120,11 +120,9 @@ def _apply_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
 
 
 def _rank_score(p_entry: float, p_danger: float, mode: str) -> float:
-    if mode == "p_entry_minus_p_danger":
-        return float(p_entry) - float(p_danger)
     if mode == "p_entry":
         return float(p_entry)
-    return float(p_entry) - float(p_danger)
+    return float(p_entry)
 
 
 def _simulate_one_trade(
@@ -158,9 +156,8 @@ def _simulate_one_trade(
         pe0 = float(sd.p_entry[start_i]) if np.isfinite(sd.p_entry[start_i]) else 0.0
     else:
         pe0 = float(p_entry_override)
-    pd0 = float(sd.p_danger[start_i]) if np.isfinite(sd.p_danger[start_i]) else 1.0
     tau_entry_use = float(sd.tau_entry if tau_entry_override is None else tau_entry_override)
-    if not (pe0 >= float(tau_entry_use) and pd0 < float(sd.tau_danger)):
+    if not (pe0 >= float(tau_entry_use)):
         return None
 
     entry_i = int(start_i)
@@ -198,8 +195,6 @@ def _simulate_one_trade(
         hi = float(high[j]) if np.isfinite(high[j]) else px
         lo = float(low[j]) if np.isfinite(low[j]) else px
         time_in_trade = int(j - entry_i)
-        pdg = float(sd.p_danger[j]) if np.isfinite(sd.p_danger[j]) else 1.0
-
         if use_ema_exit:
             ema = ema + (ema_alpha * (px - ema))
             if px < ema:
@@ -218,12 +213,8 @@ def _simulate_one_trade(
             if trigger > 0.0 and lo <= trigger:
                 pe = float(sd.p_entry[j]) if np.isfinite(sd.p_entry[j]) else 0.0
                 next_size = float(size_sched[num_adds + 1])
-                risk_after = (total_size + next_size) * float(contract.sl_pct)
-                if (
-                    (pe >= float(sd.tau_add))
-                    and (pdg < float(sd.tau_danger_add))
-                    and (risk_after <= float(contract.risk_max_cycle_pct) + 1e-9)
-                ):
+                risk_after = 0.0
+                if (pe >= float(sd.tau_add)) and (risk_after <= float(contract.risk_max_cycle_pct) + 1e-9):
                     new_total = total_size + next_size
                     avg_price = (avg_price * total_size + trigger * next_size) / new_total
                     total_size = new_total
@@ -242,7 +233,7 @@ def _simulate_one_trade(
     r = (float(exit_px) / float(avg_price)) - 1.0
     r_net = float(r - costs)
 
-    score = _rank_score(pe0, pd0, mode="p_entry_minus_p_danger")
+    score = _rank_score(pe0, 0.0, mode="p_entry")
     return CandidateTrade(
         symbol="",
         entry_i=int(entry_i),
@@ -294,14 +285,13 @@ def simulate_portfolio(
         i = int(ptr[sym])
         while i < n:
             pe = float(sd.p_entry[i]) if np.isfinite(sd.p_entry[i]) else 0.0
-            pdg = float(sd.p_danger[i]) if np.isfinite(sd.p_danger[i]) else 1.0
             best_win = None
             if sd.entry_windows_minutes is not None and len(sd.entry_windows_minutes) > 0:
                 best_win = sd.entry_windows_minutes[0]
             ema_span = int(max(1, round((float(best_win or 0.0) * 60.0) / float(max(1, candle_sec))))) if best_win else 0
 
-            if (pe >= float(sd.tau_entry)) and (pdg < float(sd.tau_danger)):
-                sc = _rank_score(pe, pdg, cfg.rank_mode)
+            if pe >= float(sd.tau_entry):
+                sc = _rank_score(pe, 0.0, cfg.rank_mode)
                 ptr[sym] = i
                 return pd.to_datetime(idx[i]), float(sc), int(i), float(pe), float(sd.tau_entry), int(ema_span)
             i += 1

@@ -1695,11 +1695,12 @@ def main() -> None:
     if args.run_dir is None:
         try:
             # Tenta caminhos provÃ¡veis no seu ambiente (absolutos primeiro)
+            asset = os.getenv("SNIPER_ASSET_CLASS", "crypto").strip().lower()
             paths_to_check = [
-                Path("D:/astra/models_sniper"),
-                Path(__file__).resolve().parents[2].parent / "models_sniper",
-                Path.cwd().parent / "models_sniper",
-                Path.cwd() / "models_sniper"
+                Path(f"D:/astra/models_sniper/{asset}"),
+                Path(__file__).resolve().parents[2].parent / "models_sniper" / asset,
+                Path.cwd().parent / "models_sniper" / asset,
+                Path.cwd() / "models_sniper" / asset,
             ]
             
             for models_root in paths_to_check:

@@ -67,8 +67,15 @@ def _find_latest_wf_dir(run_dir: str | None) -> Path:
         if p.is_dir():
             return p
     # backtest -> modules -> repo_root(parent do repo) tem models_sniper/
-    repo_root = Path(__file__).resolve().parents[2]
-    models_root = (repo_root.parent / "models_sniper").resolve()
+    try:
+        from utils.paths import models_root_for_asset as _models_root_for_asset  # type: ignore
+
+        asset = os.getenv("SNIPER_ASSET_CLASS", "crypto")
+        models_root = _models_root_for_asset(asset).resolve()
+    except Exception:
+        asset = os.getenv("SNIPER_ASSET_CLASS", "crypto").strip().lower()
+        repo_root = Path(__file__).resolve().parents[2]
+        models_root = (repo_root.parent / "models_sniper" / asset).resolve()
     if models_root.is_dir():
         wf_list = sorted([p for p in models_root.glob("wf_*") if p.is_dir()], key=lambda p: p.stat().st_mtime)
         if wf_list:
