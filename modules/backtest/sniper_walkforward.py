@@ -50,8 +50,8 @@ class PeriodModel:
     train_end_utc: pd.Timestamp
     entry_model: xgb.Booster
     entry_models: dict[str, xgb.Booster]
-    danger_model: xgb.Booster | None
-    exit_model: xgb.Booster | None
+    danger_model: xgb.Booster | None  # legado (não usado)
+    exit_model: xgb.Booster | None  # legado (não usado)
     entry_cols: List[str]
     entry_cols_map: dict[str, List[str]]
     danger_cols: List[str]
@@ -131,32 +131,22 @@ def load_period_models(
             entry_calib_map["mid"] = dict(meta["entry"].get("calibration") or {"type": "identity"})
 
         entry_model = entry_models.get("mid") or list(entry_models.values())[0]
+        # modelos de danger/exit removidos (pipeline entry-only)
         danger_model = None
-        danger_path = pd_dir / "danger_model" / "model_danger.json"
-        if danger_path.exists():
-            danger_model = _load_booster(danger_path)
-        exit_path = pd_dir / "exit_model" / "model_exit.json"
-        exit_model = _load_booster(exit_path) if exit_path.exists() else None
+        exit_model = None
         entry_cols = list(meta["entry"]["feature_cols"])
-        danger_cols = list((meta.get("danger") or {}).get("feature_cols") or [])
-        exit_cols = list((meta.get("exit") or {}).get("feature_cols") or [])
+        danger_cols: list[str] = []
+        exit_cols: list[str] = []
         entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
-        danger_calib = dict((meta.get("danger") or {}).get("calibration") or {"type": "identity"})
-        exit_calib = dict((meta.get("exit") or {}).get("calibration") or {"type": "identity"})
+        danger_calib: dict = {}
+        exit_calib: dict = {}
         tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
-        tau_danger = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
-        tau_exit = DEFAULT_THRESHOLD_OVERRIDES.tau_exit
+        tau_danger = 1.0
+        tau_exit = 1.0
         if tau_entry is None:
             tau_entry = float(meta["entry"].get("threshold", 0.5))
-        if tau_danger is None:
-            tau_danger = float((meta.get("danger") or {}).get("threshold", 0.5))
-        if tau_exit is None:
-            tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
         tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
-        tau_danger_add = float(min(0.99, max(0.01, tau_danger * float(tau_danger_add_multiplier))))
-        if danger_model is None:
-            tau_danger = 1.0
-            tau_danger_add = 1.0
+        tau_danger_add = 1.0
         tau_entry_map = {"mid": float(tau_entry)}
 
         periods.append(
@@ -192,10 +182,7 @@ def apply_threshold_overrides(
     periods: List[PeriodModel],
     *,
     tau_entry: float | None = None,
-    tau_danger: float | None = None,
-    tau_exit: float | None = None,
     tau_add_multiplier: float = 1.10,
-    tau_danger_add_multiplier: float = 0.90,
 ) -> List[PeriodModel]:
     """
     Aplica overrides (simulação) em todos os períodos, mantendo consistência de thresholds derivados.
@@ -203,13 +190,7 @@ def apply_threshold_overrides(
     out: List[PeriodModel] = []
     for pm in periods:
         te = pm.tau_entry if tau_entry is None else float(tau_entry)
-        td = pm.tau_danger if tau_danger is None else float(tau_danger)
-        tx = pm.tau_exit if tau_exit is None else float(tau_exit)
         ta = float(min(0.99, max(0.01, te * float(tau_add_multiplier))))
-        tda = float(min(0.99, max(0.01, td * float(tau_danger_add_multiplier))))
-        if pm.danger_model is None:
-            td = 1.0
-            tda = 1.0
         tau_entry_map = dict(pm.tau_entry_map or {})
         if tau_entry is not None:
             tau_entry_map = {k: float(te) for k in (tau_entry_map.keys() or ["mid"])}
@@ -218,10 +199,7 @@ def apply_threshold_overrides(
                 pm,
                 tau_entry=float(te),
                 tau_entry_map=tau_entry_map,
-                tau_danger=float(td),
-                tau_exit=float(tx),
                 tau_add=float(ta),
-                tau_danger_add=float(tda),
             )
         )
     return out
@@ -259,9 +237,9 @@ def predict_scores_walkforward(
     idx = pd.to_datetime(df.index)
     n = len(idx)
     p_entry_map = {name: np.full(n, np.nan, dtype=np.float32) for name, _w in _entry_specs()}
-    p_danger = np.full(n, np.nan, dtype=np.float32)
-    # p_exit unused (mantido por compatibilidade).
-    p_exit = np.full(n, np.nan, dtype=np.float32)
+    p_danger = np.zeros(n, dtype=np.float32)  # danger removido
+    # p_exit removido (mantido nulo para compatibilidade)
+    p_exit = np.zeros(n, dtype=np.float32)
     period_id = np.full(n, -1, dtype=np.int16)
 
     used_any: PeriodModel | None = None
@@ -274,14 +252,7 @@ def predict_scores_walkforward(
             continue
         mask_np = np.asarray(mask, dtype=bool)
         rows = np.flatnonzero(mask_np)
-        if pm.danger_model is None:
-            pdg = np.zeros(rows.size, dtype=np.float32)
-        else:
-            X_d = _build_matrix_rows(df, pm.danger_cols, rows)
-            # IMPORTANT (XGBoost CUDA):
-            # `inplace_predict` com booster em CUDA e input numpy (CPU) gera warning
-            # "mismatched devices" e faz fallback interno. Usamos DMatrix direto.
-            pdg = pm.danger_model.predict(xgb.DMatrix(X_d), validate_features=False).astype(np.float32, copy=False)
+        pdg = np.zeros(rows.size, dtype=np.float32)
         # entry por janela
         for name, _w in _entry_specs():
             model = pm.entry_models.get(name, pm.entry_model)
@@ -291,7 +262,6 @@ def predict_scores_walkforward(
             calib = pm.entry_calib_map.get(name, pm.entry_calib)
             pe = _apply_calibration(pe.astype(np.float64), calib).astype(np.float32, copy=False)
             p_entry_map[name][rows] = pe
-        pdg = _apply_calibration(pdg.astype(np.float64), pm.danger_calib).astype(np.float32, copy=False)
         p_danger[rows] = pdg
         period_id[rows] = np.int16(pid)
         if used_any is None:
@@ -483,7 +453,6 @@ def simulate_sniper_from_scores(
         if not np.isfinite(px) or px <= 0.0:
             eq_curve[i] = eq
             continue
-        pdg = float(p_danger[i]) if np.isfinite(p_danger[i]) else 1.0
         pe = float(p_entry[i]) if np.isfinite(p_entry[i]) else 0.0
 
         if not in_pos:
@@ -491,7 +460,7 @@ def simulate_sniper_from_scores(
             if i + int(exit_min_hold) >= (n - 1):
                 eq_curve[i] = eq
                 continue
-            if (pe >= pm.tau_entry) and (pdg < pm.tau_danger):
+            if (pe >= pm.tau_entry):
                 in_pos = True
                 entry_i = i
                 entry_price = px
@@ -559,11 +528,7 @@ def simulate_sniper_from_scores(
             if trigger > 0 and lo <= trigger:
                 next_size = size_sched[num_adds + 1]
                 risk_after = 0.0
-                if (
-                    (pe >= pm.tau_add)
-                    and (pdg < pm.tau_danger_add)
-                    and (risk_after <= contract.risk_max_cycle_pct + 1e-9)
-                ):
+                if (pe >= pm.tau_add) and (risk_after <= contract.risk_max_cycle_pct + 1e-9):
                     new_total = total_size + next_size
                     avg_price = (avg_price * total_size + trigger * next_size) / new_total
                     total_size = new_total

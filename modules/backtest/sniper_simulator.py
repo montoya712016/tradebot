@@ -35,8 +35,8 @@ from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 class SniperModels:
     entry_model: "xgb.Booster"
     entry_models: Dict[str, "xgb.Booster"]
-    danger_model: "xgb.Booster | None"
-    exit_model: "xgb.Booster | None"
+    danger_model: "xgb.Booster | None"  # legado (não usado)
+    exit_model: "xgb.Booster | None"  # legado (não usado)
     entry_feature_cols: List[str]
     entry_feature_cols_map: Dict[str, List[str]]
     danger_feature_cols: List[str]
@@ -95,7 +95,6 @@ def load_sniper_models(
     period_days: int,
     *,
     tau_add_multiplier: float = 1.10,
-    tau_danger_add_multiplier: float = 0.90,
 ) -> SniperModels:
     """
     Carrega EntryScore e DangerScore + meta (features, calibração).
@@ -128,30 +127,23 @@ def load_sniper_models(
         entry_calib_map["mid"] = dict(meta["entry"].get("calibration") or {"type": "identity"})
 
     entry_model = entry_models.get("mid") or list(entry_models.values())[0]
-    danger_model = _load_booster(danger_path) if danger_path.exists() else None
-    exit_model = _load_booster(exit_path) if exit_path.exists() else None
+    danger_model = None
+    exit_model = None
 
     entry_cols = list(meta["entry"]["feature_cols"])
-    danger_cols = list((meta.get("danger") or {}).get("feature_cols") or [])
-    exit_cols = list((meta.get("exit") or {}).get("feature_cols") or [])
+    danger_cols: list[str] = []
+    exit_cols: list[str] = []
     entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
-    danger_calib = dict((meta.get("danger") or {}).get("calibration") or {"type": "identity"})
-    exit_calib = dict((meta.get("exit") or {}).get("calibration") or {"type": "identity"})
+    danger_calib: dict = {}
+    exit_calib: dict = {}
     tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
-    tau_danger = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
-    tau_exit = DEFAULT_THRESHOLD_OVERRIDES.tau_exit
+    tau_danger = 1.0
+    tau_exit = 1.0
     if tau_entry is None:
         tau_entry = float(meta["entry"].get("threshold", 0.5))
-    if tau_danger is None:
-        tau_danger = float((meta.get("danger") or {}).get("threshold", 0.5))
-    if tau_exit is None:
-        tau_exit = float((meta.get("exit") or {}).get("threshold", 1.0))
 
     tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
-    tau_danger_add = float(min(0.99, max(0.01, tau_danger * float(tau_danger_add_multiplier))))
-    if danger_model is None:
-        tau_danger = 1.0
-        tau_danger_add = 1.0
+    tau_danger_add = 1.0
     tau_entry_map = {"mid": float(tau_entry)}
     entry_windows = tuple(int(w) for _n, w in _entry_specs())
 

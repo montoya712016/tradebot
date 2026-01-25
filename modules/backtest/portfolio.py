@@ -137,12 +137,7 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
     run_dir = _find_latest_wf_dir(settings.run_dir)
     periods = load_period_models(run_dir)
     # aplica overrides globais (simulaÃ§Ã£o)
-    periods = apply_threshold_overrides(
-        periods,
-        tau_entry=DEFAULT_THRESHOLD_OVERRIDES.tau_entry,
-        tau_danger=DEFAULT_THRESHOLD_OVERRIDES.tau_danger,
-        tau_exit=DEFAULT_THRESHOLD_OVERRIDES.tau_exit,
-    )
+    periods = apply_threshold_overrides(periods, tau_entry=DEFAULT_THRESHOLD_OVERRIDES.tau_entry)
 
     symbols = [s.strip().upper() for s in (settings.symbols or []) if str(s).strip()]
     if not symbols:
@@ -220,7 +215,6 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
                     parallel=False,
                     refresh=True,
                 )
-            p_entry = select_entry_mid(p_entry_map)
                 p2 = cache_map2.get(sym)
                 if p2:
                     df_retry = pd.read_parquet(p2) if str(p2).lower().endswith(".parquet") else pd.read_pickle(p2)
@@ -238,6 +232,7 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
             except Exception as e2:
                 print(f"[scores] ERROR {sym}: {type(e2).__name__}: {e2} (skip)", flush=True)
                 continue
+        p_entry = select_entry_mid(p_entry_map)
         dt_sym = time.perf_counter() - t_sym
         # progresso: ajuda a entender "onde estÃ¡ travado"
         if (k <= 3) or (k == n_syms_total) or (k % 5 == 0):
@@ -248,14 +243,14 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
             p_danger=p_danger,
             p_exit=p_exit,
             tau_entry=float(used.tau_entry),
-            tau_danger=float(used.tau_danger),
+            tau_danger=1.0,
             tau_add=float(used.tau_add),
-            tau_danger_add=float(used.tau_danger_add),
-            tau_exit=float(getattr(used, "tau_exit", 1.0)),
+            tau_danger_add=1.0,
+            tau_exit=1.0,
             period_id=pid,
             periods=periods,
         )
-            p_entry = select_entry_mid(p_entry_map)
+        p_entry = select_entry_mid(p_entry_map)
 
     if not sym_data:
         raise RuntimeError("Nenhum sÃ­mbolo com dados suficientes para backtest")

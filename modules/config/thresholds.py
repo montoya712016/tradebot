@@ -20,9 +20,11 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ThresholdOverrides:
     tau_entry: float | None = 0.75
-    # danger desativado por enquanto (mantemos 1.0 para nÃ£o bloquear)
-    tau_danger: float | None = 1.0
-    tau_exit: float | None = 0.85
 
+    # Fallback para campos legados (danger/exit) que não são mais usados.
+    def __getattr__(self, name: str):
+        if name in {"tau_danger", "tau_exit", "tau_danger_add"}:
+            return 1.0
+        raise AttributeError(name)
 
 DEFAULT_THRESHOLD_OVERRIDES = ThresholdOverrides()

@@ -103,12 +103,21 @@
     <div class="col-12">
       <div class="card card-glass">
         <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
-          <div class="d-flex align-items-center justify-content-between">
+          <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
             <div class="fw-semibold">Evolução da carteira (USDT)</div>
             <span class="badge text-bg-secondary" id="equity-badge">—</span>
           </div>
         </div>
         <div class="card-body p-3">
+          <div class="d-flex justify-content-end mb-2">
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-secondary eq-range-btn" data-range="1d">1d</button>
+              <button type="button" class="btn btn-outline-secondary eq-range-btn" data-range="1w">1w</button>
+              <button type="button" class="btn btn-outline-secondary eq-range-btn" data-range="1m">1m</button>
+              <button type="button" class="btn btn-outline-secondary eq-range-btn" data-range="1y">1y</button>
+              <button type="button" class="btn btn-outline-secondary eq-range-btn" data-range="all">Tudo</button>
+            </div>
+          </div>
           <div class="chart-wrap">
             <canvas id="equity-chart"></canvas>
           </div>
@@ -245,6 +254,8 @@
                   <th>Ativo</th>
                   <th class="text-end">Score</th>
                   <th class="text-end">Preço</th>
+                  <th class="text-end">Range 24h (%)</th>
+                  <th class="text-end">Range 1h (%)</th>
                   <th class="text-end">Hora (UTC)</th>
                 </tr>
               </thead>
@@ -260,41 +271,55 @@
 
     <!-- Detalhe do trade/sinal -->
     <div class="col-12">
-      <div class="card card-glass">
-        <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
-          <div class="d-flex align-items-center justify-content-between">
-            <div class="fw-semibold">Detalhe do trade / sinal</div>
-            <span class="badge text-bg-secondary" id="trade-detail-badge">Selecione um trade ou símbolo</span>
-          </div>
-        </div>
-        <div class="card-body p-3">
-          <div class="d-flex flex-wrap gap-3 align-items-start">
-            <div class="flex-grow-1 chart-wrap" style="min-height: 320px;">
-              <div id="trade-chart"></div>
+        <div class="card card-glass">
+          <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3">
+            <div class="d-flex align-items-center justify-content-between">
+              <div class="fw-semibold">Detalhe do trade / sinal</div>
+              <div class="d-flex align-items-center gap-2">
+                <div class="btn-group btn-group-sm" role="group" aria-label="Lookback">
+                  <button type="button" class="btn btn-outline-secondary lookback-btn active" data-min="60">1h</button>
+                  <button type="button" class="btn btn-outline-secondary lookback-btn" data-min="240">4h</button>
+                  <button type="button" class="btn btn-outline-secondary lookback-btn" data-min="720">12h</button>
+                  <button type="button" class="btn btn-outline-secondary lookback-btn" data-min="1440">24h</button>
+                </div>
+                <span class="badge text-bg-secondary" id="trade-detail-badge">Selecione um trade ou símbolo</span>
+              </div>
             </div>
-            <div class="card card-glass shadow-sm" style="min-width: 260px;">
-              <div class="card-body p-3">
-                <div class="small text-secondary">Símbolo</div>
-                <div class="fw-semibold" id="trade-info-symbol">—</div>
-                <div class="small text-secondary mt-2">Lado</div>
-                <div class="fw-semibold" id="trade-info-side">—</div>
-                <div class="small text-secondary mt-2">Qtd</div>
-                <div class="fw-semibold" id="trade-info-qty">—</div>
-                <div class="small text-secondary mt-2">Preço entrada</div>
-                <div class="fw-semibold" id="trade-info-entry">—</div>
-                <div class="small text-secondary mt-2">Preço saída</div>
-                <div class="fw-semibold" id="trade-info-exit">—</div>
-                <div class="small text-secondary mt-2">PnL</div>
-                <div class="fw-semibold" id="trade-info-pnl">—</div>
-                <div class="small text-secondary mt-2">Hora</div>
-                <div class="fw-semibold" id="trade-info-time">—</div>
+          </div>
+          <div class="card-body p-3">
+            <div class="row g-3 align-items-start">
+              <div class="col-12 col-lg-8 mb-3 mb-lg-0">
+                <div class="chart-wrap" style="min-height: 420px; height: 420px;">
+                  <div id="trade-chart"></div>
+                </div>
+              </div>
+              <div class="col-12 col-lg-4">
+                <div class="card card-glass shadow-sm h-100">
+                  <div class="card-body p-3">
+                    <div class="small text-secondary">Símbolo</div>
+                    <div class="fw-semibold" id="trade-info-symbol">—</div>
+                    <div class="small text-secondary mt-2">Lado</div>
+                    <div class="fw-semibold" id="trade-info-side">—</div>
+                    <div class="small text-secondary mt-2">Qtd</div>
+                    <div class="fw-semibold" id="trade-info-qty">—</div>
+                    <div class="small text-secondary mt-2">Preço entrada</div>
+                    <div class="fw-semibold" id="trade-info-entry">—</div>
+                    <div class="small text-secondary mt-2">Preço saída</div>
+                    <div class="fw-semibold" id="trade-info-exit">—</div>
+                    <div class="small text-secondary mt-2">PnL</div>
+                    <div class="fw-semibold" id="trade-info-pnl">—</div>
+                    <div class="small text-secondary mt-2">Score</div>
+                    <div class="fw-semibold" id="trade-info-score">—</div>
+                    <div class="small text-secondary mt-2">Hora</div>
+                    <div class="fw-semibold" id="trade-info-time">—</div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </div>
     </div>
-  </div>
 
   <script>
     window.__INITIAL_STATE__ = {{ initial_state | tojson }};
@@ -304,5 +329,5 @@
 {% block scripts %}
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
-  <script src="{{ url_for('static', filename='dashboard.js') }}?v=20260123d"></script>
+  <script src="{{ url_for('static', filename='dashboard.js') }}?v=20260124e"></script>
 {% endblock %}

@@ -8,6 +8,12 @@ from typing import Any
 from flask import Flask, jsonify, render_template, request
 
 from .dashboard_state import DemoStateGenerator, StateStore, create_demo_state
+# trade contract (para EMA de saída)
+try:  # pragma: no cover
+    from trade_contract import DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
+except Exception:  # pragma: no cover
+    DEFAULT_TRADE_CONTRACT = None  # type: ignore
+    exit_ema_span_from_window = None  # type: ignore
 
 # OHLC helpers (opcionais)
 try:  # pragma: no cover - dependência dinâmica
@@ -115,7 +121,12 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                 return jsonify({"ok": False, "error": "no_data_in_range"}), 404
             df = df.sort_index().tail(120)
         df = df.sort_index()
-        df["ema_trend"] = df["close"].ewm(span=55, adjust=False).mean()
+        if (DEFAULT_TRADE_CONTRACT is not None) and (exit_ema_span_from_window is not None):
+            span = exit_ema_span_from_window(DEFAULT_TRADE_CONTRACT, 60)
+            offset = float(getattr(DEFAULT_TRADE_CONTRACT, "exit_ema_init_offset_pct", 0.0) or 0.0)
+        else:
+            span = 55
+            offset = 0.0
         payload = [
             {
                 "ts": int(ts.value // 1_000_000),
@@ -124,11 +135,18 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                 "low": float(r.low),
                 "close": float(r.close),
                 "volume": float(r.volume),
-                "ema": float(r.ema_trend),
             }
             for ts, r in df.iterrows()
         ]
-        return jsonify({"ok": True, "symbol": sym, "data": payload})
+        return jsonify(
+            {
+                "ok": True,
+                "symbol": sym,
+                "data": payload,
+                "ema_span": int(span),
+                "ema_offset_pct": float(offset),
+            }
+        )
 
     # Só pra evitar "unused variable" e deixar explícito:
     _ = asdict  # noqa: F841

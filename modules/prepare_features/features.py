@@ -1102,7 +1102,9 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         show_timings = bool(flags.get("feature_timings") or flags.get("_feature_timings"))
     except Exception:
         show_timings = False
-    if not (quiet_env or quiet_flag):
+    # evita poluir logs: só imprime se PF_QUIET desativado E PF_LOG_SUMMARY=1
+    log_summary = os.getenv("PF_LOG_SUMMARY", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    if log_summary and not (quiet_env or quiet_flag):
         if show_timings and extras:
             print(summary_line + "\n   • " + extras, flush=True)
         else:

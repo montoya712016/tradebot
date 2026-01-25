@@ -59,6 +59,11 @@
   let lastFeed = { last_ts_ms: null, ws_msgs: 0, symbols: 0 };
   let signalsCache = [];
   let signalsShown = 20;
+  let selectedLookbackMin = 60;
+  let selectedEqRange = "1d";
+  let lastChartUpdateMs = 0;
+  let lastChartKey = "";
+  let lastChartDataTs = 0;
 
   function tsMsToIso(ts) {
     if (!ts || isNaN(ts)) return "—";
@@ -128,6 +133,36 @@
     });
   }
 
+  function filterEquity(history, range) {
+    if (!history || !history.length) return { labels: [], values: [] };
+    const nowMs = Date.now();
+    let minMs = 0;
+    const DAY = 24 * 60 * 60 * 1000;
+    if (range === "1d") minMs = nowMs - DAY;
+    else if (range === "1w") minMs = nowMs - 7 * DAY;
+    else if (range === "1m") minMs = nowMs - 30 * DAY;
+    else if (range === "1y") minMs = nowMs - 365 * DAY;
+    const filtered = history.filter((p) => {
+      if (!p.ts_utc) return false;
+      const ms = Date.parse(p.ts_utc);
+      return isFinite(ms) && ms >= minMs;
+    });
+    const arr = filtered.length ? filtered : history;
+    return {
+      labels: arr.map((p) => utcTimeShort(p.ts_utc)),
+      values: arr.map((p) => Number(p.equity_usd || 0)),
+    };
+  }
+
+  function setEqRangeButtons(range) {
+    selectedEqRange = range;
+    document.querySelectorAll(".eq-range-btn").forEach((btn) => {
+      const val = btn.dataset.range;
+      if (val === selectedEqRange) btn.classList.add("active");
+      else btn.classList.remove("active");
+    });
+  }
+
   function ensureEquityChart(labels, values) {
     const canvas = document.getElementById("equity-chart");
     if (!canvas) return;
@@ -189,17 +224,29 @@
     });
   }
 
-  function renderTradeChart(symbol, data, entryPrice, exitPrice, side, scoreVal) {
+  function renderTradeChart(symbol, data, entryPrice, exitPrice, side, opts = {}) {
     const el = document.getElementById("trade-chart");
     if (!el || !data || !data.length) return;
+    lastChartDataTs = Math.max(...data.map((d) => Number(d.ts) || 0), 0);
     const ts = data.map((d) => new Date(d.ts).toISOString());
-    const hasScoreSeries = data.some((d) => d.score != null && !isNaN(d.score));
-    const scoreValNum = scoreVal != null && !isNaN(scoreVal) ? Number(scoreVal) : null;
-    const scoreSeries = hasScoreSeries
-      ? data.map((d) => Number(d.score || 0))
-      : scoreValNum != null
-      ? Array(ts.length).fill(scoreValNum)
-      : null;
+    const lows = data.map((d) => Number(d.low));
+    const highs = data.map((d) => Number(d.high));
+    const minLow = Math.min(...lows);
+    const maxHigh = Math.max(...highs);
+    const span = Math.max(1e-9, maxHigh - minLow);
+    const pad =
+      span === 0
+        ? Math.max(Math.abs(maxHigh) * 0.02, 0.0001)
+        : Math.max(span * 0.1, Math.abs(maxHigh) * 0.001); // padding para não achatar
+
+    const tickFmt =
+      maxHigh >= 100000
+        ? ",.0f"
+        : maxHigh >= 10000
+        ? ",.1f"
+        : maxHigh >= 1
+        ? ",.4f"
+        : ".6f";
 
     const fig = [
       {
@@ -213,31 +260,52 @@
         decreasing: { line: { color: "#ff5c7a" } },
         showlegend: false,
         name: symbol,
-        xaxis: "x",
-        yaxis: "y",
-      },
-      {
-        type: "scatter",
-        mode: "lines",
-        x: ts,
-        y: data.map((d) => d.ema),
-        line: { color: "#ffd166", width: 2 },
-        name: "EMA",
-        xaxis: "x",
-        yaxis: "y",
       },
     ];
 
-    if (scoreSeries && scoreSeries.length) {
+    if (entryPrice != null && !isNaN(entryPrice)) {
+      const span = Number(opts.emaSpan || 0);
+      const offsetPct = Number(opts.emaOffsetPct || 0);
+      const entryTsMs = opts.entryTsMs ? Number(opts.entryTsMs) : null;
+      const exitTsMs = opts.exitTsMs ? Number(opts.exitTsMs) : null;
+      if (entryTsMs == null) {
+        // sem ts de entrada não traçamos EMA para evitar série contínua errada
+        // eslint-disable-next-line no-unused-expressions
+        entryPrice = null;
+      }
+      const alpha = span > 0 ? 2.0 / (span + 1) : 0.0;
+      const emaSeries = new Array(data.length).fill(null);
+      let startIdx = 0;
+      if (entryTsMs) {
+        const foundIdx = data.findIndex((d) => Number(d.ts) >= entryTsMs);
+        if (foundIdx < 0) {
+          // entrada fora do range -> não plota EMA
+          entryPrice = null;
+        } else {
+          startIdx = foundIdx;
+        }
+      }
+      if (span > 0 && entryPrice != null) {
+        let emaVal = Number(entryPrice) * (1.0 - offsetPct);
+        for (let i = startIdx; i < data.length; i++) {
+          if (exitTsMs && Number(data[i].ts) > exitTsMs) break;
+          if (i === startIdx) {
+            emaSeries[i] = emaVal;
+            continue;
+          }
+          emaVal = emaVal + alpha * (Number(data[i].close) - emaVal);
+          emaSeries[i] = emaVal;
+        }
+      }
       fig.push({
         type: "scatter",
         mode: "lines",
         x: ts,
-        y: scoreSeries,
-        line: { color: "#61c0ff", width: 2 },
-        name: "Score",
-        xaxis: "x2",
-        yaxis: "y2",
+        y: emaSeries,
+        line: { color: "#ffd166", width: 2 },
+        name: "EMA",
+        showlegend: false,
+        connectgaps: false,
       });
     }
 
@@ -264,8 +332,7 @@
     }
 
     const layout = {
-      grid: { rows: 2, columns: 1, pattern: "independent", roworder: "top to bottom" },
-      margin: { l: 50, r: 20, t: 10, b: 70 },
+      margin: { l: 50, r: 20, t: 10, b: 50 },
       paper_bgcolor: "transparent",
       plot_bgcolor: "transparent",
       xaxis: {
@@ -273,33 +340,24 @@
         zeroline: false,
         color: "rgba(255,255,255,0.7)",
         rangeslider: { visible: false },
-        domain: [0, 1],
-        anchor: "y",
       },
       yaxis: {
         showgrid: true,
         gridcolor: "rgba(255,255,255,0.08)",
         color: "rgba(255,255,255,0.7)",
-        domain: [0.35, 1],
-      },
-      xaxis2: {
-        showgrid: false,
-        zeroline: false,
-        color: "rgba(255,255,255,0.7)",
-        anchor: "y2",
-        domain: [0, 1],
-        matches: "x",
-      },
-      yaxis2: {
-        showgrid: true,
-        gridcolor: "rgba(255,255,255,0.08)",
-        color: "rgba(255,255,255,0.7)",
-        domain: [0, 0.25],
-        title: "Score",
-        rangemode: "tozero",
-        zeroline: true,
+        autorange: false,
+        range: [minLow - pad, maxHigh + pad],
+        tickformat: tickFmt,
+        hoverformat: tickFmt,
+        fixedrange: false,
       },
       shapes,
+      legend: {
+        orientation: "h",
+        y: -0.25,
+        x: 0,
+        font: { color: "rgba(255,255,255,0.7)" },
+      },
     };
     Plotly.newPlot(el, fig, layout, { responsive: true, displayModeBar: false });
   }
@@ -312,6 +370,7 @@
   }
 
   function renderState(state) {
+    window.__LAST_STATE__ = state;
     const summary = (state && state.summary) || {};
     const positions = (state && state.positions) || [];
     const trades = (state && state.recent_trades) || [];
@@ -325,12 +384,28 @@
       symbols: feed.symbols || 0,
     };
     signalsCache = meta.signals || [];
-    // sempre recomeça mostrando 20 quando o snapshot muda
-    signalsShown = Math.min(20, signalsCache.length || 20);
+    // ajusta limite apenas se ficou maior que o tamanho atual
+    if (signalsShown > signalsCache.length) {
+      signalsShown = Math.min(signalsShown, signalsCache.length || 20);
+    }
+    // se um sinal estiver selecionado, sincroniza com os valores mais recentes
+    if (selectedSignal) {
+      const updated = signalsCache.find((s) => s.symbol === selectedSignal.symbol);
+      if (updated) {
+        const changed =
+          Number(updated.score || 0) !== Number(selectedSignal.score || 0) ||
+          Number(updated.ts_ms || 0) !== Number(selectedSignal.ts_ms || 0) ||
+          Number(updated.price || 0) !== Number(selectedSignal.price || 0);
+        selectedSignal = updated;
+        if (changed) {
+          loadSignalDetail(selectedSignal, true);
+        }
+      }
+    }
     // se o sinal selecionado não estiver mais na lista, limpa detalhes/plot
     if (
       selectedSignal &&
-      !signalsCache.find((s) => s.symbol === selectedSignal.symbol && String(s.ts_ms) === String(selectedSignal.ts_ms))
+      !signalsCache.find((s) => s.symbol === selectedSignal.symbol)
     ) {
       selectedSignal = null;
       clearTradeChart();
@@ -446,9 +521,8 @@
     ensureChart(labels, values);
 
     // equity chart
-    const eqLabels = equityHistory.map((p) => utcTimeShort(p.ts_utc));
-    const eqValues = equityHistory.map((p) => Number(p.equity_usd || 0));
-    ensureEquityChart(eqLabels, eqValues);
+    const eqFiltered = filterEquity(equityHistory, selectedEqRange);
+    ensureEquityChart(eqFiltered.labels, eqFiltered.values);
 
     // feed status
     const lastTsIso = feed.last_ts_ms ? tsMsToIso(feed.last_ts_ms) : "—";
@@ -480,17 +554,21 @@
       tr.dataset.price = s.price || "";
       tr.dataset.tsMs = s.ts_ms || "";
       tr.dataset.score = s.score || "";
+      tr.dataset.range24h = s.range_24h_pct || "";
+      tr.dataset.range1h = s.range_1h_pct || "";
       tr.innerHTML = `
         <td class="fw-semibold">${s.symbol || "—"}</td>
         <td class="text-end">${Number(s.score || 0).toFixed(4)}</td>
         <td class="text-end">${fmtUSD.format(Number(s.price || 0))}</td>
+        <td class="text-end">${s.range_24h_pct != null ? Number(s.range_24h_pct).toFixed(2) + "%" : "—"}</td>
+        <td class="text-end">${s.range_1h_pct != null ? Number(s.range_1h_pct).toFixed(2) + "%" : "—"}</td>
         <td class="text-end">${s.ts_ms ? utcTimeShort(tsMsToIso(s.ts_ms)) : "—"}</td>
       `;
       stt.appendChild(tr);
     }
     if (!slice.length) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td colspan="4" class="text-center text-secondary py-3">Sem sinais no momento</td>`;
+      tr.innerHTML = `<td colspan="6" class="text-center text-secondary py-3">Sem sinais no momento</td>`;
       stt.appendChild(tr);
     }
   }
@@ -508,6 +586,7 @@
     setText("trade-info-entry", "—");
     setText("trade-info-exit", "—");
     setText("trade-info-pnl", "—");
+    setText("trade-info-score", "—");
     setText("trade-info-time", "—");
   }
 
@@ -521,12 +600,8 @@
     try {
       const st = await fetchJson("/api/state");
       renderState(st);
-      // se houver trade selecionado, tenta re-renderizar detalhes com dados mais atuais
-      if (selectedTrade) {
-        await loadTradeDetail(selectedTrade, false);
-      } else if (selectedSignal) {
-        await loadSignalDetail(selectedSignal);
-      }
+      // refresh do gráfico só se passou tempo mínimo
+      maybeRefreshChart();
       setOnline(true);
       setBadge("health-badge", "OK", "success");
     } catch (e) {
@@ -547,7 +622,7 @@
     timer = null;
   }
 
-  async function loadTradeDetail(info, updateSelection = true) {
+  async function loadTradeDetail(info, updateSelection = true, force = false) {
     if (updateSelection) {
       selectedTrade = info;
       selectedSignal = null;
@@ -559,16 +634,24 @@
     setText("trade-info-entry", info.price ? fmtUSD.format(Number(info.price)) : "—");
     setText("trade-info-exit", info.exit_price ? fmtUSD.format(Number(info.exit_price)) : "—");
     setText("trade-info-pnl", info.pnl_usd ? fmtPnl(Number(info.pnl_usd)) : "—");
+    setText("trade-info-score", info.score != null ? Number(info.score).toFixed(4) : "—");
     setText("trade-info-time", info.entry_ts || info.exit_ts || "—");
 
-    const endMs = info.exit_ts
+    const endMsBase = info.exit_ts
       ? Date.parse(info.exit_ts)
       : info.entry_ts
       ? Date.parse(info.entry_ts) + 15 * 60 * 1000
       : Date.now();
+    // sempre inclui o instante atual para garantir que o range abranja o Ãºltimo candle
+    const endMs = Math.max(Date.now(), endMsBase || 0, Number(lastFeed.last_ts_ms || 0));
+    const chartKey = `${info.symbol}|${selectedLookbackMin}|${info.entry_ts || ""}|${info.exit_ts || ""}`;
+    const nowMs = Date.now();
+    if (!force && chartKey === lastChartKey && nowMs - lastChartUpdateMs < 2000 && lastFeed.last_ts_ms <= lastChartDataTs) {
+      return; // evita redesenho constante (mantém tooltip)
+    }
     try {
       const res = await fetchJson(
-        `/api/ohlc_window?symbol=${encodeURIComponent(info.symbol)}&end_ms=${endMs}`
+        `/api/ohlc_window?symbol=${encodeURIComponent(info.symbol)}&end_ms=${endMs}&lookback_min=${selectedLookbackMin}`
       );
       if (res && res.ok && res.data) {
         renderTradeChart(
@@ -577,37 +660,100 @@
           info.price ? Number(info.price) : null,
           info.exit_price ? Number(info.exit_price) : null,
           info.side || "",
-          info.score != null ? Number(info.score) : null
+          {
+            emaSpan: res.ema_span,
+            emaOffsetPct: res.ema_offset_pct,
+            entryTsMs: info.entry_ts ? Date.parse(info.entry_ts) : null,
+            exitTsMs: info.exit_ts ? Date.parse(info.exit_ts) : null,
+          }
         );
+        lastChartKey = chartKey;
+        lastChartUpdateMs = Date.now();
       }
     } catch (e) {
       // ignora falha de chart
     }
   }
 
-  async function loadSignalDetail(info) {
+  async function loadSignalDetail(info, force = false) {
     selectedSignal = info;
     selectedTrade = null;
-    setText("trade-detail-badge", info.symbol || "—");
-    setText("trade-info-symbol", info.symbol || "—");
-    setText("trade-info-side", "—");
-    setText("trade-info-qty", "—");
-    setText("trade-info-entry", info.price ? fmtUSD.format(Number(info.price)) : "—");
-    setText("trade-info-exit", "—");
-    setText("trade-info-pnl", "—");
-    setText("trade-info-time", info.ts_ms ? utcTimeShort(tsMsToIso(info.ts_ms)) : "—");
+    let detail = { ...info };
+    // tenta enriquecer com posição aberta ou último trade para habilitar EMA
+    const st = window.__LAST_STATE__ || {};
+    const positions = st.positions || [];
+    const trades = st.trades || [];
+    const openPos = positions.find((p) => (p.symbol || "").toUpperCase() === (info.symbol || "").toUpperCase());
+    const lastTrade = trades
+      .filter((t) => (t.symbol || "").toUpperCase() === (info.symbol || "").toUpperCase())
+      .sort((a, b) => Date.parse(b.entry_ts_utc || b.ts_utc || 0) - Date.parse(a.entry_ts_utc || a.ts_utc || 0))[0];
+    if (openPos) {
+      detail.side = openPos.side || detail.side;
+      detail.qty = openPos.qty || detail.qty;
+      detail.price = openPos.entry_price || detail.price;
+      detail.entry_ts = openPos.entry_ts_utc || detail.entry_ts;
+      detail.exit_price = null;
+      detail.exit_ts = null;
+    } else if (lastTrade) {
+      detail.side = lastTrade.side || lastTrade.action || detail.side;
+      detail.qty = lastTrade.qty || detail.qty;
+      detail.price = lastTrade.entry_price || lastTrade.price || detail.price;
+      detail.entry_ts = lastTrade.entry_ts_utc || lastTrade.ts_utc || detail.entry_ts;
+      detail.exit_price = lastTrade.exit_price || detail.exit_price;
+      detail.exit_ts = lastTrade.exit_ts_utc || detail.exit_ts;
+      detail.pnl_usd = lastTrade.pnl_usd || detail.pnl_usd;
+    }
+
+    setText("trade-detail-badge", detail.symbol || "—");
+    setText("trade-info-symbol", detail.symbol || "—");
+    setText("trade-info-side", detail.side || "—");
+    setText("trade-info-qty", detail.qty ? fmtNum.format(Number(detail.qty)) : "—");
+    setText("trade-info-entry", detail.price ? fmtUSD.format(Number(detail.price)) : "—");
+    setText("trade-info-exit", detail.exit_price ? fmtUSD.format(Number(detail.exit_price)) : "—");
+    setText("trade-info-pnl", detail.pnl_usd ? fmtPnl(Number(detail.pnl_usd)) : "—");
+    setText("trade-info-score", detail.score != null ? Number(detail.score).toFixed(4) : "—");
+    const tsLabel = detail.entry_ts || detail.exit_ts || (detail.ts_ms ? utcTimeShort(tsMsToIso(detail.ts_ms)) : "—");
+    setText("trade-info-time", tsLabel);
+
+    const chartKey = `${detail.symbol}|${selectedLookbackMin}|signal|${detail.entry_ts || detail.ts_ms || ""}|${detail.exit_ts || ""}`;
+    const nowMs = Date.now();
+    if (!force && chartKey === lastChartKey && nowMs - lastChartUpdateMs < 2000 && lastFeed.last_ts_ms <= lastChartDataTs) {
+      return;
+    }
     try {
-      const endMs = info.ts_ms || Date.now();
+      const endMsCandidates = [
+        detail.exit_ts ? Date.parse(detail.exit_ts) : 0,
+        detail.ts_ms || 0,
+        Number(lastFeed.last_ts_ms || 0),
+        Date.now(),
+      ].filter(Boolean);
+      const endMs = Math.max(...endMsCandidates, Date.now());
       let res = await fetchJson(
-        `/api/ohlc_window?symbol=${encodeURIComponent(info.symbol)}&end_ms=${endMs}&lookback_min=60`
+        `/api/ohlc_window?symbol=${encodeURIComponent(detail.symbol)}&end_ms=${endMs}&lookback_min=${selectedLookbackMin}`
       );
       if (!res || !res.ok || !res.data || !res.data.length) {
         res = await fetchJson(
-          `/api/ohlc_window?symbol=${encodeURIComponent(info.symbol)}&end_ms=${Date.now()}&lookback_min=120`
+          `/api/ohlc_window?symbol=${encodeURIComponent(detail.symbol)}&end_ms=${Date.now()}&lookback_min=${Math.max(120, selectedLookbackMin)}`
         );
       }
       if (res && res.ok && res.data) {
-        renderTradeChart(info.symbol, res.data, null, null, "", info.score != null ? Number(info.score) : null);
+        const entryTsMs = detail.entry_ts ? Date.parse(detail.entry_ts) : null;
+        const useEntryPrice = entryTsMs ? (detail.price ? Number(detail.price) : null) : null;
+        renderTradeChart(
+          detail.symbol,
+          res.data,
+          useEntryPrice,
+          detail.exit_price ? Number(detail.exit_price) : null,
+          detail.side || "",
+          {
+            emaSpan: res.ema_span,
+            emaOffsetPct: res.ema_offset_pct,
+            entryTsMs,
+            exitTsMs: detail.exit_ts ? Date.parse(detail.exit_ts) : null,
+          }
+        );
+        lastChartKey = chartKey;
+        lastChartUpdateMs = Date.now();
       }
     } catch (e) {
       // ignora falha de chart
@@ -621,6 +767,38 @@
     try {
       localStorage.setItem("astra-theme", next);
     } catch (e) {}
+  }
+
+  function setLookbackButtons(activeMin) {
+    selectedLookbackMin = Number(activeMin);
+    document.querySelectorAll(".lookback-btn").forEach((btn) => {
+      const val = Number(btn.dataset.min || 0);
+      if (val === selectedLookbackMin) {
+        btn.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+      }
+    });
+    // recarrega detalhe atual com novo lookback
+    if (selectedTrade) {
+      loadTradeDetail(selectedTrade, false, true);
+    } else if (selectedSignal) {
+      loadSignalDetail(selectedSignal, true);
+    }
+  }
+
+  function maybeRefreshChart() {
+    const nowMs = Date.now();
+    const stale = nowMs - lastChartUpdateMs > 5000;
+    if (selectedTrade) {
+      const force =
+        stale || Number(lastFeed.last_ts_ms || 0) > Number(lastChartDataTs || 0);
+      loadTradeDetail(selectedTrade, false, force);
+    } else if (selectedSignal) {
+      const force =
+        stale || Number(lastFeed.last_ts_ms || 0) > Number(lastChartDataTs || 0);
+      loadSignalDetail(selectedSignal, force);
+    }
   }
 
   function wireUI() {
@@ -699,11 +877,35 @@
         renderSignals();
       });
     }
+
+    document.querySelectorAll(".lookback-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const val = btn.dataset.min || "60";
+        setLookbackButtons(Number(val));
+      });
+    });
+
+    document.querySelectorAll(".eq-range-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const val = btn.dataset.range || "1d";
+        setEqRangeButtons(val);
+        // re-render equity chart com novo range
+        if (window.__LAST_STATE__) {
+          const hist = (window.__LAST_STATE__.equity_history || []).slice();
+          const eqFiltered = filterEquity(hist, selectedEqRange);
+          ensureEquityChart(eqFiltered.labels, eqFiltered.values);
+        }
+      });
+    });
   }
 
   // bootstrap
   wireUI();
+  // garante lookback default marcado
+  setLookbackButtons(selectedLookbackMin);
+  setEqRangeButtons(selectedEqRange);
   if (window.__INITIAL_STATE__) {
+    window.__LAST_STATE__ = window.__INITIAL_STATE__;
     renderState(window.__INITIAL_STATE__);
     setOnline(true);
     setBadge("health-badge", "OK", "success");
@@ -711,18 +913,5 @@
   refreshOnce();
   startPolling();
 
-  // atualiza delay do feed a cada segundo usando o last_ts_ms atual
-  setInterval(function () {
-    if (!lastFeed.last_ts_ms) return;
-    const nowSec = Date.now() / 1000;
-    const delay = Math.max(0, nowSec - Number(lastFeed.last_ts_ms) / 1000);
-    const delayStr = delay.toFixed(1) + "s";
-    setText("feed-delay", delayStr);
-    const badge = document.getElementById("feed-delay-badge");
-    if (badge) {
-      const cls = delay < 10 ? "success" : delay < 60 ? "warning" : "danger";
-      badge.className = "badge text-bg-" + cls;
-      badge.textContent = delayStr;
-    }
-  }, 1000);
+  // o delay do feed jÃ¡ Ã© atualizado em renderState; evitar segundo loop para nÃ£o ficar "piscando"
 })();

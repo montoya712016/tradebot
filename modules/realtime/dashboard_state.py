@@ -32,6 +32,9 @@ class Position:
     notional_usd: float
     pnl_usd: float
     pnl_pct: float
+    # timestamps opcional (compatibilidade com payload do bot)
+    entry_ts_utc: str | None = None
+    exit_ts_utc: str | None = None
 
 
 @dataclass
@@ -39,9 +42,15 @@ class Trade:
     ts_utc: str
     symbol: str
     action: str  # "BUY" | "SELL" | "CLOSE" | etc.
-    qty: float
-    price: float
+    qty: float | None
+    price: float | None
     pnl_usd: float | None = None
+    side: str | None = None
+    exit_price: float | None = None
+    pnl_pct: float | None = None
+    entry_ts_utc: str | None = None
+    exit_ts_utc: str | None = None
+    mode: str | None = None
 
 
 @dataclass
