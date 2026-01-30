@@ -28,7 +28,7 @@ except Exception:
         from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
     except Exception:
         from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
-from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
+from modules.config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 
 
 @dataclass

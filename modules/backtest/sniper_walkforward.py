@@ -29,7 +29,7 @@ from .sniper_simulator import (
     _apply_calibration,
     _finalize_monthly_returns,
 )
-from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
+from modules.config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 
 
 try:

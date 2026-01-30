@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import time
+from collections import deque
 from dataclasses import asdict
 from typing import Any
+from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
@@ -33,6 +36,26 @@ def _bool_env(name: str, default: bool = False) -> bool:
     v = v.strip().lower()
     return v in ("1", "true", "yes", "y", "on")
 
+def _read_sysmon_tail(path: Path, limit: int = 300) -> list[dict[str, Any]]:
+    if limit <= 0 or not path.exists():
+        return []
+    rows: deque[dict[str, Any]] = deque(maxlen=limit)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(rec, dict) and rec.get("ts_utc"):
+                    rows.append(rec)
+    except Exception:
+        return []
+    return list(rows)
+
 
 def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, StateStore]:
     app = Flask(
@@ -41,6 +64,7 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
         static_folder="static",
     )
     app.config["JSON_SORT_KEYS"] = False
+    sysmon_path = Path(os.getenv("SYS_MON_LOG_PATH", "data/sysmon.jsonl"))
 
     store = StateStore(create_demo_state())
     demo_gen: DemoStateGenerator | None = None
@@ -55,7 +79,16 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
 
     @app.get("/api/state")
     def api_state() -> Any:
-        return jsonify(store.get().to_dict())
+        st = store.get().to_dict()
+        meta = st.get("meta") or {}
+        system = meta.get("system") or {}
+        if not system:
+            tail = _read_sysmon_tail(sysmon_path, limit=1)
+            if tail:
+                meta = dict(meta)
+                meta["system"] = tail[-1]
+                st["meta"] = meta
+        return jsonify(st)
 
     @app.post("/api/update")
     def api_update() -> Any:
@@ -86,6 +119,16 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
             }
         )
 
+    @app.get("/api/system")
+    def api_system() -> Any:
+        try:
+            limit = int(request.args.get("limit", "300") or 300)
+        except Exception:
+            limit = 300
+        limit = max(1, min(2000, limit))
+        data = _read_sysmon_tail(sysmon_path, limit=limit)
+        return jsonify({"ok": True, "data": data})
+
     @app.get("/api/ohlc_window")
     def api_ohlc_window() -> Any:
         """
@@ -93,34 +136,53 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
         Params:
         - symbol (obrigatório)
         - end_ms (epoch ms, opcional; default=agora)
-        - lookback_min (minutos, opcional; default=30)
+        - lookback_min (minutos, opcional; default=30, max=1440)
         """
+        import time as _time
+        _t0 = _time.time()
+        print(f"[DEBUG] ohlc_window called: {request.args}")
+        
         if load_ohlc_1m_series is None or pd is None:
+            print("[DEBUG] ohlc_loader_unavailable")
             return jsonify({"ok": False, "error": "ohlc_loader_unavailable"}), 500
         sym = (request.args.get("symbol") or "").upper().strip()
         if not sym:
+            print("[DEBUG] symbol_required")
             return jsonify({"ok": False, "error": "symbol_required"}), 400
         try:
             end_ms = int(request.args.get("end_ms") or int(pd.Timestamp.utcnow().value // 1_000_000))
         except Exception:
             end_ms = int(pd.Timestamp.utcnow().value // 1_000_000)
         try:
-            lookback_min = int(request.args.get("lookback_min") or 30)
+            lookback_min = min(1440, max(1, int(request.args.get("lookback_min") or 30)))
         except Exception:
             lookback_min = 30
-        start_ms = end_ms - max(1, lookback_min) * 60_000
-        days = max(1, int((lookback_min / 1440.0) + 2))
+        print(f"[DEBUG] symbol={sym}, end_ms={end_ms}, lookback_min={lookback_min}")
+        start_ms = end_ms - lookback_min * 60_000
+        
+        # Calculate needed days based on start_ms relative to now
+        now_ms = int(_time.time() * 1000)
+        age_ms = now_ms - start_ms
+        days_needed = (age_ms / 86400_000.0) + 0.5 # margin
+        
+        # Carregar apenas o necessário + 1 dia extra
+        days = min(7, max(1, int(days_needed))) # Increased limit to 7 days, min 1
+        
+        print(f"[DEBUG] loading days={days} for sym={sym}")
         df = load_ohlc_1m_series(sym, days, remove_tail_days=0)
         if df is None or df.empty:
             return jsonify({"ok": False, "error": "no_data"}), 404
         df = df[(df.index.view("int64") // 1_000_000 >= start_ms) & (df.index.view("int64") // 1_000_000 <= end_ms)]
         if df.empty:
-            # fallback: usa os últimos 120 candles disponíveis
+            # fallback: usa os últimos candles disponíveis
             df = load_ohlc_1m_series(sym, days, remove_tail_days=0)
             if df is None or df.empty:
                 return jsonify({"ok": False, "error": "no_data_in_range"}), 404
-            df = df.sort_index().tail(120)
+            df = df.sort_index().tail(min(120, lookback_min))
         df = df.sort_index()
+        # Limita a 500 candles para performance
+        if len(df) > 500:
+            df = df.tail(500)
         if (DEFAULT_TRADE_CONTRACT is not None) and (exit_ema_span_from_window is not None):
             span = exit_ema_span_from_window(DEFAULT_TRADE_CONTRACT, 60)
             offset = float(getattr(DEFAULT_TRADE_CONTRACT, "exit_ema_init_offset_pct", 0.0) or 0.0)
@@ -138,6 +200,8 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
             }
             for ts, r in df.iterrows()
         ]
+        _elapsed = _time.time() - _t0
+        print(f"[DEBUG] ohlc_window returning {len(payload)} candles in {_elapsed:.3f}s")
         return jsonify(
             {
                 "ok": True,

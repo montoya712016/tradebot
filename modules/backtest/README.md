@@ -1,14 +1,17 @@
-### backtest/ - simuladores e entrypoints
+# modules/backtest
 
-Core:
-- `sniper_simulator.py`: backtest single-symbol (ciclo stateful) com Entry/Danger/Exit.
-- `sniper_portfolio.py`: backtest de portfolio multi-cripto (carteira unica).
-- `sniper_walkforward.py`: utilitarios walk-forward (carregar wf_*, scores, simulacao).
+Backtesting utilities for both single symbols and portfolios.
 
-Entrypoints principais:
-- `python modules/backtest/single_symbol.py`
-- `python modules/backtest/portfolio.py`
-- `python modules/backtest/wf_portfolio.py`
+## Key pieces
+- `portfolio_backtester.py` — multi‑symbol, capital‑aware executor; supports fee, slippage, position sizing, and walk‑forward style evaluation.
+- `single_symbol_bt.py` — fast single‑symbol simulation for debugging labels/thresholds.
+- `plot_equity.py` — helpers to plot equity curves and drawdowns.
+- `perf_metrics.py` — CAGR, max DD, Sharpe, hit‑rate, turnover, exposure stats.
 
-Core de simulacao:
-- `single_symbol.py`, `portfolio.py`
+## Typical use
+```bash
+python modules/backtest/single_symbol_bt.py --symbol BTCUSDT --threshold 0.7
+python modules/backtest/portfolio_backtester.py --config configs/bt_crypto.yml
+```
+
+Outputs (CSV/PNG) are written beside the config or to `data/generated/*` depending on the caller.

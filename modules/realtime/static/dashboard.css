@@ -13,6 +13,24 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.sticky-tabs {
+  position: sticky;
+  top: 0.75rem;
+  z-index: 1040;
+  padding-bottom: 0.35rem;
+  background: var(--bs-body-bg, #0b0e14);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+}
+
+#main-tabs .nav-link,
+#side-tabs .nav-link {
+  border-radius: 10px;
+}
+
+#side-tabs .nav-link {
+  text-align: left;
+}
+
 .card-glass {
   background: rgba(16, 19, 26, 0.6);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -87,6 +105,12 @@
   height: 260px;
 }
 
+tr.detail-row td {
+  padding: 0 !important;
+  border-top: none !important;
+  background: transparent !important;
+}
+
 [data-bs-theme="light"] .astra-body {
   background:
     radial-gradient(1200px 600px at 10% 10%, rgba(97, 87, 255, 0.18), transparent 60%),
@@ -106,3 +130,46 @@
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
 }
 
+/* Expanded chart row styles */
+.expanded-chart-row td {
+  padding: 0 !important;
+  border-top: none !important;
+  background: rgba(0, 0, 0, 0.25) !important;
+}
+
+.expanded-chart-row {
+  animation: slideDown 0.2s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+tr.row-expanded {
+  background: rgba(124, 92, 255, 0.15) !important;
+}
+
+tr.row-expanded td {
+  border-bottom-color: rgba(124, 92, 255, 0.4) !important;
+}
+
+[data-bs-theme="light"] .expanded-chart-row td {
+  background: rgba(0, 0, 0, 0.06) !important;
+}
+
+[data-bs-theme="light"] tr.row-expanded {
+  background: rgba(124, 92, 255, 0.1) !important;
+}
+
+/* Table row hover when clickable */
+.table tbody tr:not(.expanded-chart-row):hover {
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.04);
+}

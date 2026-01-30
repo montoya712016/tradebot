@@ -1,15 +1,17 @@
-### prepare_features/ - features + labels + plots (core)
+# modules/prepare_features
 
-Este modulo e responsavel por:
-- carregar series OHLC (MySQL)
-- calcular features (blocos em `features.py`)
-- gerar labels (Sniper) em `labels.py`
-- plotar/inspecionar em `plotting.py`
+Feature engineering and labeling pipeline for both crypto and stocks.
 
-Entrypoints:
-- `python modules/prepare_features/prepare_features.py`
-- `python modules/prepare_features/refresh_sniper_labels_in_cache.py`
+## Main scripts / modules
+- `feature_builder.py` — computes price/volume features, EMAs, ATR, ranges.
+- `label_maker.py` — generates forward‑return labels and meta info (hit windows).
+- `dataset_export.py` — writes training matrices to Parquet/CSV for model fitting.
+- `db_ops.py` — fetch/store OHLCV windows in MySQL; chunked to avoid RAM spikes.
 
-Notas:
-- `prepare_features.py` (neste modulo) e o orquestrador interno.
-- Flags de features ficam em `prepare_features.prepare_features.FLAGS` (e helpers `build_flags`).
+## Usage examples
+```bash
+python crypto/prepare_features_crypto.py      # uses these helpers
+python stocks/prepare_features_stocks.py      # same idea for equities
+```
+
+The outputs land in MySQL feature tables and `data/generated/` for training/backtests.

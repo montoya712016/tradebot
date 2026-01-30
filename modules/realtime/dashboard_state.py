@@ -39,15 +39,17 @@ class Position:
 
 @dataclass
 class Trade:
-    ts_utc: str
-    symbol: str
-    action: str  # "BUY" | "SELL" | "CLOSE" | etc.
-    qty: float | None
-    price: float | None
-    pnl_usd: float | None = None
-    side: str | None = None
+    ts_utc: str = ""
+    symbol: str = ""
+    action: str | None = None  # "BUY" | "SELL" | "CLOSE" | etc.
+    qty: float | None = None
+    price: float | None = None
+    entry_price: float | None = None
     exit_price: float | None = None
+    pnl_usd: float | None = None
     pnl_pct: float | None = None
+    side: str | None = None
+    status: str | None = None
     entry_ts_utc: str | None = None
     exit_ts_utc: str | None = None
     mode: str | None = None
@@ -118,7 +120,8 @@ class StateStore:
                     }
                 )
             # limita tamanho para evitar crescimento ilimitado
-            MAX_POINTS = 500
+            # 10080 = 1 semana de dados com intervalo de 1min
+            MAX_POINTS = 10080
             if len(hist_in) > MAX_POINTS:
                 hist_in = hist_in[-MAX_POINTS:]
 
