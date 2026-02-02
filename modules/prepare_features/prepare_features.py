@@ -19,7 +19,7 @@ except Exception:
     import sys
     import pathlib
 
-    # execução direta: precisamos que `modules/` esteja no sys.path para `import prepare_features...`
+    # execução direta: precisamos que repo_root e `modules/` estejam no sys.path
     _HERE = pathlib.Path(__file__).resolve()
     for _p in _HERE.parents:
         if _p.name.lower() == "modules":
@@ -27,6 +27,15 @@ except Exception:
             if _sp not in sys.path:
                 sys.path.insert(0, _sp)
             break
+    # adiciona repo_root para resolver imports como `core`
+    _repo_root = _HERE
+    for _p in _HERE.parents:
+        if _p.name.lower() == "tradebot":
+            _repo_root = _p
+            break
+    _rp = str(_repo_root)
+    if _rp not in sys.path:
+        sys.path.insert(0, _rp)
     from prepare_features import pf_config as cfg  # type: ignore[import]
     from prepare_features.features import make_features  # type: ignore[import]
     from prepare_features.labels import apply_trade_contract_labels  # type: ignore[import]
@@ -60,32 +69,32 @@ FLAGS_DEFAULT: Dict[str, bool] = default_flags(label=True)
 # Exemplo pronto (compatível com o estilo antigo) — pode importar direto como FLAGS
 FLAGS: Dict[str, bool] = {
     "shitidx":      True,
-    "atr":          False,
+    "atr":          True,
     "rsi":          True,
-    "slope":        False,
-    "vol":          False,
-    "ci":           False,
-    "cum_logret":   False,
-    "keltner":      False,
-    "cci":          False,
+    "slope":        True,
+    "vol":          True,
+    "ci":           True,
+    "cum_logret":   True,
+    "keltner":      True,
+    "cci":          True,
     "adx":          True,
-    "time_since":   False,
-    "zlog":         False,
-    "slope_reserr": False,
-    "vol_ratio":    False,
-    "regime":       False,
-    "liquidity":    False,
-    "rev_speed":    False,
-    "vol_z":        False,
-    "shadow":       False,
-    "range_ratio":  False,
-    "runs":         False,
-    "hh_hl":        False,
-    "ema_cross":    False,
-    "breakout":     False,
-    "mom_short":    False,
-    "wick_stats":   False,
-    "label":        False,
+    "time_since":   True,
+    "zlog":         True,
+    "slope_reserr": True,
+    "vol_ratio":    True,
+    "regime":       True,
+    "liquidity":    True,
+    "rev_speed":    True,
+    "vol_z":        True,
+    "shadow":       True,
+    "range_ratio":  True,
+    "runs":         True,
+    "hh_hl":        True,
+    "ema_cross":    True,
+    "breakout":     True,
+    "mom_short":    True,
+    "wick_stats":   True,
+    "label":        True,
     "plot_candles": True,
 }
 
@@ -96,7 +105,7 @@ FLAGS_LABEL_ONLY["plot_candles"] = False
 
 # Parâmetros padrão (somente MySQL)
 DEFAULT_SYMBOL: str = "ADAUSDT"
-DEFAULT_DAYS: int = 360
+DEFAULT_DAYS: int = 90
 DEFAULT_REMOVE_TAIL_DAYS: int = 0
 DEFAULT_CANDLE_SEC: int = 60
 DEFAULT_U_THRESHOLD: float = 0.0

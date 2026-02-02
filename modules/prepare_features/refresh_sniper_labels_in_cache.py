@@ -46,7 +46,24 @@ if _asset == "stocks":
     )
 else:
     from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract, exit_ema_span_from_window  # noqa: E402
+
+# Contrato padrão (crypto) alinhado com o treino atual
+ENTRY_LABEL_WINDOWS_MIN = (60,)
+ENTRY_LABEL_MIN_PROFIT_PCTS = (0.03,)
+ENTRY_LABEL_MAX_DD_PCTS = (0.03,)
+ENTRY_LABEL_WEIGHT_ALPHA = 0.5
+EXIT_EMA_INIT_OFFSET_PCT = 0.002
+
+if _asset != "stocks":
+    DEFAULT_TRADE_CONTRACT = TradeContract(
+        entry_label_windows_minutes=ENTRY_LABEL_WINDOWS_MIN,
+        entry_label_min_profit_pcts=ENTRY_LABEL_MIN_PROFIT_PCTS,
+        entry_label_max_dd_pcts=ENTRY_LABEL_MAX_DD_PCTS,
+        entry_label_weight_alpha=ENTRY_LABEL_WEIGHT_ALPHA,
+        exit_ema_init_offset_pct=EXIT_EMA_INIT_OFFSET_PCT,
+    )
 from config.symbols import default_top_market_cap_path, load_market_caps  # noqa: E402
+from utils.progress import ProgressPrinter  # noqa: E402
 from train.sniper_dataflow import _cache_dir, _cache_format, _symbol_cache_paths  # type: ignore  # noqa: E402
 from prepare_features.labels import apply_trade_contract_labels  # noqa: E402
 
@@ -127,12 +144,13 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
 
     symbols = [x.strip().upper() for x in (s.symbols or []) if str(x).strip()]
     if not symbols:
+        # crypto: prefer cache list (reflete exatamente o que já foi gerado)
         if asset_class == "stocks":
             symbols = _list_symbols_from_cache(cache_dir, fmt)
         else:
-            symbols = _select_symbols_by_market_cap(s)
+            symbols = _list_symbols_from_cache(cache_dir, fmt)
             if not symbols:
-                symbols = _list_symbols_from_cache(cache_dir, fmt)
+                symbols = _select_symbols_by_market_cap(s)
     if int(s.limit) > 0:
         symbols = symbols[: int(s.limit)]
 
@@ -155,52 +173,10 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
     ok = 0
     fail = 0
     total = len(symbols)
-    last_len = 0
-    last_progress_ts = 0.0
-
-    def _bar(done: int, total: int, width: int = 26) -> str:
-        total = max(1, int(total))
-        done = int(max(0, min(done, total)))
-        n = int(round(width * (done / total)))
-        return ("#" * n) + ("-" * (width - n))
-
-    def _fmt_eta(seconds: float) -> str:
-        if not np.isfinite(seconds) or seconds <= 0:
-            return "0s"
-        sec = int(round(seconds))
-        h = sec // 3600
-        m = (sec % 3600) // 60
-        s2 = sec % 60
-        if h > 0:
-            return f"{h}h{m:02d}m"
-        if m > 0:
-            return f"{m}m{s2:02d}s"
-        return f"{s2}s"
-
-    def _print_progress(current_sym: str) -> None:
-        nonlocal last_len
-        nonlocal last_progress_ts
-        done = ok + fail
-        pct = 100.0 * done / max(1, total)
-        elapsed = time.perf_counter() - t0
-        rate = elapsed / max(1, done)
-        eta = rate * max(0, total - done)
-        line = (
-            f"[labels-refresh] [{_bar(done, total)}] {done:>3}/{total:<3} "
-            f"{pct:5.1f}% ETA {_fmt_eta(eta)} | {current_sym}"
-        )
-        if sys.stderr.isatty():
-            sys.stderr.write("\r" + line + (" " * max(0, last_len - len(line))))
-            sys.stderr.flush()
-        else:
-            now = time.perf_counter()
-            if now - last_progress_ts >= 5.0:
-                print(line, flush=True)
-                last_progress_ts = now
-        last_len = max(last_len, len(line))
+    progress = ProgressPrinter(prefix="[labels-refresh]", total=total, stream=sys.stderr, print_every_s=5.0)
     for i, sym in enumerate(symbols, start=1):
         if s.verbose:
-            _print_progress(sym)
+            progress.update(ok + fail, suffix=sym)
         data_path, meta_path = _symbol_cache_paths(sym, cache_dir, fmt)
         if not data_path.exists():
             continue
@@ -215,9 +191,13 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
             # recalcula labels (somente sniper_*)
             df_lab = apply_trade_contract_labels(df[["close", "high", "low"]].copy(), contract=s.contract, candle_sec=int(s.candle_sec))
             cols = [
-                "sniper_entry_label",
-                "sniper_entry_weight",
+                "sniper_long_label",
+                "sniper_long_weight",
                 "sniper_mae_pct",
+                "sniper_long_ret_pct",
+                "sniper_short_label",
+                "sniper_short_weight",
+                "sniper_short_ret_pct",
                 "sniper_exit_code",
                 "sniper_exit_wait_bars",
             ]
@@ -226,9 +206,14 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
                 suf = f"{int(w)}m"
                 cols.extend(
                     [
-                        f"sniper_entry_label_{suf}",
-                        f"sniper_entry_weight_{suf}",
+                        f"sniper_long_label_{suf}",
+                        f"sniper_long_weight_{suf}",
                         f"sniper_mae_pct_{suf}",
+                        f"sniper_long_ret_pct_{suf}",
+                        f"sniper_short_label_{suf}",
+                        f"sniper_short_weight_{suf}",
+                        f"sniper_mae_pct_short_{suf}",
+                        f"sniper_short_ret_pct_{suf}",
                         f"sniper_exit_code_{suf}",
                         f"sniper_exit_wait_bars_{suf}",
                     ]
@@ -236,6 +221,11 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
             for c in cols:
                 if c in df_lab.columns:
                     df[c] = df_lab[c]
+            # remove colunas antigas/legadas
+            old_cols = [c for c in df.columns if str(c).startswith("sniper_entry_")]
+            old_cols.extend([c for c in df.columns if str(c).endswith("_short") and str(c).startswith("sniper_")])
+            if old_cols:
+                df.drop(columns=old_cols, inplace=True, errors="ignore")
 
             _atomic_save_df(df, data_path)
             # atualiza meta com um carimbo (opcional)
@@ -251,15 +241,14 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
 
             ok += 1
             if s.verbose:
-                _print_progress(sym)
+                progress.update(ok + fail, suffix=sym)
         except Exception as e:
             fail += 1
             print(f"[labels-refresh] FAIL {sym}: {type(e).__name__}: {e}", flush=True)
 
     dt = time.perf_counter() - t0
     if s.verbose:
-        sys.stderr.write("\n")
-        sys.stderr.flush()
+        progress.close()
     print(f"[labels-refresh] done ok={ok} fail={fail} sec={dt:.2f}", flush=True)
     return {
         "ok": int(ok),

@@ -29,8 +29,9 @@ def main() -> None:
     )
 
     contract = TradeContract(
-        entry_label_windows_minutes=(120,),
-        entry_label_min_profit_pcts=(0.032,),
+        entry_label_windows_minutes=(60,),
+        entry_label_min_profit_pcts=(0.03,),
+        entry_label_max_dd_pcts=(0.03,),
         entry_label_weight_alpha=0.5,
         exit_ema_span=120,
         exit_ema_init_offset_pct=0.002,

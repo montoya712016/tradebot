@@ -14,7 +14,12 @@ class TradeContract:
     timeframe_sec: int = 60
     entry_label_windows_minutes: Tuple[int, ...] = (360,)
     entry_label_min_profit_pcts: Tuple[float, ...] = (0.02,)
+    # Limite máximo de DD (em %) permitido dentro da janela para manter label=1
+    entry_label_max_dd_pcts: Tuple[float, ...] = ()
     entry_label_weight_alpha: float = 0.01
+    # Peso extra para negativos com queda abaixo do entry (multiplica por 1 + drop_pct * mult)
+    entry_label_weight_drop_mult: float = 1.0
+    entry_label_weight_drop_min_pct: float = 0.0
     exit_ema_span: int = 360
     exit_ema_init_offset_pct: float = 0.01
     fee_pct_per_side: float = 0.0005

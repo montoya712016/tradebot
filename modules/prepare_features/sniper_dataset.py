@@ -53,7 +53,7 @@ def _ensure_contract_labels(
     *,
     contract: TradeContract,
     candle_sec: int,
-    entry_label_col: str = "sniper_entry_label",
+    entry_label_col: str = "sniper_long_label",
     exit_code_col: str = "sniper_exit_code",
 ) -> None:
     cols_needed = {
@@ -71,7 +71,7 @@ def build_sniper_datasets(
     *,
     contract: TradeContract | None = None,
     candle_sec: int | None = None,
-    entry_label_col: str = "sniper_entry_label",
+    entry_label_col: str = "sniper_long_label",
     exit_code_col: str = "sniper_exit_code",
     max_add_starts: int = 20_000,
     max_exit_starts: int = 8_000,
@@ -84,7 +84,7 @@ def build_sniper_datasets(
 ) -> SniperDataset:
     """
     Constrói quatro dataframes:
-        - entry: todas as barras com label sniper_entry_label (fora de posição)
+        - entry: todas as barras com label sniper_long_label (fora de posição)
         - add: vazio (adds removidos)
         - danger: vazio (danger removido)
         - exit: vazio (exit model removido)

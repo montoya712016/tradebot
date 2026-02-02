@@ -37,6 +37,32 @@ FEATURE_PALETTE = [
     "#f97583",
     "#79c0ff",
 ]
+ENTRY_PALETTE = [
+    "#c9d1ff",  # light lavender
+    "#b0c9ff",
+    "#97c0ff",
+    "#7fb6ff",
+    "#69abff",
+    "#559fff",
+    "#4491ff",
+    "#3a7de6",
+    "#3169cc",
+    "#2956b3",  # darker for longer windows
+]
+LONG_PALETTE = [
+    "#7ee787",  # light green
+    "#4fd18b",
+    "#2ea043",
+    "#238636",
+    "#196c2e",  # darker green
+]
+SHORT_PALETTE = [
+    "#ff7b72",  # light red
+    "#f85149",
+    "#e5534b",
+    "#cc3d3d",
+    "#8e2f2f",  # darker red
+]
 
 try:
     from prepare_features import pf_config as cfg  # type: ignore[import]
@@ -68,9 +94,34 @@ def _safe_series(df: pd.DataFrame, col: str) -> np.ndarray | None:
 
 def _color_for_name(name: str) -> str:
     try:
+        s = str(name)
+        if s.startswith("sniper_long_") or s.startswith("sniper_short_"):
+            is_short = "short" in s
+            import re
+
+            m = re.search(r"(?:_|w)(\\d+)m", s)
+            w = int(m.group(1)) if m else 0
+            windows = [30, 60, 120, 240, 360]
+            try:
+                idx = windows.index(w)
+            except Exception:
+                idx = 0
+            palette = SHORT_PALETTE if is_short else LONG_PALETTE
+            idx = max(0, min(idx, len(palette) - 1))
+            return palette[idx]
+        if s.startswith("p_entry_w") and s[9:].isdigit():
+            # map window minutes to a light->dark palette
+            w = int(s[9:])
+            windows = [30, 60, 120, 240, 360]
+            try:
+                idx = windows.index(w)
+            except Exception:
+                idx = 0
+            idx = max(0, min(idx, len(ENTRY_PALETTE) - 1))
+            return ENTRY_PALETTE[idx]
         import hashlib
 
-        h = hashlib.md5(str(name).encode("utf-8")).hexdigest()
+        h = hashlib.md5(s.encode("utf-8")).hexdigest()
         palette = FEATURE_PALETTE or DEFAULT_PLOTLY_COLORS
         idx = int(h[:8], 16) % len(palette)
         return palette[idx]
@@ -216,7 +267,7 @@ def _build_panels(flags: dict[str, Any]) -> list[str]:
     if flags.get("wick_stats"):
         panels.append("wick_stats")
     if flags.get("label"):
-        panels.append("entry_weights")
+        panels.extend(["long_short_weights", "long_short_returns"])
     return panels
 
 
@@ -252,7 +303,7 @@ def plot_all(
         df = df.iloc[::step].copy()
 
     panels = _build_panels(flags or {})
-    ratios = [3] + [1] * (len(panels) - 1)
+    ratios = [3 if p == "candles" else 1 for p in panels]
     total = float(sum(ratios))
     heights = [r / total for r in ratios]
 
@@ -908,19 +959,57 @@ def plot_all(
                 gap_threshold=gap_threshold,
             )
 
-        # entry_weights
-        if "entry_weights" in row_map:
+        # long_short_weights
+        if "long_short_weights" in row_map:
             for col in df.columns:
-                if col.startswith("sniper_entry_weight_") and col.endswith("m"):
+                if col.startswith("sniper_short_weight_") and col.endswith("m"):
+                    suf = str(col).replace("sniper_short_weight_", "")
+                    name = f"sniper_short_weight_{suf}"
                     _add_line(
                         fig,
-                        row=row_map["entry_weights"],
+                        row=row_map["long_short_weights"],
                         x=x,
                         y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
-                        name=col,
+                        name=name,
+                        gap_threshold=gap_threshold,
+                    )
+                elif col.startswith("sniper_long_weight_") and col.endswith("m"):
+                    suf = str(col).replace("sniper_long_weight_", "")
+                    name = f"sniper_long_weight_{suf}"
+                    _add_line(
+                        fig,
+                        row=row_map["long_short_weights"],
+                        x=x,
+                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                        name=name,
                         gap_threshold=gap_threshold,
                     )
             # labels sao marcadas no candle via linhas verticais; aqui mantemos apenas weights
+        # long_short_returns
+        if "long_short_returns" in row_map:
+            for col in df.columns:
+                if col.startswith("sniper_short_ret_pct_") and col.endswith("m"):
+                    suf = str(col).replace("sniper_short_ret_pct_", "")
+                    name = f"sniper_short_ret_pct_{suf}"
+                    _add_line(
+                        fig,
+                        row=row_map["long_short_returns"],
+                        x=x,
+                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                        name=name,
+                        gap_threshold=gap_threshold,
+                    )
+                elif col.startswith("sniper_long_ret_pct_") and col.endswith("m"):
+                    suf = str(col).replace("sniper_long_ret_pct_", "")
+                    name = f"sniper_long_ret_pct_{suf}"
+                    _add_line(
+                        fig,
+                        row=row_map["long_short_returns"],
+                        x=x,
+                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                        name=name,
+                        gap_threshold=gap_threshold,
+                    )
     else:
         # fallback: detect columns by prefix (evita dependência circular com pf_config)
         def _plot_prefix(panel: str, prefixes: tuple[str, ...]):
@@ -966,35 +1055,59 @@ def plot_all(
         _plot_prefix("breakout", ("break_high_", "break_low_", "bars_since_bhigh_", "bars_since_blow_"))
         _plot_prefix("mom_short", ("slope_diff_",))
         _plot_prefix("wick_stats", ("wick_lower_", "wick_upper_", "wick_"))
-        _plot_prefix("entry_weights", ("sniper_entry_weight_", "sniper_entry_label_"))
+        _plot_prefix("long_short_weights", ("sniper_long_weight_", "sniper_short_weight_"))
+        _plot_prefix("long_short_returns", ("sniper_long_ret_pct_", "sniper_short_ret_pct_"))
 
-    # Label markers on candles (sniper_entry_label_* == 1)
+    # Label markers on candles (sniper_long_label_* == 1 / sniper_short_label_* == 1)
     shapes = []
     if "candles" in row_map:
         try:
             y0 = float(np.nanmin(df["low"].to_numpy(dtype=float, copy=False)))
             y1 = float(np.nanmax(df["high"].to_numpy(dtype=float, copy=False)))
-            label_cols = [c for c in df.columns if c.startswith("sniper_entry_label_") and c.endswith("m")]
+            label_cols = [c for c in df.columns if c.startswith("sniper_long_label_") and c.endswith("m")]
             if label_cols:
-                label_idx = set()
                 for col in label_cols:
+                    suffix = str(col).replace("sniper_long_label_", "")
+                    weight_col = f"sniper_long_weight_{suffix}"
+                    line_color = _color_for_name(weight_col)
                     sel = df[col].to_numpy(copy=False) == 1
                     if np.any(sel):
-                        label_idx.update(np.where(sel)[0].tolist())
-                for i in sorted(label_idx):
-                    shapes.append(
-                        dict(
-                            type="line",
-                            xref="x",
-                            yref="y1",
-                            x0=x[i],
-                            x1=x[i],
-                            y0=y0,
-                            y1=y1,
-                            line=dict(color="rgba(0,160,0,0.9)", width=1, dash="dash"),
-                            layer="above",
-                        )
-                    )
+                        for i in np.where(sel)[0].tolist():
+                            shapes.append(
+                                dict(
+                                    type="line",
+                                    xref="x",
+                                    yref="y1",
+                                    x0=x[i],
+                                    x1=x[i],
+                                    y0=y0,
+                                    y1=y1,
+                                    line=dict(color=line_color, width=1, dash="dash"),
+                                    layer="above",
+                                )
+                            )
+            label_cols_short = [c for c in df.columns if c.startswith("sniper_short_label_") and c.endswith("m")]
+            if label_cols_short:
+                for col in label_cols_short:
+                    suffix = str(col).replace("sniper_short_label_", "")
+                    weight_col = f"sniper_short_weight_{suffix}"
+                    line_color = _color_for_name(weight_col)
+                    sel = df[col].to_numpy(copy=False) == 1
+                    if np.any(sel):
+                        for i in np.where(sel)[0].tolist():
+                            shapes.append(
+                                dict(
+                                    type="line",
+                                    xref="x",
+                                    yref="y1",
+                                    x0=x[i],
+                                    x1=x[i],
+                                    y0=y0,
+                                    y1=y1,
+                                    line=dict(color=line_color, width=1, dash="dot"),
+                                    layer="above",
+                                )
+                            )
         except Exception:
             pass
 
@@ -1048,10 +1161,17 @@ def plot_backtest_single(
     trades,
     equity: np.ndarray,
     p_entry: np.ndarray,
+    p_entry_map: dict[str, np.ndarray] | None = None,
+    p_entry_long_map: dict[str, np.ndarray] | None = None,
+    p_entry_short_map: dict[str, np.ndarray] | None = None,
     p_danger: np.ndarray,
     entry_sig: np.ndarray,
+    entry_sig_long: np.ndarray | None = None,
+    entry_sig_short: np.ndarray | None = None,
     danger_sig: np.ndarray,
     tau_entry: float,
+    tau_entry_long: float | None = None,
+    tau_entry_short: float | None = None,
     tau_danger: float,
     title: str = "backtest",
     save_path: str | None = None,
@@ -1062,6 +1182,7 @@ def plot_backtest_single(
     plot_probs: bool = True,
     plot_signals: bool = True,
     plot_candles: bool = True,
+    modebar_undo: bool = True,
 ) -> go.Figure:
     """
     Plot resultado de backtest single-symbol com candles, probs, sinais e equity.
@@ -1153,7 +1274,11 @@ def plot_backtest_single(
             xt = pd.to_datetime(t.exit_ts)
         except Exception:
             continue
-        color = "rgba(63,185,80,0.15)" if float(getattr(t, "r_net", 0.0) or 0.0) > 0 else "rgba(248,81,73,0.15)"
+        side = str(getattr(t, "side", "") or "long").lower()
+        if side == "short":
+            color = "rgba(248,81,73,0.25)"
+        else:
+            color = "rgba(63,185,80,0.25)"
         shapes.append(
             dict(
                 type="rect",
@@ -1169,7 +1294,12 @@ def plot_backtest_single(
             )
         )
         # entrada/saida
-        for ts, marker in ((et, "triangle-up"), (xt, "triangle-down")):
+        side = str(getattr(t, "side", "") or "long").lower()
+        if side == "short":
+            markers = ((et, "triangle-down", "#ff7b72"), (xt, "triangle-up", "#3fb950"))
+        else:
+            markers = ((et, "triangle-up", "#3fb950"), (xt, "triangle-down", "#f85149"))
+        for ts, marker, mcolor in markers:
             try:
                 pos = int(idx.get_indexer([ts], method="nearest")[0])
             except Exception:
@@ -1181,7 +1311,7 @@ def plot_backtest_single(
                     x=[ts],
                     y=[float(df.iloc[pos]["close"])],
                     mode="markers",
-                    marker=dict(symbol=marker, color="#3fb950" if marker == "triangle-up" else "#f85149", size=7),
+                    marker=dict(symbol=marker, color=mcolor, size=7),
                     name="entry" if marker == "triangle-up" else "exit",
                     showlegend=False,
                 ),
@@ -1191,28 +1321,79 @@ def plot_backtest_single(
 
     # Probabilidades
     if plot_probs:
+        if p_entry_long_map or p_entry_short_map:
+            for name, arr in (p_entry_long_map or {}).items():
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                        name=f"p_entry_long_{name}",
+                        mode="lines",
+                        line=dict(color="#3fb950", width=1),
+                    ),
+                    row=row_map["probs"],
+                    col=1,
+                )
+            for name, arr in (p_entry_short_map or {}).items():
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                        name=f"p_entry_short_{name}",
+                        mode="lines",
+                        line=dict(color="#ff7b72", width=1),
+                    ),
+                    row=row_map["probs"],
+                    col=1,
+                )
+        elif p_entry_map:
+            for name, arr in p_entry_map.items():
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                        name=f"p_entry_{name} (lighter=shorter, darker=longer)",
+                        mode="lines",
+                        line=dict(color=_color_for_name(f"p_entry_{name}"), width=1),
+                    ),
+                    row=row_map["probs"],
+                    col=1,
+                )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=_apply_gap_nan(np.asarray(p_entry, dtype=float), gap_mask),
+                    name="p_entry",
+                    mode="lines",
+                    line=dict(color="#58a6ff", width=1),
+                ),
+                row=row_map["probs"],
+                col=1,
+            )
         fig.add_trace(
             go.Scatter(
                 x=idx,
-                y=_apply_gap_nan(np.asarray(p_entry, dtype=float), gap_mask),
-                name="p_entry",
+                y=[float(tau_entry_long if tau_entry_long is not None else tau_entry)] * len(idx),
+                name="tau_entry_long",
                 mode="lines",
-                line=dict(color="#58a6ff", width=1),
+                line=dict(color="#3fb950", dash="dash", width=1),
             ),
             row=row_map["probs"],
             col=1,
         )
-        fig.add_trace(
-            go.Scatter(
-                x=idx,
-                y=[float(tau_entry)] * len(idx),
-                name="tau_entry",
-                mode="lines",
-                line=dict(color="#58a6ff", dash="dash", width=1),
-            ),
-            row=row_map["probs"],
-            col=1,
-        )
+        if tau_entry_short is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=[float(tau_entry_short)] * len(idx),
+                    name="tau_entry_short",
+                    mode="lines",
+                    line=dict(color="#ff7b72", dash="dash", width=1),
+                ),
+                row=row_map["probs"],
+                col=1,
+            )
         if np.any(np.asarray(p_danger, dtype=float)):
             fig.add_trace(
                 go.Scatter(
@@ -1239,18 +1420,46 @@ def plot_backtest_single(
 
     # Sinais (0/1)
     if plot_signals:
-        fig.add_trace(
-            go.Scatter(
-                x=idx,
-                y=_apply_gap_nan(entry_sig.astype(float), gap_mask),
-                name="entry_ok",
-                mode="lines",
-                line=dict(color="#58a6ff", width=1),
-                fill=None,
-            ),
-            row=row_map["signals"],
-            col=1,
-        )
+        if entry_sig_long is not None or entry_sig_short is not None:
+            if entry_sig_long is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=_apply_gap_nan(entry_sig_long.astype(float), gap_mask),
+                        name="entry_long",
+                        mode="lines",
+                        line=dict(color="#3fb950", width=1),
+                        fill=None,
+                    ),
+                    row=row_map["signals"],
+                    col=1,
+                )
+            if entry_sig_short is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=_apply_gap_nan(entry_sig_short.astype(float), gap_mask),
+                        name="entry_short",
+                        mode="lines",
+                        line=dict(color="#ff7b72", width=1),
+                        fill=None,
+                    ),
+                    row=row_map["signals"],
+                    col=1,
+                )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=_apply_gap_nan(entry_sig.astype(float), gap_mask),
+                    name="entry_ok",
+                    mode="lines",
+                    line=dict(color="#58a6ff", width=1),
+                    fill=None,
+                ),
+                row=row_map["signals"],
+                col=1,
+            )
         fig.add_trace(
             go.Scatter(
                 x=idx,
@@ -1312,12 +1521,17 @@ def plot_backtest_single(
     fig.update_xaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID)
     fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID)
 
+    config = None
+    if modebar_undo:
+        # Add a reset view button (acts as undo for pan/zoom).
+        config = {"displaylogo": False, "modeBarButtonsToAdd": ["resetScale2d"]}
+
     if save_path:
         from plotly.io import write_html
 
         Path(save_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        write_html(fig, file=str(save_path), auto_open=bool(show), include_plotlyjs="cdn")
+        write_html(fig, file=str(save_path), auto_open=bool(show), include_plotlyjs="cdn", config=config)
     elif show:
-        fig.show()
+        fig.show(config=config)
 
     return fig

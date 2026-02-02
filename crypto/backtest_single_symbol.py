@@ -53,12 +53,13 @@ def _latest_wf_run_dir() -> str | None:
 
 
 def main() -> None:
-    symbol = "USDEUSDT"
-    days = 720
+    symbol = "ADAUSDT"
+    days = 360
     total_days_cache = 0
-    run_dir = _latest_wf_run_dir()
+    run_dir = _latest_wf_run_dir() or r"D:\astra\models_sniper\crypto\wf_024"
     plot_out = "data/generated/plots/crypto_single_symbol.html"
-    plot_candles = True
+    # True = velas, False = linha de close
+    plot_candles = _env_bool("BT_PLOT_CANDLES", default=False)
 
     settings = SingleSymbolDemoSettings(
         asset_class="crypto",
@@ -68,6 +69,7 @@ def main() -> None:
         run_dir=run_dir,
         plot_out=plot_out,
         plot_candles=plot_candles,
+        override_tau_entry=0.85,
     )
     run(settings)
 

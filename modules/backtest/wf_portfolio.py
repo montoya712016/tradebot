@@ -220,7 +220,7 @@ def _entry_specs_from_contract(contract: TradeContract) -> list[tuple[str, int]]
     windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
     if len(windows) < 1:
         raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
-    return [("mid", int(windows[0]))]
+    return [(f"w{int(w)}", int(w)) for w in windows]
 
 
 def _downsample_df(df: pd.DataFrame, stride: int) -> pd.DataFrame:

@@ -292,17 +292,25 @@ def render_feature_studio(
 
       const nRows = row;
       const gap = 0.02;
+      const weights = [];
+      for (let r = 1; r <= nRows; r++) {{
+        weights.push(r === 1 ? 3.0 : 1.0);
+      }}
+      const totalW = weights.reduce((a, b) => a + b, 0);
       const usable = 1.0 - gap * (nRows - 1);
-      const h = usable / nRows;
+      const heights = weights.map((w) => (usable * w) / totalW);
       const newLayout = JSON.parse(JSON.stringify(baseLayout || {{}}));
 
       Object.keys(newLayout)
         .filter((k) => /^(x|y)axis\\d*$/.test(k))
         .forEach((k) => delete newLayout[k]);
 
+      let cursor = 1.0;
       for (let r = 1; r <= nRows; r++) {{
-        const start = 1.0 - r * h - (r - 1) * gap;
-        const end = start + h;
+        const h = heights[r - 1];
+        const end = cursor;
+        const start = end - h;
+        cursor = start - gap;
         const yName = axisName("yaxis", r);
         const xName = axisName("xaxis", r);
         newLayout[yName] = Object.assign(

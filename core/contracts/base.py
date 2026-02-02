@@ -25,7 +25,12 @@ class TradeContract:
     # Janelas de label para entrada (em minutos)
     entry_label_windows_minutes: Tuple[int, ...] = (360,)
     entry_label_min_profit_pcts: Tuple[float, ...] = (0.02,)
+    # Limite mÃ¡ximo de DD (em %) permitido dentro da janela para manter label=1
+    entry_label_max_dd_pcts: Tuple[float, ...] = ()
     entry_label_weight_alpha: float = 0.01
+    # Peso extra para negativos com queda abaixo do entry (multiplica por 1 + drop_pct * mult)
+    entry_label_weight_drop_mult: float = 1.0
+    entry_label_weight_drop_min_pct: float = 0.0
     
     # Parâmetros de saída baseada em EMA
     exit_ema_span: int = 360

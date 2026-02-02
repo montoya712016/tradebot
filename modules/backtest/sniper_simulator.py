@@ -54,21 +54,34 @@ class SniperModels:
     entry_windows_minutes: Tuple[int, ...] | None = None
 
 
+def _entry_specs_from_models(models: SniperModels) -> list[tuple[str, int]]:
+    specs: list[tuple[str, int]] = []
+    for name in (models.entry_models or {}).keys():
+        if name.startswith("w") and name[1:].isdigit():
+            specs.append((name, int(name[1:])))
+    if specs:
+        return sorted(specs, key=lambda x: x[1])
+    return _entry_specs()
+
+
 def _entry_specs() -> list[tuple[str, int]]:
     windows = list(getattr(DEFAULT_TRADE_CONTRACT, "entry_label_windows_minutes", []) or [])
     if len(windows) < 1:
         raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
-    return [("mid", int(windows[0]))]
+    return [(f"w{int(w)}", int(w)) for w in windows]
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
+CALIBRATION_ENABLED = False
+
+
 def _apply_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
     if not isinstance(calib, dict):
         return p
-    if calib.get("type") != "platt":
+    if (not CALIBRATION_ENABLED) or calib.get("type") != "platt":
         return p
     a = float(calib.get("coef", 1.0))
     b = float(calib.get("intercept", 0.0))
@@ -113,13 +126,23 @@ def load_sniper_models(
     entry_models: Dict[str, xgb.Booster] = {}
     entry_feature_cols_map: Dict[str, List[str]] = {}
     entry_calib_map: Dict[str, dict] = {}
-    for name, w in _entry_specs():
-        p = pd_dir / f"entry_model_{int(w)}m" / "model_entry.json"
-        if p.exists():
-            entry_models[name] = _load_booster(p)
-            meta_key = f"entry_{int(w)}m"
-            entry_feature_cols_map[name] = list((meta.get(meta_key) or {}).get("feature_cols") or meta["entry"]["feature_cols"])
-            entry_calib_map[name] = dict((meta.get(meta_key) or {}).get("calibration") or meta["entry"].get("calibration") or {"type": "identity"})
+    entry_windows: list[int] = []
+    for d in pd_dir.iterdir():
+        if not d.is_dir() or not d.name.startswith("entry_model_") or not d.name.endswith("m"):
+            continue
+        w_str = d.name.replace("entry_model_", "").replace("m", "")
+        if not w_str.isdigit():
+            continue
+        w = int(w_str)
+        p = d / "model_entry.json"
+        if not p.exists():
+            continue
+        name = f"w{w}"
+        entry_models[name] = _load_booster(p)
+        meta_key = f"entry_{int(w)}m"
+        entry_feature_cols_map[name] = list((meta.get(meta_key) or {}).get("feature_cols") or meta["entry"]["feature_cols"])
+        entry_calib_map[name] = dict((meta.get(meta_key) or {}).get("calibration") or meta["entry"].get("calibration") or {"type": "identity"})
+        entry_windows.append(w)
 
     if not entry_models:
         entry_models["mid"] = _load_booster(entry_path)
@@ -144,8 +167,8 @@ def load_sniper_models(
 
     tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
     tau_danger_add = 1.0
-    tau_entry_map = {"mid": float(tau_entry)}
-    entry_windows = tuple(int(w) for _n, w in _entry_specs())
+    tau_entry_map = {name: float(tau_entry) for name in entry_models.keys()}
+    entry_windows = tuple(sorted(entry_windows)) if entry_windows else tuple(int(w) for _n, w in _entry_specs())
 
     return SniperModels(
         entry_model=entry_model,
@@ -208,6 +231,7 @@ class SniperTrade:
     num_adds: int
     reason: str
     r_net: float
+    side: str | None = None
     # Extras para diagnóstico/plots (opcionais para compat)
     avg_entry_price: float | None = None
     entries: int | None = None
@@ -344,7 +368,7 @@ def simulate_sniper_cycle(
             best_pe = 0.0
             best_tau = float(models.tau_entry)
             best_win = None
-            for name, w in _entry_specs():
+            for name, w in _entry_specs_from_models(models):
                 feat_cols = models.entry_feature_cols_map.get(name, models.entry_feature_cols)
                 model = models.entry_models.get(name, models.entry_model)
                 calib = models.entry_calib_map.get(name, models.entry_calib)
@@ -490,5 +514,3 @@ __all__ = [
     "load_sniper_models",
     "simulate_sniper_cycle",
 ]
-
-
