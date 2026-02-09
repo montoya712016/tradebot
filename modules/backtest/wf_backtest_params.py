@@ -7,7 +7,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class BacktestOptimizedRanges:
     # parametros otimizados pelo wf_random_loop
-    tau_entry_range: tuple[float, float, float] = (0.70, 0.90, 0.025)
+    # regressao: threshold em retorno previsto (ex.: 0.002 = 0.2%)
+    tau_entry_range: tuple[float, float, float] = (0.001, 0.02, 0.001)
 
     # backtest config (varied per backtest)
     max_positions_range: tuple[int, int, int] = (15, 30, 3)

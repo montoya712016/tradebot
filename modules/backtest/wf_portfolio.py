@@ -248,7 +248,7 @@ def _prepare_symbol_frame_for_window(
     if df.empty:
         return df
     try:
-        pe_map, _pdg, _pex, _used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+        pe_map, _pe_short_map, _pdg, _pex, _used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
     except RuntimeError:
         return df.iloc[0:0].copy()
     df = df.copy()
@@ -358,7 +358,7 @@ def main() -> None:
     ap.add_argument("--refresh-cache", action="store_true")
     ap.add_argument("--strict-cache-total-days", action="store_true")
 
-    ap.add_argument("--tau-entry", type=float, default=0.775)
+    ap.add_argument("--tau-entry", type=float, default=0.002)
     ap.add_argument("--tau-exit", type=float, default=DEFAULT_THRESHOLD_OVERRIDES.tau_exit)
 
     # Universo: usar histÃ³rico ao invÃ©s de sÃ³ o step atual (mais robusto)
@@ -390,9 +390,9 @@ def main() -> None:
     ap.add_argument("--tau-opt-lookback-days", type=int, default=730, help="Janela histÃ³rica (dias) para otimizar tau (ex.: 730 ~ 2 anos).")
     ap.add_argument("--tau-opt-bar-stride", type=int, default=10, help="Downsample sÃ³ para otimizaÃ§Ã£o de tau (reduz custo).")
     ap.add_argument("--tau-opt-symbols", type=int, default=40, help="Qtd mÃ¡x de sÃ­mbolos usados para otimizar tau (subset dos selecionados).")
-    ap.add_argument("--tau-opt-entry-min", type=float, default=0.60, help="MÃ­nimo do grid de tau_entry.")
-    ap.add_argument("--tau-opt-entry-max", type=float, default=0.85, help="MÃ¡ximo do grid de tau_entry.")
-    ap.add_argument("--tau-opt-entry-step", type=float, default=0.05)
+    ap.add_argument("--tau-opt-entry-min", type=float, default=0.001, help="M?nimo do grid de tau_entry.")
+    ap.add_argument("--tau-opt-entry-max", type=float, default=0.02, help="M?ximo do grid de tau_entry.")
+    ap.add_argument("--tau-opt-entry-step", type=float, default=0.001)
     ap.add_argument("--tau-opt-min-trades", type=int, default=20, help="Exige mÃ­nimo de trades no histÃ³rico para aceitar o tau Ã³timo.")
     ap.add_argument("--tau-opt-ewm-decay", type=float, default=0.80, help="Suaviza mudanÃ§as de tau entre steps (0..1).")
 
@@ -581,7 +581,6 @@ def main() -> None:
             try:
                 pm.danger_model = None
                 pm.danger_cols = []
-                pm.danger_calib = {}
             except Exception:
                 pass
             try:

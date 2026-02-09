@@ -202,7 +202,9 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
 
         t_sym = time.perf_counter()
         try:
-            p_entry_map, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+            p_entry_map, _p_entry_short_map, p_danger, p_exit, used, pid = predict_scores_walkforward(
+                df, periods=periods, return_period_id=True
+            )
         except Exception as e:
             # fallback: tenta rebuildar o cache do sÃ­mbolo 1x (parquet pode estar corrompido)
             print(f"[scores] WARN {sym}: {type(e).__name__}: {e} -> tentando rebuild do cache", flush=True)
@@ -226,7 +228,9 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
                         end_ts2 = pd.to_datetime(df_retry.index.max())
                         start_ts2 = end_ts2 - pd.Timedelta(days=int(settings.days))
                         df = df_retry.loc[idx2 >= start_ts2].copy()
-                    p_entry_map, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+                    p_entry_map, _p_entry_short_map, p_danger, p_exit, used, pid = predict_scores_walkforward(
+                        df, periods=periods, return_period_id=True
+                    )
                 else:
                     raise
             except Exception as e2:
@@ -242,7 +246,8 @@ def run(settings: PortfolioDemoSettings | None = None) -> None:
             p_entry=p_entry,
             p_danger=p_danger,
             p_exit=p_exit,
-            tau_entry=float(used.tau_entry),
+            tau_entry_long=float(used.tau_entry_long),
+            tau_entry_short=float(used.tau_entry_short),
             tau_danger=1.0,
             tau_add=float(used.tau_add),
             tau_danger_add=1.0,

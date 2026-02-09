@@ -13,8 +13,6 @@ class TradeContract:
 
     timeframe_sec: int = 60
     entry_label_windows_minutes: Tuple[int, ...] = (30,)
-    entry_label_min_profit_pcts: Tuple[float, ...] = (0.02,)
-    entry_label_weight_alpha: float = 0.01
     exit_ema_span: int = 15
     exit_ema_init_offset_pct: float = 0.01
     fee_pct_per_side: float = 0.0005

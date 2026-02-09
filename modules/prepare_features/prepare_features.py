@@ -13,7 +13,7 @@ import numpy as np, pandas as pd
 try:
     from . import pf_config as cfg
     from .features import make_features
-    from .labels import apply_trade_contract_labels
+    from .labels import apply_timing_regression_labels
     from .plotting import plot_all
 except Exception:
     import sys
@@ -38,13 +38,13 @@ except Exception:
         sys.path.insert(0, _rp)
     from prepare_features import pf_config as cfg  # type: ignore[import]
     from prepare_features.features import make_features  # type: ignore[import]
-    from prepare_features.labels import apply_trade_contract_labels  # type: ignore[import]
+    from prepare_features.labels import apply_timing_regression_labels  # type: ignore[import]
     from prepare_features.plotting import plot_all  # type: ignore[import]
 
 try:
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
+    from trade_contract import TradeContract  # type: ignore
 except Exception:
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
+    from trade_contract import TradeContract  # type: ignore[import]
 
 # Conjuntos de features reconhecidos
 FEATURE_KEYS = [
@@ -185,7 +185,7 @@ def run(
     trade_contract: TradeContract | None = None,
     mark_gaps: bool = True,
 ) -> pd.DataFrame:
-    """Pipeline simples: features selecionadas + labels antigos + plot opcional.
+    """Pipeline simples: features selecionadas + timing labels + plot opcional.
 
     Retorna o DataFrame (mutado) com colunas calculadas.
     """
@@ -246,13 +246,12 @@ def run(
         except Exception:
             pass
 
-    # Labels do contrato (sniper)
+    # Labels de regressão (timing)
     if bool(flags.get("label", True)):
         candle_sec = _infer_candle_sec(df_ohlc.index)
-        contract_obj = trade_contract or DEFAULT_TRADE_CONTRACT
-        apply_trade_contract_labels(
+        # Timing regression labels
+        apply_timing_regression_labels(
             df_ohlc,
-            contract=contract_obj,
             candle_sec=int(candle_sec),
         )
 
@@ -322,7 +321,7 @@ __all__ = [
     "build_flags",
     "normalize_flags",
     "make_features",
-    "apply_trade_contract_labels",
+    "apply_timing_regression_labels",
     "plot_all",
     "run",
     "run_from_flags_dict",
@@ -340,23 +339,13 @@ if __name__ == "__main__":
         if raw_1m.empty:
             print("Sem dados retornados do MySQL.", flush=True)
         df_ohlc = to_ohlc_from_1m(raw_1m, int(DEFAULT_CANDLE_SEC))
-        try:
-            c = DEFAULT_TRADE_CONTRACT
-            print(
-                "[prepare_features] contrato(label sniper): "
-                f"entry_windows={tuple(c.entry_label_windows_minutes)} "
-                f"entry_min_profit={tuple(c.entry_label_min_profit_pcts)} "
-                f"entry_weight_alpha={float(getattr(c, 'entry_label_weight_alpha', 1.0)):.3f} "
-                f"ema_span={int(exit_ema_span_from_window(c, int(getattr(c, 'timeframe_sec', 60) or 60)))} "
-                f"ema_init_offset={float(c.exit_ema_init_offset_pct):.4f}",
-                flush=True,
-            )
-        except Exception:
-            pass
-        label_only = False
+        label_only = True
+        flags_to_use = FLAGS_LABEL_ONLY if label_only else FLAGS
+        flags_to_use["label"] = True
+        flags_to_use["plot_candles"] = True
         df = run_from_flags_dict(
             df_ohlc,
-            FLAGS,
+            flags_to_use,
             plot=True,
             u_threshold=float(DEFAULT_U_THRESHOLD),
             grey_zone=DEFAULT_GREY_ZONE,

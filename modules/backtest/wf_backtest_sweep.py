@@ -250,11 +250,8 @@ def rebuild_results_csv(settings: SweepSettings | None = None) -> Path | None:
                 "top_symbols": metrics.get("top_symbols", ""),
                 "error": "",
                 "entry_window_min": "",
-                "entry_min_profit": "",
-                "entry_weight_alpha": "",
                 "exit_ema_span": "",
                 "exit_ema_init_offset_pct": "",
-                "entry_ratio_neg_per_pos": "",
                 "train_total_days": "",
                 "train_offsets_years": "",
                 "train_offsets_step_days": "",
@@ -311,12 +308,9 @@ except Exception:
         "error",
         # contract params
         "entry_window_min",
-        "entry_min_profit",
-        "entry_weight_alpha",
         "exit_ema_span",
         "exit_ema_init_offset_pct",
         # train params
-        "entry_ratio_neg_per_pos",
         "train_total_days",
         "train_offsets_years",
         "train_offsets_step_days",
@@ -632,12 +626,9 @@ def run(settings: SweepSettings | None = None) -> None:
                 "error": err_msg,
                 # contract params (não aplicável aqui)
                 "entry_window_min": "",
-                "entry_min_profit": "",
-                "entry_weight_alpha": "",
                 "exit_ema_span": "",
                 "exit_ema_init_offset_pct": "",
                 # train params (não aplicável aqui)
-                "entry_ratio_neg_per_pos": "",
                 "train_total_days": "",
                 "train_offsets_years": "",
                 "train_offsets_step_days": "",

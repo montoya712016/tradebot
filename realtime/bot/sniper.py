@@ -338,19 +338,58 @@ class LiveDecisionBot:
     def _load_model_bundle(self) -> ModelBundle:
         run_dir = Path(self.settings.run_dir).expanduser().resolve()
         if not run_dir.exists():
-            raise RuntimeError(f"run_dir não encontrado: {run_dir}")
+            raise RuntimeError(f"run_dir nao encontrado: {run_dir}")
         log.info("[model] carregando modelos de %s", run_dir)
         periods = load_period_models(run_dir)
         if not periods:
             raise RuntimeError("no period models found in run_dir")
         pm: PeriodModel = next((p for p in periods if getattr(p, "period_days", 1e9) == 0), periods[0])
         log.info("[model] periodo selecionado: %sd (train_end=%s)", pm.period_days, pm.train_end_utc)
-        feat_cols = list(pm.entry_cols_map.get("mid", pm.entry_cols))
-        calib = dict(pm.entry_calib_map.get("mid", pm.entry_calib))
+
+        def _window_from_name(name: str) -> int:
+            digits = "".join(ch for ch in str(name) if ch.isdigit())
+            try:
+                return int(digits) if digits else 0
+            except Exception:
+                return 0
+
+        names_long = list(getattr(pm, "entry_models_long", {}) or {})
+        names_legacy = list(getattr(pm, "entry_models", {}) or {})
+        entry_names = names_long or names_legacy
+        if not entry_names:
+            raise RuntimeError("period sem entry_models compativeis")
+        entry_name = max(entry_names, key=_window_from_name)
+
+        feat_cols = list(
+            (getattr(pm, "entry_cols_map_long", {}) or {}).get(
+                entry_name,
+                (getattr(pm, "entry_cols_map", {}) or {}).get(entry_name, getattr(pm, "entry_cols", []) or []),
+            )
+        )
+        calib = dict(
+            (getattr(pm, "entry_calibration_map_long", {}) or {}).get(
+                entry_name,
+                (getattr(pm, "entry_calibration_map", {}) or {}).get(entry_name, {}),
+            )
+            or {}
+        )
         tau_entry = float(self.settings.tau_entry_override or 0.0)
+        tau_map = (getattr(pm, "tau_entry_long_map", {}) or {}) or (getattr(pm, "tau_entry_map", {}) or {})
+        default_tau = float(getattr(pm, "tau_entry_long", 0.0) or getattr(pm, "tau_entry", 0.0) or 0.0)
         if tau_entry <= 0.0:
-            tau_entry = float(pm.tau_entry_map.get("mid", pm.tau_entry))
-        booster = pm.entry_models.get("mid", pm.entry_model)
+            tau_entry = float(tau_map.get(entry_name, default_tau))
+        booster = (
+            (getattr(pm, "entry_models_long", {}) or {}).get(entry_name)
+            or (getattr(pm, "entry_models", {}) or {}).get(entry_name)
+            or getattr(pm, "entry_model_long", None)
+            or getattr(pm, "entry_model", None)
+        )
+        if booster is None:
+            raise RuntimeError(f"booster ausente para entry_name={entry_name}")
+        if not feat_cols:
+            raise RuntimeError(f"feature_cols ausentes para entry_name={entry_name}")
+        log.info("[model] entry selecionado: %s | tau_entry=%.6f | n_features=%s", entry_name, tau_entry, len(feat_cols))
+
         predictor = self._enable_gpu_predictor(booster, feat_cols, enable_gpu=bool(self.settings.use_gpu_predictor))
         return ModelBundle(
             model=booster,
@@ -359,7 +398,6 @@ class LiveDecisionBot:
             tau_entry=tau_entry,
             predictor=predictor,
         )
-
     def _enable_gpu_predictor(self, booster: xgb.Booster, feat_cols: List[str], *, enable_gpu: bool = True) -> str:
         if enable_gpu:
             try:
@@ -1688,8 +1726,14 @@ def _install_fatal_logger() -> None:
 
 def main() -> None:
     _install_fatal_logger()
+    db_host = os.getenv("SNIPER_DB_HOST", "localhost")
+    db_user = os.getenv("SNIPER_DB_USER", "root")
+    db_pass = os.getenv("SNIPER_DB_PASSWORD", "")
+    db_name = os.getenv("SNIPER_DB_NAME", "crypto")
+    run_dir = os.getenv("SNIPER_RUN_DIR", "D:/astra/models_sniper/crypto/wf_002")
+    tau_entry = float(os.getenv("SNIPER_TAU_ENTRY", "0.775"))
     settings = LiveSettings(
-        run_dir="D:/astra/models_sniper/crypto/wf_002",
+        run_dir=run_dir,
         symbols_file="",
         quote_symbols_fallback="",
         bootstrap_days=7,
@@ -1702,8 +1746,8 @@ def main() -> None:
         max_trade_exposure=0.07,
         min_trade_exposure=0.04,
         exit_confirm_bars=1,
-        tau_entry_override=0.775,
-        db=MySQLConfig(host="localhost", user="root", password="2017", database="crypto", pool_size=32),
+        tau_entry_override=tau_entry,
+        db=MySQLConfig(host=db_host, user=db_user, password=db_pass, database=db_name, pool_size=32),
         trade_mode="paper",
         trade_notional_usd=100.0,
         paper_start_equity=10_000.0,

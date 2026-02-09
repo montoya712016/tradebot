@@ -9,24 +9,28 @@ Walk-forward backtest Sniper:
 - Roda o ciclo usando p_entry/p_danger pré-computados em batch
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import os
 import json
-from typing import Dict, List, Tuple, Sequence
+from typing import Dict, List, Tuple, Sequence, Any
 
 import numpy as np
 import pandas as pd
 
 try:
     import xgboost as xgb
-except Exception as e:  # pragma: no cover
-    raise
+except Exception:  # pragma: no cover
+    xgb = None
+
+try:
+    from catboost import CatBoostRegressor
+except Exception:  # pragma: no cover
+    CatBoostRegressor = None
 
 from .sniper_simulator import (
     SniperBacktestResult,
     SniperTrade,
-    _apply_calibration,
     _finalize_monthly_returns,
 )
 from modules.config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
@@ -34,47 +38,77 @@ from modules.config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 
 try:
     # quando importado como pacote (ex.: backtest.*)
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
+    from modules.trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 except Exception:
     try:
         # fallback legado (quando o repo_root está no sys.path com nome de pacote)
         from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
     except Exception:
         # modo comum: rodar a partir do repo_root (sys.path inclui modules/)
-        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
+        from modules.trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
 
 
 @dataclass
 class PeriodModel:
     period_days: int
     train_end_utc: pd.Timestamp
-    entry_model: xgb.Booster
-    entry_models: dict[str, xgb.Booster]
-    danger_model: xgb.Booster | None  # legado (não usado)
-    exit_model: xgb.Booster | None  # legado (não usado)
-    entry_cols: List[str]
-    entry_cols_map: dict[str, List[str]]
-    danger_cols: List[str]
-    exit_cols: List[str]
-    entry_calib: dict
-    entry_calib_map: dict[str, dict]
-    danger_calib: dict
-    exit_calib: dict
-    tau_entry: float
-    tau_entry_map: dict[str, float]
-    tau_danger: float
-    tau_exit: float
-    tau_add: float
-    tau_danger_add: float
+    entry_model_long: Any
+    entry_model_short: Any
+    entry_models_long: dict[str, Any]
+    entry_models_short: dict[str, Any]
+    # Campos abaixo têm defaults para manter compatibilidade com loaders legados
+    # e evitar erro de dataclass por ordem de argumentos default/non-default.
+    entry_model: Any | None = None
+    entry_models: dict[str, Any] | None = None
+    danger_model: Any | None = None
+    exit_model: Any | None = None
+    entry_cols: List[str] = field(default_factory=list)
+    entry_cols_map_long: dict[str, List[str]] = field(default_factory=dict)
+    entry_cols_map_short: dict[str, List[str]] = field(default_factory=dict)
+    entry_cols_map: dict[str, List[str]] | None = None
+    entry_pred_bias_map_long: dict[str, float] = field(default_factory=dict)
+    entry_pred_bias_map_short: dict[str, float] = field(default_factory=dict)
+    entry_pred_bias_map: dict[str, float] | None = None
+    entry_calibration_map_long: dict[str, dict[str, float]] = field(default_factory=dict)
+    entry_calibration_map_short: dict[str, dict[str, float]] = field(default_factory=dict)
+    entry_calibration_map: dict[str, dict[str, float]] | None = None
+    danger_cols: List[str] = field(default_factory=list)
+    exit_cols: List[str] = field(default_factory=list)
+    tau_entry_long: float = 0.0
+    tau_entry_short: float = 0.0
+    tau_entry_long_map: dict[str, float] = field(default_factory=dict)
+    tau_entry_short_map: dict[str, float] = field(default_factory=dict)
+    tau_entry: float | None = None
+    tau_entry_map: dict[str, float] | None = None
+    tau_danger: float = 1.0
+    tau_exit: float = 1.0
+    tau_add: float = 0.0
+    tau_danger_add: float = 1.0
+    entry_label_scale: float = 1.0
 
 
-def _load_booster(path_json: Path) -> xgb.Booster:
-    bst = xgb.Booster()
+def _is_catboost_model_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            head = f.read(4)
+        return head.startswith(b"CBM")
+    except Exception:
+        return False
+
+
+def _load_booster(path_json: Path) -> Any:
     ubj = path_json.with_suffix(".ubj")
-    if ubj.exists() and ubj.stat().st_size > 0:
-        bst.load_model(str(ubj))
-        return bst
-    bst.load_model(str(path_json))
+    use_path = ubj if ubj.exists() and ubj.stat().st_size > 0 else path_json
+    if _is_catboost_model_file(use_path):
+        if CatBoostRegressor is None:
+            raise RuntimeError("catboost nao instalado para carregar modelo")
+        model = CatBoostRegressor()
+        model.load_model(str(use_path))
+        return model
+    if xgb is None:
+        raise RuntimeError("xgboost nao instalado para carregar modelo")
+    bst = xgb.Booster()
+    bst.load_model(str(use_path))
     return bst
 
 
@@ -82,16 +116,10 @@ def _entry_specs() -> list[tuple[str, int]]:
     windows = list(getattr(DEFAULT_TRADE_CONTRACT, "entry_label_windows_minutes", []) or [])
     if len(windows) < 1:
         raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
-    return [(f"w{int(w)}", int(w)) for w in windows]
+    return [(f"ret_exp_{int(w)}m", int(w)) for w in windows]
 
 
 def select_entry_mid(p_entry_map: dict[str, np.ndarray]) -> np.ndarray:
-    if "mid" in p_entry_map:
-        return p_entry_map["mid"]
-    if "short" in p_entry_map:
-        return p_entry_map["short"]
-    if "long" in p_entry_map:
-        return p_entry_map["long"]
     # fallback: primeiro disponível
     for v in p_entry_map.values():
         return v
@@ -116,73 +144,139 @@ def load_period_models(
             continue
         train_end_ts = pd.to_datetime(train_end)
 
-        entry_models: dict[str, xgb.Booster] = {}
-        entry_cols_map: dict[str, list[str]] = {}
-        entry_calib_map: dict[str, dict] = {}
-        # tenta carregar modelos multi-janela a partir das pastas
-        for d in pd_dir.iterdir():
-            if not d.is_dir() or not d.name.startswith("entry_model_") or not d.name.endswith("m"):
-                continue
-            is_short = d.name.startswith("entry_model_short_")
-            w_str = d.name.replace("entry_model_short_", "").replace("entry_model_", "").replace("m", "")
-            if not w_str.isdigit():
-                continue
-            w = int(w_str)
-            mdir = d / "model_entry.json"
-            if not mdir.exists():
-                continue
-            name = f"short_w{w}" if is_short else f"long_w{w}"
-            entry_models[name] = _load_booster(mdir)
-            meta_key = f"entry_short_{int(w)}m" if is_short else f"entry_{int(w)}m"
-            entry_cols_map[name] = list((meta.get(meta_key) or {}).get("feature_cols") or meta["entry"]["feature_cols"])
-            entry_calib_map[name] = dict((meta.get(meta_key) or {}).get("calibration") or meta["entry"].get("calibration") or {"type": "identity"})
-        # fallback legado (single)
-        if not entry_models:
-            entry_models["mid"] = _load_booster(pd_dir / "entry_model" / "model_entry.json")
-            entry_cols_map["mid"] = list(meta["entry"]["feature_cols"])
-            entry_calib_map["mid"] = dict(meta["entry"].get("calibration") or {"type": "identity"})
+        entry_label_scale = float((meta.get("entry") or {}).get("label_scale") or 1.0)
+        entry_models_long: dict[str, Any] = {}
+        entry_models_short: dict[str, Any] = {}
+        entry_cols_map_long: dict[str, list[str]] = {}
+        entry_cols_map_short: dict[str, list[str]] = {}
+        entry_pred_bias_map_long: dict[str, float] = {}
+        entry_pred_bias_map_short: dict[str, float] = {}
+        entry_calibration_map_long: dict[str, dict[str, float]] = {}
+        entry_calibration_map_short: dict[str, dict[str, float]] = {}
 
-        entry_model = entry_models.get("mid") or list(entry_models.values())[0]
+        # tenta carregar modelos multi-janela a partir das pastas (long/short)
+        for d in pd_dir.iterdir():
+            if not d.is_dir():
+                continue
+            if d.name.startswith("entry_model_long_") and d.name.endswith("m"):
+                w_str = d.name.replace("entry_model_long_", "").replace("m", "")
+                if not w_str.isdigit():
+                    continue
+                w = int(w_str)
+                mdir = d / "model_entry.json"
+                if not mdir.exists():
+                    continue
+                name = f"ret_exp_{w}m"
+                entry_models_long[name] = _load_booster(mdir)
+                meta_key = f"entry_long_{int(w)}m"
+                mk = meta.get(meta_key) or {}
+                entry_cols_map_long[name] = list(mk.get("feature_cols") or meta["entry"]["feature_cols"])
+                entry_pred_bias_map_long[name] = float(mk.get("pred_bias", 0.0) or 0.0)
+                cal = mk.get("calibration") if isinstance(mk, dict) else None
+                if isinstance(cal, dict):
+                    try:
+                        entry_calibration_map_long[name] = {
+                            "a": float(cal.get("a", 1.0)),
+                            "b": float(cal.get("b", 0.0)),
+                            "s_pos": float(cal.get("s_pos", 1.0)),
+                            "s_neg": float(cal.get("s_neg", 1.0)),
+                        }
+                    except Exception:
+                        pass
+            elif d.name.startswith("entry_model_short_") and d.name.endswith("m"):
+                w_str = d.name.replace("entry_model_short_", "").replace("m", "")
+                if not w_str.isdigit():
+                    continue
+                w = int(w_str)
+                mdir = d / "model_entry.json"
+                if not mdir.exists():
+                    continue
+                name = f"ret_exp_{w}m"
+                entry_models_short[name] = _load_booster(mdir)
+                meta_key = f"entry_short_{int(w)}m"
+                mk = meta.get(meta_key) or {}
+                entry_cols_map_short[name] = list(mk.get("feature_cols") or meta["entry"]["feature_cols"])
+                entry_pred_bias_map_short[name] = float(mk.get("pred_bias", 0.0) or 0.0)
+                cal = mk.get("calibration") if isinstance(mk, dict) else None
+                if isinstance(cal, dict):
+                    try:
+                        entry_calibration_map_short[name] = {
+                            "a": float(cal.get("a", 1.0)),
+                            "b": float(cal.get("b", 0.0)),
+                            "s_pos": float(cal.get("s_pos", 1.0)),
+                            "s_neg": float(cal.get("s_neg", 1.0)),
+                        }
+                    except Exception:
+                        pass
+
+        # fallback legado (single)
+        if not entry_models_long and not entry_models_short:
+            specs = _entry_specs()
+            fallback_w = int(specs[0][1]) if specs else 60
+            name = f"ret_exp_{fallback_w}m"
+            legacy_model = _load_booster(pd_dir / "entry_model" / "model_entry.json")
+            entry_models_long[name] = legacy_model
+            entry_models_short[name] = legacy_model
+            entry_cols_map_long[name] = list(meta["entry"]["feature_cols"])
+            entry_cols_map_short[name] = list(meta["entry"]["feature_cols"])
+            entry_pred_bias_map_long[name] = 0.0
+            entry_pred_bias_map_short[name] = 0.0
+
+        entry_model_long = list(entry_models_long.values())[0]
+        entry_model_short = list(entry_models_short.values())[0]
         # modelos de danger/exit removidos (pipeline entry-only)
         danger_model = None
         exit_model = None
         entry_cols = list(meta["entry"]["feature_cols"])
         danger_cols: list[str] = []
         exit_cols: list[str] = []
-        entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
-        danger_calib: dict = {}
-        exit_calib: dict = {}
         tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
         tau_danger = 1.0
         tau_exit = 1.0
         if tau_entry is None:
             tau_entry = float(meta["entry"].get("threshold", 0.5))
-        tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
+        scale_mult = float(entry_label_scale) if float(entry_label_scale) > 1.0 else 1.0
+        tau_entry_scaled = float(tau_entry) * scale_mult
+        tau_add = float(min(0.99 * scale_mult, max(0.01 * scale_mult, tau_entry_scaled * float(tau_add_multiplier))))
         tau_danger_add = 1.0
-        tau_entry_map = {name: float(tau_entry) for name in entry_models.keys()}
+        tau_entry_long_map = {name: float(tau_entry_scaled) for name in entry_models_long.keys()}
+        tau_entry_short_map = {name: float(tau_entry_scaled) for name in entry_models_short.keys()}
 
         periods.append(
             PeriodModel(
                 period_days=period_days,
                 train_end_utc=train_end_ts,
-                entry_model=entry_model,
-                entry_models=entry_models,
+                entry_model_long=entry_model_long,
+                entry_model_short=entry_model_short,
+                entry_models_long=entry_models_long,
+                entry_models_short=entry_models_short,
+                entry_model=entry_model_long,
+                entry_models=entry_models_long,
                 danger_model=danger_model,
                 exit_model=exit_model,
                 entry_cols=entry_cols,
-                entry_cols_map=entry_cols_map,
+                entry_cols_map_long=entry_cols_map_long,
+                entry_cols_map_short=entry_cols_map_short,
+                entry_cols_map=entry_cols_map_long,
+                entry_pred_bias_map_long=entry_pred_bias_map_long,
+                entry_pred_bias_map_short=entry_pred_bias_map_short,
+                entry_pred_bias_map=entry_pred_bias_map_long,
+                entry_calibration_map_long=entry_calibration_map_long,
+                entry_calibration_map_short=entry_calibration_map_short,
+                entry_calibration_map=entry_calibration_map_long,
                 danger_cols=danger_cols,
                 exit_cols=exit_cols,
-                entry_calib=entry_calib,
-                entry_calib_map=entry_calib_map,
-                danger_calib=danger_calib,
-                exit_calib=exit_calib,
-                tau_entry=tau_entry,
-                tau_entry_map=tau_entry_map,
+                tau_entry_long=float(tau_entry_scaled),
+                tau_entry_short=float(tau_entry_scaled),
+                tau_entry_long_map=tau_entry_long_map,
+                tau_entry_short_map=tau_entry_short_map,
+                tau_entry=float(tau_entry_scaled),
+                tau_entry_map=tau_entry_long_map,
                 tau_danger=tau_danger,
                 tau_exit=tau_exit,
                 tau_add=tau_add,
                 tau_danger_add=tau_danger_add,
+                entry_label_scale=float(entry_label_scale),
             )
         )
     # mais recente primeiro (menor tail) => train_end maior
@@ -201,17 +295,22 @@ def apply_threshold_overrides(
     """
     out: List[PeriodModel] = []
     for pm in periods:
-        te = pm.tau_entry if tau_entry is None else float(tau_entry)
-        ta = float(min(0.99, max(0.01, te * float(tau_add_multiplier))))
-        tau_entry_map = dict(pm.tau_entry_map or {})
+        scale_mult = float(pm.entry_label_scale) if float(pm.entry_label_scale) > 1.0 else 1.0
+        te_raw = pm.tau_entry_long if tau_entry is None else float(tau_entry) * scale_mult
+        ta = float(min(0.99 * scale_mult, max(0.01 * scale_mult, te_raw * float(tau_add_multiplier))))
+        tau_entry_long_map = dict(pm.tau_entry_long_map or {})
+        tau_entry_short_map = dict(pm.tau_entry_short_map or {})
         if tau_entry is not None:
-            keys = list(tau_entry_map.keys()) or [n for n, _w in _entry_specs()]
-            tau_entry_map = {k: float(te) for k in keys}
+            keys = list(tau_entry_long_map.keys()) or [n for n, _w in _entry_specs()]
+            tau_entry_long_map = {k: float(te_raw) for k in keys}
+            tau_entry_short_map = {k: float(te_raw) for k in keys}
         out.append(
             replace(
                 pm,
-                tau_entry=float(te),
-                tau_entry_map=tau_entry_map,
+                tau_entry_long=float(te_raw),
+                tau_entry_short=float(te_raw),
+                tau_entry_long_map=tau_entry_long_map,
+                tau_entry_short_map=tau_entry_short_map,
                 tau_add=float(ta),
             )
         )
@@ -236,23 +335,56 @@ def _build_matrix_rows(df: pd.DataFrame, cols: List[str], rows: np.ndarray) -> n
     return mat
 
 
+def _predict_entry_model(model: Any, X: np.ndarray) -> np.ndarray:
+    if xgb is not None and isinstance(model, xgb.Booster):
+        return model.predict(xgb.DMatrix(X), validate_features=False)
+    return model.predict(X)
+
+
+def _clip_entry_pred(arr: np.ndarray, scale: float) -> np.ndarray:
+    """
+    Mantem previsoes na mesma faixa do label quando configurado.
+    Por padrao, clipa em [0, scale] para modo split_0_100.
+    """
+    try:
+        use_clip = str(os.getenv("SNIPER_CLIP_ENTRY_PRED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    except Exception:
+        use_clip = True
+    if not use_clip:
+        return arr
+    try:
+        lo_env = os.getenv("SNIPER_ENTRY_PRED_CLIP_MIN", "").strip()
+        hi_env = os.getenv("SNIPER_ENTRY_PRED_CLIP_MAX", "").strip()
+        lo = float(lo_env) if lo_env else 0.0
+        hi = float(hi_env) if hi_env else float(scale)
+    except Exception:
+        lo, hi = 0.0, float(scale)
+    if not np.isfinite(lo):
+        lo = 0.0
+    if not np.isfinite(hi):
+        hi = float(scale)
+    if hi < lo:
+        lo, hi = hi, lo
+    return np.clip(arr, lo, hi).astype(np.float32, copy=False)
+
+
 def predict_scores_walkforward(
     df: pd.DataFrame,
     *,
     periods: List[PeriodModel],
     return_period_id: bool = False,
-) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel] | tuple[dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel] | tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel, np.ndarray]:
     """
     Prediz p_entry/p_danger para cada timestamp, escolhendo o modelo mais recente com train_end_utc < t.
     Retorna p_entry por janela, p_danger e o primeiro período efetivamente usado.
     """
-    import xgboost as xgb
     idx = pd.to_datetime(df.index)
     n = len(idx)
-    entry_names = sorted({name for pm in periods for name in (pm.entry_models or {}).keys()})
+    entry_names = sorted({name for pm in periods for name in (pm.entry_models_long or {}).keys()})
     if not entry_names:
         entry_names = [name for name, _w in _entry_specs()]
-    p_entry_map = {name: np.full(n, np.nan, dtype=np.float32) for name in entry_names}
+    p_entry_long_map = {name: np.full(n, np.nan, dtype=np.float32) for name in entry_names}
+    p_entry_short_map = {name: np.full(n, np.nan, dtype=np.float32) for name in entry_names}
     p_danger = np.zeros(n, dtype=np.float32)  # danger removido
     # p_exit removido (mantido nulo para compatibilidade)
     p_exit = np.zeros(n, dtype=np.float32)
@@ -264,21 +396,64 @@ def predict_scores_walkforward(
         mask = idx > pm.train_end_utc
         # só preenche onde ainda não foi preenchido (usa base_name como proxy)
         base_name = entry_names[0] if entry_names else "mid"
-        mask &= ~np.isfinite(p_entry_map.get(base_name, np.full(n, np.nan, dtype=np.float32)))
+        mask &= ~np.isfinite(p_entry_long_map.get(base_name, np.full(n, np.nan, dtype=np.float32)))
         if not mask.any():
             continue
         mask_np = np.asarray(mask, dtype=bool)
         rows = np.flatnonzero(mask_np)
         pdg = np.zeros(rows.size, dtype=np.float32)
-        # entry por janela
+        apply_bias = str(os.getenv("SNIPER_APPLY_PRED_BIAS", "0")).strip().lower() not in {"0", "false", "no", "off"}
+        # entry por janela (long/short)
         for name in entry_names:
-            model = pm.entry_models.get(name, pm.entry_model)
-            cols = pm.entry_cols_map.get(name, pm.entry_cols)
-            X_e = _build_matrix_rows(df, cols, rows)
-            pe = model.predict(xgb.DMatrix(X_e), validate_features=False).astype(np.float32, copy=False)
-            calib = pm.entry_calib_map.get(name, pm.entry_calib)
-            pe = _apply_calibration(pe.astype(np.float64), calib).astype(np.float32, copy=False)
-            p_entry_map[name][rows] = pe
+            model_long = pm.entry_models_long.get(name, pm.entry_model_long)
+            model_short = pm.entry_models_short.get(name, pm.entry_model_short)
+            cols_long = pm.entry_cols_map_long.get(name, pm.entry_cols)
+            cols_short = pm.entry_cols_map_short.get(name, pm.entry_cols)
+            X_e = _build_matrix_rows(df, cols_long, rows)
+            pe_long = _predict_entry_model(model_long, X_e).astype(np.float32, copy=False)
+            cal_l = pm.entry_calibration_map_long.get(name)
+            if cal_l is not None:
+                a = np.float32(float(cal_l.get("a", 1.0)))
+                b = np.float32(float(cal_l.get("b", 0.0)))
+                pe_long = (pe_long * a) + b
+                try:
+                    s_pos = float(cal_l.get("s_pos", 1.0))
+                    s_neg = float(cal_l.get("s_neg", 1.0))
+                    if s_pos != 1.0 or s_neg != 1.0:
+                        mpos = pe_long >= 0
+                        if np.any(mpos):
+                            pe_long[mpos] = pe_long[mpos] * np.float32(s_pos)
+                        if np.any(~mpos):
+                            pe_long[~mpos] = pe_long[~mpos] * np.float32(s_neg)
+                except Exception:
+                    pass
+            if apply_bias:
+                pe_long = pe_long - np.float32(pm.entry_pred_bias_map_long.get(name, 0.0))
+            pe_long = _clip_entry_pred(pe_long, pm.entry_label_scale)
+
+            X_s = _build_matrix_rows(df, cols_short, rows)
+            pe_short = _predict_entry_model(model_short, X_s).astype(np.float32, copy=False)
+            cal_s = pm.entry_calibration_map_short.get(name)
+            if cal_s is not None:
+                a = np.float32(float(cal_s.get("a", 1.0)))
+                b = np.float32(float(cal_s.get("b", 0.0)))
+                pe_short = (pe_short * a) + b
+                try:
+                    s_pos = float(cal_s.get("s_pos", 1.0))
+                    s_neg = float(cal_s.get("s_neg", 1.0))
+                    if s_pos != 1.0 or s_neg != 1.0:
+                        mpos = pe_short >= 0
+                        if np.any(mpos):
+                            pe_short[mpos] = pe_short[mpos] * np.float32(s_pos)
+                        if np.any(~mpos):
+                            pe_short[~mpos] = pe_short[~mpos] * np.float32(s_neg)
+                except Exception:
+                    pass
+            if apply_bias:
+                pe_short = pe_short - np.float32(pm.entry_pred_bias_map_short.get(name, 0.0))
+            pe_short = _clip_entry_pred(pe_short, pm.entry_label_scale)
+            p_entry_long_map[name][rows] = pe_long
+            p_entry_short_map[name][rows] = pe_short
         p_danger[rows] = pdg
         period_id[rows] = np.int16(pid)
         if used_any is None:
@@ -296,108 +471,11 @@ def predict_scores_walkforward(
             f"df=[{t0}..{t1}] train_end_range=[{te_min}..{te_max}]"
         )
     if return_period_id:
-        return p_entry_map, p_danger, p_exit, used_any, period_id
-    return p_entry_map, p_danger, p_exit, used_any
+        return p_entry_long_map, p_entry_short_map, p_danger, p_exit, used_any, period_id
+    return p_entry_long_map, p_entry_short_map, p_danger, p_exit, used_any
 
 
 
-def _build_row_vector_for_exit(
-    df: pd.DataFrame,
-    i: int,
-    cols: List[str],
-    *,
-    cycle_state: dict,
-    col_arrays: dict[str, np.ndarray] | None = None,
-) -> np.ndarray:
-    out = np.zeros(len(cols), dtype=np.float32)
-    for k, col in enumerate(cols):
-        if col.startswith("cycle_"):
-            out[k] = float(cycle_state.get(col, 0.0))
-            continue
-        if col_arrays is not None:
-            arr = col_arrays.get(col)
-            if arr is not None:
-                try:
-                    v = float(arr[i])
-                    out[k] = v if np.isfinite(v) else 0.0
-                    continue
-                except Exception:
-                    pass
-        try:
-            v = df[col].iat[i]
-            out[k] = float(v) if np.isfinite(v) else 0.0
-        except Exception:
-            out[k] = 0.0
-    return out
-
-
-def _make_exit_row_cache(
-    df: pd.DataFrame,
-    cols: list[str],
-) -> tuple[np.ndarray, np.ndarray, object, np.ndarray]:
-    """
-    Prepara estruturas para preencher row de ExitScore sem alocar/sem pandas no hot-loop.
-
-    Retorna: (kind[int8], idx[int16], data_cols(typed.List|list), row_buf[float32])
-    """
-    # mapeamento fixo de cycle_* (ordem estável)
-    cycle_names = [
-        "cycle_is_add",
-        "cycle_num_adds",
-        "cycle_time_in_trade",
-        "cycle_dd_pct",
-        "cycle_dist_to_tp",
-        "cycle_dist_to_sl",
-        "cycle_avg_entry_price",
-        "cycle_last_fill_price",
-        "cycle_risk_used_pct",
-        "cycle_risk_if_add_pct",
-    ]
-    cycle_map = {name: j for j, name in enumerate(cycle_names)}
-
-    kind = np.zeros(len(cols), dtype=np.int8)
-    idx = np.zeros(len(cols), dtype=np.int16)
-
-    # data colunas: lista de arrays float32 (numba typed.List se disponível)
-    data_py: list[np.ndarray] = []
-    data_pos: dict[str, int] = {}
-
-    for k, col in enumerate(cols):
-        sc = str(col)
-        if sc.startswith("cycle_"):
-            kind[k] = 0
-            idx[k] = np.int16(cycle_map.get(sc, 0))
-            continue
-        # non-cycle: coluna do df
-        if sc in df.columns:
-            j = data_pos.get(sc)
-            if j is None:
-                try:
-                    arr = df[sc].to_numpy(np.float32, copy=False)
-                except Exception:
-                    arr = None
-                if arr is None:
-                    kind[k] = 2
-                    idx[k] = np.int16(0)
-                    continue
-                j = len(data_py)
-                data_pos[sc] = j
-                data_py.append(arr)
-            kind[k] = 1
-            idx[k] = np.int16(j)
-        else:
-            kind[k] = 2
-            idx[k] = np.int16(0)
-
-    if _NUMBA_OK:
-        data_cols = NList()  # type: ignore[misc]
-        for a in data_py:
-            data_cols.append(a)
-    else:
-        data_cols = data_py
-
-    row_buf = np.empty(len(cols), dtype=np.float32)
-    return kind, idx, data_cols, row_buf
 
 
 def simulate_sniper_from_scores(
@@ -487,8 +565,8 @@ def simulate_sniper_from_scores(
             if i + int(exit_min_hold) >= (n - 1):
                 eq_curve[i] = eq
                 continue
-            tau_long = float(tau_entry_long) if tau_entry_long is not None else float(pm.tau_entry)
-            tau_short = float(tau_entry_short) if tau_entry_short is not None else float(pm.tau_entry)
+            tau_long = float(tau_entry_long) if tau_entry_long is not None else float(pm.tau_entry_long)
+            tau_short = float(tau_entry_short) if tau_entry_short is not None else float(pm.tau_entry_short)
             long_ok = pe_long >= tau_long
             short_ok = pe_short >= tau_short
             pick_side = None

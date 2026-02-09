@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-import os, time, threading
+import os, time, threading, json
+from pathlib import Path
 from typing import Any
 import numpy as np, pandas as pd
 import mysql.connector
@@ -52,6 +53,61 @@ def _now_ms_from_env() -> int:
         except Exception:
             pass
     return int(time.time() * 1000)
+
+
+def _repo_root() -> Path | None:
+    try:
+        here = Path(__file__).resolve()
+        for p in here.parents:
+            if p.name.lower() == "tradebot":
+                return p
+    except Exception:
+        return None
+    return None
+
+
+def _ohlc_cache_enabled() -> bool:
+    v = (os.getenv("PF_OHLC_CACHE", "1") or "").strip().lower()
+    return v not in {"0", "false", "no", "off"}
+
+
+def _ohlc_cache_refresh() -> bool:
+    v = (os.getenv("PF_OHLC_CACHE_REFRESH", "0") or "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+def _ohlc_cache_dir() -> Path:
+    env_dir = (os.getenv("PF_OHLC_CACHE_DIR") or "").strip()
+    if env_dir:
+        return Path(env_dir)
+    root = _repo_root()
+    if root is not None:
+        return root.parent / "cache_sniper" / "ohlc_1m"
+    return Path.cwd() / "cache_sniper" / "ohlc_1m"
+
+
+def _ohlc_cache_paths(sym: str) -> tuple[Path, Path]:
+    cache_dir = _ohlc_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    safe = sym.lower()
+    return (cache_dir / f"{safe}.parquet", cache_dir / f"{safe}.meta.json")
+
+
+def _load_ohlc_cache(path: Path) -> pd.DataFrame:
+    return pd.read_parquet(path)
+
+
+def _save_ohlc_cache(df: pd.DataFrame, path: Path) -> None:
+    df.to_parquet(path, index=True)
+
+
+def _read_cache_meta(path: Path) -> dict:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
 
 
 def load_close_series(sym: str, days: int, *, remove_tail_days: int = 0) -> pd.Series:
@@ -131,6 +187,37 @@ def load_ohlc_1m_series(sym: str, days: int, *, remove_tail_days: int = 0) -> pd
     if remove_tail_days and remove_tail_days > 0:
         end_ms = int((now_s - remove_tail_days*86400) * 1000)
 
+    if _ohlc_cache_enabled():
+        cache_path, meta_path = _ohlc_cache_paths(sym)
+        refresh = _ohlc_cache_refresh()
+        if cache_path.exists() and (not refresh):
+            try:
+                meta = _read_cache_meta(meta_path)
+                dfc = _load_ohlc_cache(cache_path)
+                if not dfc.empty:
+                    if getattr(dfc.index, "tz", None) is not None:
+                        dfc.index = dfc.index.tz_localize(None)
+                    if "start_ms" in meta and "end_ms" in meta:
+                        cached_start = int(meta.get("start_ms") or 0)
+                        cached_end = int(meta.get("end_ms") or 0)
+                        ok_start = start_ms >= cached_start
+                        ok_end = True if end_ms is None else (end_ms <= cached_end)
+                        if ok_start and ok_end:
+                            if end_ms is None:
+                                return dfc.loc[dfc.index >= pd.to_datetime(start_ms, unit="ms")]
+                            return dfc.loc[
+                                (dfc.index >= pd.to_datetime(start_ms, unit="ms"))
+                                & (dfc.index < pd.to_datetime(end_ms, unit="ms"))
+                            ]
+                    if end_ms is None:
+                        return dfc.loc[dfc.index >= pd.to_datetime(start_ms, unit="ms")]
+                    return dfc.loc[
+                        (dfc.index >= pd.to_datetime(start_ms, unit="ms"))
+                        & (dfc.index < pd.to_datetime(end_ms, unit="ms"))
+                    ]
+            except Exception:
+                pass
+
     force = (os.getenv("PF_FORCE_DRIVER") or "").strip().lower()
     if force == "cext":
         want_c_ext = True
@@ -200,6 +287,19 @@ def load_ohlc_1m_series(sym: str, days: int, *, remove_tail_days: int = 0) -> pd
     df = df[~df.index.duplicated(keep="last")].sort_index()
     if getattr(df.index, "tz", None) is not None:
         df.index = df.index.tz_localize(None)
+    if _ohlc_cache_enabled():
+        try:
+            cache_path, meta_path = _ohlc_cache_paths(sym)
+            _save_ohlc_cache(df, cache_path)
+            meta = {
+                "symbol": sym,
+                "start_ms": int(df.index.min().value // 1_000_000),
+                "end_ms": int(df.index.max().value // 1_000_000),
+                "rows": int(len(df)),
+            }
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        except Exception:
+            pass
     return df
 
 

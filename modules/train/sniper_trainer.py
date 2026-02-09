@@ -6,25 +6,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Sequence, Tuple, Any
 
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import json
+
+
 import numpy as np
 import pandas as pd
 
-try:
-    import xgboost as xgb
-except Exception as e:
-    raise
+def _import_xgb():
+    import xgboost as xgb  # type: ignore
+
+    return xgb
+
+
+def _import_catboost_regressor():
+    from catboost import CatBoostRegressor  # type: ignore
+
+    return CatBoostRegressor
+
+
+def _import_catboost_pool():
+    from catboost import Pool  # type: ignore
+
+    return Pool
 
 try:
-    from sklearn.linear_model import LogisticRegression
+    import psutil  # type: ignore
 except Exception:
-    LogisticRegression = None  # type: ignore
+    psutil = None  # type: ignore
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -32,6 +46,174 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if not v:
         return bool(default)
     return v.strip().lower() not in {"0", "false", "no", "off"}
+
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name, "").strip()
+    if not v:
+        return float(default)
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
+def _print_dist_stats(tag: str, arr: np.ndarray, *, weights: np.ndarray | None = None) -> None:
+    try:
+        x = np.asarray(arr, dtype=np.float64)
+        m = np.isfinite(x)
+        if not np.any(m):
+            return
+        x = x[m]
+        q = np.quantile(x, [0.01, 0.05, 0.5, 0.95, 0.99])
+        msg = (
+            f"[sniper-train] {tag}: n={x.size} mean={np.mean(x):+.5f} std={np.std(x):.5f} "
+            f"q01={q[0]:+.5f} q05={q[1]:+.5f} q50={q[2]:+.5f} q95={q[3]:+.5f} q99={q[4]:+.5f} "
+            f"min={np.min(x):+.5f} max={np.max(x):+.5f}"
+        )
+        if weights is not None:
+            w = np.asarray(weights, dtype=np.float64)
+            if w.shape == np.asarray(arr).shape:
+                w = w[m]
+                wm = np.isfinite(w) & (w > 0)
+                if np.any(wm):
+                    msg += f" wmean={np.average(x[wm], weights=w[wm]):+.5f}"
+        print(msg, flush=True)
+    except Exception:
+        return
+
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    x = np.asarray(values, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+    m = np.isfinite(x) & np.isfinite(w) & (w > 0.0)
+    if not np.any(m):
+        return float(np.nanmedian(x)) if x.size else 0.0
+    x = x[m]
+    w = w[m]
+    order = np.argsort(x, kind="mergesort")
+    xs = x[order]
+    ws = w[order]
+    csum = np.cumsum(ws)
+    cutoff = 0.5 * float(csum[-1])
+    idx = int(np.searchsorted(csum, cutoff, side="left"))
+    idx = max(0, min(idx, xs.size - 1))
+    return float(xs[idx])
+
+def _compute_pred_bias(pred: np.ndarray, weights: np.ndarray | None) -> float:
+    method = str(os.getenv("SNIPER_PRED_BIAS_METHOD", "median")).strip().lower()
+    p = np.asarray(pred, dtype=np.float64)
+    if p.size == 0:
+        return 0.0
+    if method == "mean":
+        if weights is not None and np.size(weights) == np.size(p):
+            w = np.asarray(weights, dtype=np.float64)
+            m = np.isfinite(p) & np.isfinite(w) & (w > 0)
+            if np.any(m):
+                return float(np.average(p[m], weights=w[m]))
+        m = np.isfinite(p)
+        return float(np.mean(p[m])) if np.any(m) else 0.0
+    if weights is not None and np.size(weights) == np.size(p):
+        return _weighted_median(p, np.asarray(weights, dtype=np.float64))
+    m = np.isfinite(p)
+    if not np.any(m):
+        return 0.0
+    return float(np.median(p[m]))
+
+def _fit_affine_calibration(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    weights: np.ndarray | None,
+) -> dict:
+    yt = np.asarray(y_true, dtype=np.float64)
+    yp = np.asarray(y_pred, dtype=np.float64)
+    m = np.isfinite(yt) & np.isfinite(yp)
+    if weights is not None:
+        w = np.asarray(weights, dtype=np.float64)
+        m &= np.isfinite(w) & (w > 0.0)
+        ww = w[m]
+    else:
+        ww = np.ones(int(np.sum(m)), dtype=np.float64)
+    xt = yp[m]
+    yy = yt[m]
+    if xt.size < 8:
+        return {"kind": "affine", "a": 1.0, "b": 0.0}
+    sw = float(np.sum(ww))
+    if sw <= 0.0:
+        return {"kind": "affine", "a": 1.0, "b": 0.0}
+    mx = float(np.sum(ww * xt) / sw)
+    my = float(np.sum(ww * yy) / sw)
+    dx = xt - mx
+    dy = yy - my
+    var_x = float(np.sum(ww * dx * dx) / sw)
+    cov_xy = float(np.sum(ww * dx * dy) / sw)
+    if not np.isfinite(var_x) or var_x <= 1e-12:
+        a = 1.0
+    else:
+        a = float(cov_xy / var_x)
+    b = float(my - a * mx)
+    if not np.isfinite(a):
+        a = 1.0
+    if not np.isfinite(b):
+        b = 0.0
+    return {"kind": "affine", "a": float(a), "b": float(b)}
+
+
+def _fit_piecewise_scale(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> dict:
+    """
+    Ajuste simples por lados:
+    - escala positiva para alinhar p90
+    - escala negativa para alinhar p10
+    Retorna s_pos, s_neg e rmse apos escala.
+    """
+    yt = np.asarray(y_true, dtype=np.float64)
+    yp = np.asarray(y_pred, dtype=np.float64)
+    m = np.isfinite(yt) & np.isfinite(yp)
+    yt = yt[m]
+    yp = yp[m]
+    if yt.size < 8:
+        err = yp - yt
+        rmse = float(np.sqrt(np.mean(err * err))) if err.size else float("nan")
+        return {"s_pos": 1.0, "s_neg": 1.0, "rmse": rmse}
+    pos = yp > 0
+    neg = yp < 0
+    s_pos = 1.0
+    s_neg = 1.0
+    try:
+        if np.any(pos):
+            q_pred = float(np.quantile(yp[pos], 0.90))
+            q_true = float(np.quantile(yt[pos], 0.90))
+            if np.isfinite(q_pred) and abs(q_pred) > 1e-12:
+                s_pos = float(q_true / q_pred)
+        if np.any(neg):
+            q_pred = float(np.quantile(yp[neg], 0.10))
+            q_true = float(np.quantile(yt[neg], 0.10))
+            if np.isfinite(q_pred) and abs(q_pred) > 1e-12:
+                s_neg = float(q_true / q_pred)
+    except Exception:
+        s_pos = 1.0
+        s_neg = 1.0
+    yp_pw = yp.copy()
+    if np.any(pos):
+        yp_pw[pos] *= s_pos
+    if np.any(neg):
+        yp_pw[neg] *= s_neg
+    err = yp_pw - yt
+    rmse = float(np.sqrt(np.mean(err * err))) if err.size else float("nan")
+    return {"s_pos": float(s_pos), "s_neg": float(s_neg), "rmse": float(rmse)}
+
+
+def _clamp_scale(v: float, lo: float = 0.5, hi: float = 3.0) -> float:
+    try:
+        if not np.isfinite(v):
+            return 1.0
+    except Exception:
+        return 1.0
+    if v < lo:
+        return float(lo)
+    if v > hi:
+        return float(hi)
+    return float(v)
 
 
 def _enable_vt_mode(stream) -> bool:
@@ -58,6 +240,26 @@ def _enable_vt_mode(stream) -> bool:
     except Exception:
         return False
 
+
+_RAM_GUARD_WARNED = False
+
+
+def _check_ram_or_abort(threshold_pct: float, *, where: str) -> None:
+    if threshold_pct <= 0:
+        return
+    if psutil is None:
+        global _RAM_GUARD_WARNED
+        if not _RAM_GUARD_WARNED:
+            print("[sniper-train] aviso: psutil ausente, ram_guard desativado", flush=True)
+            _RAM_GUARD_WARNED = True
+        return
+    try:
+        used = float(psutil.virtual_memory().percent)
+    except Exception:
+        return
+    if used >= float(threshold_pct):
+        raise RuntimeError(f"RAM guard: uso {used:.1f}% >= {float(threshold_pct):.1f}% em {where}")
+
 try:
     from .sniper_dataflow import (
         prepare_sniper_dataset,
@@ -65,7 +267,7 @@ try:
         ensure_feature_cache,
         GLOBAL_FLAGS_FULL,
         SniperBatch,
-        entry_label_specs,
+        SniperDataPack,
     )
 except Exception:
     import sys
@@ -84,7 +286,6 @@ except Exception:
         ensure_feature_cache,
         GLOBAL_FLAGS_FULL,
         SniperBatch,
-        entry_label_specs,
     )
 try:
     from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
@@ -124,13 +325,28 @@ class TrainConfig:
     contract: TradeContract = DEFAULT_TRADE_CONTRACT
     # dataset sizing (VRAM/RAM)
     max_rows_entry: int = 2_000_000
-    entry_ratio_neg_per_pos: float = 6.0
     entry_pool_full: bool = False
     entry_pool_dir: Path | None = None
     entry_pool_prefiltered: bool = True
-    entry_pool_ratio_neg_per_pos: float = 10.0
-    # quais labels de entry usar ("long", "short" ou ambos)
-    entry_label_sides: Sequence[str] = ("long",)
+    # modelo para regressao (ex.: "catboost" ou "xgb")
+    entry_model_type: str = "xgb"
+    # regressao: janela usada para target (minutos). Se 0, usa contrato.
+    entry_reg_window_min: int = 0
+    # regressao: pesos por amostra
+    entry_reg_weight_alpha: float = 4.0
+    entry_reg_weight_power: float = 1.2
+    # regressao: bins para balanceamento do target
+    entry_reg_balance_bins: Sequence[float] = (0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 80.0)
+    # modo do label: "signed" (antigo) ou "split_0_100" (long/short)
+    entry_label_mode: str = "split_0_100"
+    entry_label_scale: float = 100.0
+    entry_sides: Sequence[str] = ("long", "short")
+    # regressao: balanceamento por distancia do zero (0 = uniforme)
+    entry_reg_balance_distance_power: float = 1.0
+    # regressao: fração mínima de amostras por bin (relativo ao bin mais pesado)
+    entry_reg_balance_min_frac: float = 0.1
+    # aborta se uso de RAM ultrapassar esse percentual (<=0 desativa)
+    abort_ram_pct: float = 99.0
     use_feature_cache: bool = True
     # modo/asset
     asset_class: str = "crypto"
@@ -146,8 +362,8 @@ class TrainConfig:
 
 
 DEFAULT_ENTRY_PARAMS = {
-    "objective": "binary:logistic",
-    "eval_metric": "aucpr",
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
     "eta": 0.05,
     "max_depth": 7,
     "min_child_weight": 5.0,
@@ -163,50 +379,63 @@ DEFAULT_ENTRY_PARAMS = {
     "device": "cuda:0",
 }
 
-# Pool completo (pré-treino): negativos já são filtrados no dataflow (pos x alpha).
-POOL_NEG_PER_POS = 6
-POOL_NEG_MAX = 0  # 0 = sem limite absoluto; controla apenas por neg_per_pos
-POOL_OTHER_POS_WEIGHT_BONUS = 1.0
-
-
-def _filter_pool_batch(b: SniperBatch, *, neg_per_pos: int, neg_max: int, rng: np.random.Generator) -> SniperBatch:
-    y = b.y.astype(np.float32, copy=False)
-    pos_idx = np.flatnonzero(y >= 0.5)
-    neg_idx = np.flatnonzero(y < 0.5)
-    if neg_idx.size == 0:
-        keep = pos_idx
+def _sample_indices_regression(
+    y: np.ndarray,
+    bins: Sequence[float] | None,
+    max_rows: int,
+    rng: np.random.Generator,
+    *,
+    distance_power: float = 0.0,
+    min_frac: float = 1.0,
+) -> np.ndarray:
+    if y.size == 0:
+        return np.empty((0,), dtype=np.int64)
+    if max_rows <= 0 or y.size <= max_rows:
+        return np.arange(y.size, dtype=np.int64)
+    edges = list(bins or [])
+    edges = sorted(float(x) for x in edges)
+    edges = [-np.inf] + edges + [np.inf]
+    bins_n = max(1, len(edges) - 1)
+    use_weighted = float(distance_power) > 0.0
+    weights: list[float] | None = None
+    if use_weighted:
+        weights = []
+        for i in range(bins_n):
+            lo = edges[i]
+            hi = edges[i + 1]
+            if np.isfinite(lo) and np.isfinite(hi):
+                center = 0.5 * (lo + hi)
+            elif np.isfinite(hi):
+                center = float(hi)
+            elif np.isfinite(lo):
+                center = float(lo)
+            else:
+                center = 0.0
+            w = float(max(abs(center), 1e-6) ** float(distance_power))
+            weights.append(w)
+        max_w = max(weights) if weights else 1.0
+        min_w = max_w * float(max(0.0, min_frac))
+        weights = [max(w, min_w) for w in weights]
+        total_w = float(sum(weights)) if weights else 1.0
     else:
-        if pos_idx.size == 0:
-            # sem positivos: mantém os negativos mais "pesados" (capado se neg_max>0)
-            n_keep = int(min(neg_idx.size, max(1, int(neg_max)))) if neg_max > 0 else int(neg_idx.size)
-            w = b.w[neg_idx].astype(np.float64, copy=False)
-            if np.all(~np.isfinite(w)) or float(np.nanmax(w)) <= 0.0:
-                keep_neg = neg_idx[:n_keep]
-            else:
-                order = np.argsort(w, kind="mergesort")[::-1]
-                keep_neg = neg_idx[order[:n_keep]]
-            keep = keep_neg
+        target_per_bin = max(1, int(round(max_rows / bins_n)))
+    keep_idx: list[int] = []
+    for i in range(bins_n):
+        lo = edges[i]
+        hi = edges[i + 1]
+        sel = (y >= lo) & (y < hi)
+        idx_bin = np.flatnonzero(sel)
+        if use_weighted:
+            target_per_bin = max(1, int(round(max_rows * (weights[i] / total_w))))
+        if idx_bin.size <= target_per_bin:
+            keep_idx.extend(idx_bin.tolist())
         else:
-            target_neg = int(min(neg_idx.size, max(1, pos_idx.size * int(neg_per_pos))))
-            if neg_max > 0:
-                target_neg = min(target_neg, int(neg_max))
-            w = b.w[neg_idx].astype(np.float64, copy=False)
-            w = np.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
-            if float(w.sum()) <= 0.0:
-                keep_neg = rng.choice(neg_idx, size=target_neg, replace=False)
-            else:
-                p = w / float(w.sum())
-                keep_neg = rng.choice(neg_idx, size=target_neg, replace=False, p=p)
-            keep = np.concatenate([pos_idx, keep_neg])
-    keep.sort()
-    return SniperBatch(
-        X=b.X[keep],
-        y=b.y[keep],
-        w=b.w[keep],
-        ts=b.ts[keep],
-        sym_id=b.sym_id[keep],
-        feature_cols=b.feature_cols,
-    )
+            pick = rng.choice(idx_bin, size=target_per_bin, replace=False)
+            keep_idx.extend(pick.tolist())
+    if len(keep_idx) > max_rows:
+        keep_idx = rng.choice(np.array(keep_idx), size=max_rows, replace=False).tolist()
+    keep = np.array(sorted(set(keep_idx)), dtype=np.int64)
+    return keep
 
 
 def _save_entry_pool_symbol(pool_dir: Path, symbol: str, entry_batches: dict[str, SniperBatch]) -> None:
@@ -220,11 +449,10 @@ def _save_entry_pool_symbol(pool_dir: Path, symbol: str, entry_batches: dict[str
         return
     df = pd.DataFrame(base_batch.X, columns=list(base_batch.feature_cols))
     df.index = pd.to_datetime(base_batch.ts)
-    for name, b in entry_batches.items():
-        if b is None or b.X.size == 0:
-            continue
-        df[f"label_{name}"] = b.y.astype(np.uint8, copy=False)
-        df[f"weight_{name}"] = b.w.astype(np.float32, copy=False)
+    # salva label_entry/weight (regressão)
+    b = base_batch
+    df["label_entry"] = b.y.astype(np.float32, copy=False)
+    df["weight"] = b.w.astype(np.float32, copy=False)
     out_dir = pool_dir / "entry_pool"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{str(symbol).upper()}.parquet"
@@ -267,100 +495,6 @@ def _default_symbols_file(asset_class: str) -> Path:
     if asset == "stocks":
         return DEFAULT_STOCKS_SYMBOLS_FILE
     return DEFAULT_SYMBOLS_FILE
-
-
-def _sample_indices(
-    labels: np.ndarray,
-    ratio_neg_per_pos: float,
-    max_rows: int,
-    *,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    if labels.size == 0:
-        return np.empty((0,), dtype=np.int64)
-    y = labels
-    pos_idx = np.flatnonzero(y >= 0.5)
-    neg_idx = np.flatnonzero(y < 0.5)
-    if pos_idx.size == 0:
-        return np.empty((0,), dtype=np.int64)
-    ratio = float(max(0.0, ratio_neg_per_pos))
-    max_rows = int(max_rows)
-    pos_keep_n = int(pos_idx.size)
-    if max_rows > 0:
-        max_pos = int(max(1, round(max_rows / (1.0 + ratio))))
-        pos_keep_n = min(pos_keep_n, max_pos)
-    if pos_keep_n < pos_idx.size:
-        pos_keep = rng.choice(pos_idx, size=pos_keep_n, replace=False)
-    else:
-        pos_keep = pos_idx
-    neg_target = int(round(pos_keep_n * ratio))
-    if max_rows > 0:
-        max_neg_allowed = max_rows - pos_keep_n
-        if max_neg_allowed < neg_target:
-            neg_target = max(0, max_neg_allowed)
-    if neg_target <= 0 or neg_idx.size == 0:
-        keep_local = pos_keep
-    else:
-        if neg_target >= neg_idx.size:
-            neg_keep = neg_idx
-        else:
-            neg_keep = rng.choice(neg_idx, size=neg_target, replace=False)
-        keep_local = np.concatenate([pos_keep, neg_keep])
-    return np.sort(keep_local)
-
-
-def _sample_indices_weighted(
-    labels: np.ndarray,
-    weights: np.ndarray | None,
-    ratio_neg_per_pos: float,
-    max_rows: int,
-    *,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    if labels.size == 0:
-        return np.empty((0,), dtype=np.int64)
-    y = labels
-    pos_idx = np.flatnonzero(y >= 0.5)
-    neg_idx = np.flatnonzero(y < 0.5)
-    if pos_idx.size == 0:
-        return np.empty((0,), dtype=np.int64)
-    ratio = float(max(0.0, ratio_neg_per_pos))
-    max_rows = int(max_rows)
-    max_pos = pos_idx.size
-    if max_rows > 0:
-        max_pos = int(max(1, round(max_rows / (1.0 + ratio))))
-    if pos_idx.size <= max_pos:
-        pos_keep = pos_idx
-    else:
-        if weights is not None and weights.size == labels.size:
-            wpos = weights[pos_idx].astype(np.float64, copy=False)
-            wpos = np.nan_to_num(wpos, nan=0.0, posinf=0.0, neginf=0.0)
-            if float(wpos.sum()) > 0.0:
-                p = wpos / float(wpos.sum())
-                pos_keep = rng.choice(pos_idx, size=max_pos, replace=False, p=p)
-            else:
-                pos_keep = rng.choice(pos_idx, size=max_pos, replace=False)
-        else:
-            pos_keep = rng.choice(pos_idx, size=max_pos, replace=False)
-    target_neg = int(pos_keep.size * ratio)
-    if max_rows > 0:
-        target_neg = min(target_neg, int(max_rows - pos_keep.size))
-    target_neg = max(0, min(target_neg, neg_idx.size))
-    if target_neg <= 0 or neg_idx.size == 0:
-        keep_local = pos_keep
-    else:
-        if weights is not None and weights.size == labels.size:
-            wneg = weights[neg_idx].astype(np.float64, copy=False)
-            wneg = np.nan_to_num(wneg, nan=0.0, posinf=0.0, neginf=0.0)
-            if float(wneg.sum()) > 0.0:
-                p = wneg / float(wneg.sum())
-                neg_keep = rng.choice(neg_idx, size=target_neg, replace=False, p=p)
-            else:
-                neg_keep = rng.choice(neg_idx, size=target_neg, replace=False)
-        else:
-            neg_keep = rng.choice(neg_idx, size=target_neg, replace=False)
-        keep_local = np.concatenate([pos_keep, neg_keep])
-    return np.sort(keep_local)
 
 
 def _reservoir_merge(
@@ -498,127 +632,8 @@ def _split_train_val(batch: SniperBatch, val_frac: float = 0.2) -> Tuple[np.ndar
     return tr_idx, va_idx
 
 
-def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster, dict]:
-    tr_idx, va_idx = _split_train_val(batch)
-    if tr_idx.size == 0 or va_idx.size == 0:
-        raise RuntimeError("Dataset muito pequeno para treinar")
-    device = str(params.get("device", "cpu")).lower()
-    use_quantile = device.startswith("cuda")
-    Xtr = batch.X[tr_idx]
-    ytr = batch.y[tr_idx]
-    Xva = batch.X[va_idx]
-    yva = batch.y[va_idx]
-    wtr = batch.w[tr_idx] if getattr(batch, "w", None) is not None else None
-    wva = batch.w[va_idx] if getattr(batch, "w", None) is not None else None
-
-    # scale_pos_weight desativado (mantÃ©m o comportamento original)
-
-    # Blindagem: evita erro de base_score quando o dataset ficar com 1-classe por sampling.
-    y_mean = float(np.mean(ytr)) if ytr.size else 0.5
-    if not (0.0 < y_mean < 1.0):
-        # Se acontecer, o treino não é informativo (sem negativos/positivos).
-        # Não quebra: define base_score neutro e segue (ou você pode optar por "pular período").
-        print(f"[xgb] AVISO: y_mean={y_mean:.6f} (1-classe). Ajustando base_score=0.5", flush=True)
-        params = dict(params)
-        params["base_score"] = 0.5
-    elif "base_score" not in params:
-        # ajuda convergência / estabilidade
-        eps = 1e-6
-        params = dict(params)
-        params["base_score"] = float(min(1.0 - eps, max(eps, y_mean)))
-
-    # Para GPU + hist, QuantileDMatrix reduz VRAM.
-    # IMPORTANTE: o dvalid precisa referenciar o dtrain via `ref=...`.
-    if use_quantile:
-        mb = int(params.get("max_bin", 256))
-        # garante consistência entre Booster params e QuantileDMatrix bins
-        params = dict(params)
-        params["max_bin"] = mb
-        try:
-            # Nem todas as versões expõem max_bin no construtor; por isso try/except.
-            dtrain = xgb.QuantileDMatrix(Xtr, label=ytr, weight=wtr, max_bin=mb)
-            dvalid = xgb.QuantileDMatrix(Xva, label=yva, weight=wva, ref=dtrain, max_bin=mb)
-        except TypeError:
-            # fallback: usa default do QuantileDMatrix (geralmente 256) e ajusta params
-            params["max_bin"] = 256
-            dtrain = xgb.QuantileDMatrix(Xtr, label=ytr, weight=wtr)
-            dvalid = xgb.QuantileDMatrix(Xva, label=yva, weight=wva, ref=dtrain)
-        except Exception as e:
-            print(f"[xgb] QuantileDMatrix falhou ({type(e).__name__}: {e}) -> fallback DMatrix", flush=True)
-            dtrain = xgb.DMatrix(Xtr, label=ytr, weight=wtr)
-            dvalid = xgb.DMatrix(Xva, label=yva, weight=wva)
-    else:
-        dtrain = xgb.DMatrix(Xtr, label=ytr, weight=wtr)
-        dvalid = xgb.DMatrix(Xva, label=yva, weight=wva)
-    watch = [(dtrain, "train"), (dvalid, "val")]
-    print(f"[xgb] train rows={len(tr_idx):,} val rows={len(va_idx):,} feats={batch.X.shape[1]:,}".replace(",", "."), flush=True)
-    try:
-            booster = xgb.train(
-                params=params,
-                dtrain=dtrain,
-                num_boost_round=2000,
-                evals=watch,
-                early_stopping_rounds=200,
-                verbose_eval=50,
-            )
-    except Exception as e:
-        # fallback adicional: se GPU falhar em runtime (driver/VRAM), tenta CPU
-        if device.startswith("cuda"):
-            print(f"[xgb] treino em GPU falhou ({type(e).__name__}: {e}) -> tentando CPU", flush=True)
-            params_cpu = dict(params)
-            params_cpu["device"] = "cpu"
-            params_cpu["tree_method"] = "hist"
-            dtrain = xgb.DMatrix(Xtr, label=ytr)
-            dvalid = xgb.DMatrix(Xva, label=yva)
-            watch = [(dtrain, "train"), (dvalid, "val")]
-            booster = xgb.train(
-                params=params_cpu,
-                dtrain=dtrain,
-                num_boost_round=2000,
-                evals=watch,
-                early_stopping_rounds=200,
-                verbose_eval=50,
-            )
-        else:
-            raise
-    # aucpr no melhor round (se disponível)
-    try:
-        best_score = float(getattr(booster, "best_score", float("nan")))
-        if np.isfinite(best_score):
-            print(f"[xgb] best_val_aucpr={best_score:.5f}", flush=True)
-    except Exception:
-        pass
-    val_pred = booster.predict(dvalid, iteration_range=(0, booster.best_iteration + 1))
-    val_true = batch.y[va_idx]
-    # mÃ©tricas resumidas no fim
-    try:
-        tau_eval = 0.75
-        pred_pos = val_pred >= float(tau_eval)
-        tp = int(np.sum(pred_pos & (val_true >= 0.5)))
-        fp = int(np.sum(pred_pos & (val_true < 0.5)))
-        fn = int(np.sum((~pred_pos) & (val_true >= 0.5)))
-        tn = int(np.sum((~pred_pos) & (val_true < 0.5)))
-        precision = float(tp / max(1, (tp + fp)))
-        recall = float(tp / max(1, (tp + fn)))
-        f1 = float((2 * precision * recall) / max(1e-12, (precision + recall)))
-        pred_rate = float(np.mean(pred_pos)) if val_true.size else 0.0
-        pos_rate = float(np.mean(val_true >= 0.5)) if val_true.size else 0.0
-        print(
-            f"[xgb] val@tau={tau_eval:.2f} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f} "
-            f"pred_rate={pred_rate:.4f} pos_rate={pos_rate:.4f} (tp={tp} fp={fp} fn={fn} tn={tn})",
-            flush=True,
-        )
-    except Exception:
-        pass
-    calib = _fit_platt(val_pred, val_true)
-    meta = {
-        "calibrator": calib["params"],
-        "best_iteration": booster.best_iteration,
-    }
-    return booster, meta
-
-
-def _train_xgb_regressor(batch: SniperBatch, params: dict, *, y_transform: str = "log1p") -> tuple[xgb.Booster, dict]:
+def _train_xgb_regressor(batch: SniperBatch, params: dict, *, y_transform: str = "log1p") -> tuple[Any, dict]:
+    xgb = _import_xgb()
     tr_idx, va_idx = _split_train_val(batch)
     if tr_idx.size == 0 or va_idx.size == 0:
         raise RuntimeError("Dataset muito pequeno para treinar")
@@ -697,35 +712,208 @@ def _train_xgb_regressor(batch: SniperBatch, params: dict, *, y_transform: str =
     err = pred.astype(np.float64) - yva.astype(np.float64)
     rmse = float(np.sqrt(np.mean(err * err))) if err.size else float("nan")
     mae = float(np.mean(np.abs(err))) if err.size else float("nan")
+    try:
+        pred_bias = _compute_pred_bias(pred.astype(np.float64), wva.astype(np.float64) if wva is not None else None)
+    except Exception:
+        pred_bias = 0.0
+    calibration = None
+    if _env_bool("SNIPER_ENABLE_CALIBRATION", default=False):
+        try:
+            cal_try = _fit_affine_calibration(yva.astype(np.float64), pred.astype(np.float64), wva)
+            a = float(cal_try.get("a", 1.0))
+            b = float(cal_try.get("b", 0.0))
+            pred_cal = (a * pred.astype(np.float64)) + b
+            rmse_cal = float(np.sqrt(np.mean((pred_cal - yva.astype(np.float64)) ** 2)))
+            try:
+                err_raw = pred.astype(np.float64) - yva.astype(np.float64)
+                err_cal = pred_cal - yva.astype(np.float64)
+                if wva is not None:
+                    ww = np.asarray(wva, dtype=np.float64)
+                    m = np.isfinite(ww) & (ww > 0)
+                    bias_raw = float(np.average(err_raw[m], weights=ww[m])) if np.any(m) else float(np.mean(err_raw))
+                    bias_cal = float(np.average(err_cal[m], weights=ww[m])) if np.any(m) else float(np.mean(err_cal))
+                else:
+                    bias_raw = float(np.mean(err_raw))
+                    bias_cal = float(np.mean(err_cal))
+            except Exception:
+                bias_raw = 0.0
+                bias_cal = 0.0
+            keep = (rmse_cal <= (rmse * 0.999)) or (rmse_cal <= (rmse * 1.01) and abs(bias_cal) <= abs(bias_raw) * 0.9)
+            calib_msg = (
+                f"[sniper-train] calib affine: a={a:+.5f} b={b:+.5f} rmse_raw={rmse:.5f} rmse_cal={rmse_cal:.5f} "
+                f"bias_raw={bias_raw:+.5f} bias_cal={bias_cal:+.5f} keep={keep}"
+            )
+            if keep:
+                pw = _fit_piecewise_scale(yva.astype(np.float64), pred_cal.astype(np.float64))
+                rmse_pw = float(pw.get("rmse", rmse_cal))
+                s_pos = _clamp_scale(float(pw.get("s_pos", 1.0)))
+                s_neg = _clamp_scale(float(pw.get("s_neg", 1.0)))
+                force_pw = _env_bool("SNIPER_FORCE_PIECEWISE_CALIB", default=False)
+                use_pw = force_pw or (rmse_pw <= (rmse_cal * 1.02) and (abs(s_pos - 1.0) > 0.02 or abs(s_neg - 1.0) > 0.02))
+                calib_msg += f" rmse_pw={rmse_pw:.5f} s_pos={s_pos:+.3f} s_neg={s_neg:+.3f} use_pw={use_pw}"
+                if use_pw:
+                    calibration = {"kind": "affine_piecewise", "a": a, "b": b, "s_pos": s_pos, "s_neg": s_neg}
+                else:
+                    calibration = cal_try
+            print(calib_msg, flush=True)
+        except Exception:
+            calibration = None
     meta = {
         "transform": y_transform,
         "best_iteration": booster.best_iteration,
         "metrics": {"rmse": rmse, "mae": mae},
+        "pred_bias": pred_bias,
+        "calibration": calibration,
     }
     return booster, meta
 
 
-def _fit_platt(preds: np.ndarray, labels: np.ndarray) -> dict:
-    preds = preds.reshape(-1, 1)
-    labels = labels.astype(np.int32)
-    if LogisticRegression is None:
-        return {"params": {"type": "identity"}, "transform": lambda p: p}
+def _train_catboost_regressor(batch: SniperBatch, params: dict | None = None) -> tuple[object, dict]:
+    CatBoostRegressor = _import_catboost_regressor()
+    if CatBoostRegressor is None:
+        raise RuntimeError("catboost nao instalado")
+    tr_idx, va_idx = _split_train_val(batch)
+    if tr_idx.size == 0 or va_idx.size == 0:
+        raise RuntimeError("Dataset muito pequeno para treinar")
+    Xtr = batch.X[tr_idx]
+    ytr = batch.y[tr_idx]
+    Xva = batch.X[va_idx]
+    yva = batch.y[va_idx]
+    wtr = batch.w[tr_idx] if getattr(batch, "w", None) is not None else None
+    wva = batch.w[va_idx] if getattr(batch, "w", None) is not None else None
+
+    cb_params = {
+        "loss_function": "RMSE",
+        "eval_metric": "RMSE",
+        "iterations": 1200,
+        "learning_rate": 0.05,
+        "depth": 8,
+        "subsample": 0.8,
+        "random_seed": 1337,
+        "verbose": 50,
+        "allow_writing_files": False,
+    }
+    if params:
+        allow = {
+            "loss_function",
+            "eval_metric",
+            "iterations",
+            "learning_rate",
+            "depth",
+            "subsample",
+            "bootstrap_type",
+            "random_seed",
+            "l2_leaf_reg",
+            "bagging_temperature",
+            "border_count",
+            "min_data_in_leaf",
+            "verbose",
+            "od_type",
+            "od_wait",
+            "allow_writing_files",
+            "task_type",
+            "devices",
+        }
+        clean = {k: v for k, v in dict(params).items() if k in allow}
+        cb_params.update(clean)
+    # subsample exige bootstrap_type compatÃ­vel (Bayesian nÃ£o suporta subsample)
+    if cb_params.get("subsample") is not None:
+        bt = str(cb_params.get("bootstrap_type", "")).strip().lower()
+        if bt in ("", "bayesian"):
+            cb_params["bootstrap_type"] = "Bernoulli"
+        if str(cb_params.get("bootstrap_type", "")).strip().lower() != "bayesian":
+            cb_params.pop("bagging_temperature", None)
+    # força GPU quando o device do entry_params estiver em CUDA
     try:
-        clf = LogisticRegression(max_iter=200)
-        clf.fit(preds, labels)
-        def _transform(x: np.ndarray) -> np.ndarray:
-            return clf.predict_proba(x.reshape(-1, 1))[:, 1]
-        params = {
-            "type": "platt",
-            "coef": float(clf.coef_[0][0]),
-            "intercept": float(clf.intercept_[0]),
-        }
-        return {
-            "params": params,
-            "transform": _transform,
-        }
+        dev = str((params or {}).get("device", "")).lower()
     except Exception:
-        return {"params": {"type": "identity"}, "transform": lambda p: p}
+        dev = ""
+    if dev.startswith("cuda"):
+        cb_params.setdefault("task_type", "GPU")
+        # catboost usa string tipo "0" ou "0:1"
+        cb_params.setdefault("devices", dev.replace("cuda:", "") or "0")
+    # CatBoost exige métricas com case correto (ex.: "RMSE")
+    try:
+        if str(cb_params.get("eval_metric", "")).strip().lower() == "rmse":
+            cb_params["eval_metric"] = "RMSE"
+    except Exception:
+        pass
+    model = CatBoostRegressor(**cb_params)
+    if wva is not None:
+        Pool = _import_catboost_pool()
+        eval_pool = Pool(Xva, yva, weight=wva)
+        model.fit(
+            Xtr,
+            ytr,
+            sample_weight=wtr,
+            eval_set=eval_pool,
+            use_best_model=True,
+        )
+    else:
+        model.fit(
+            Xtr,
+            ytr,
+            sample_weight=wtr,
+            eval_set=(Xva, yva),
+            use_best_model=True,
+        )
+    pred = model.predict(Xva)
+    err = pred.astype(np.float64) - yva.astype(np.float64)
+    rmse = float(np.sqrt(np.mean(err * err))) if err.size else float("nan")
+    mae = float(np.mean(np.abs(err))) if err.size else float("nan")
+    try:
+        pred_bias = _compute_pred_bias(pred.astype(np.float64), wva.astype(np.float64) if wva is not None else None)
+    except Exception:
+        pred_bias = 0.0
+    calibration = None
+    if _env_bool("SNIPER_ENABLE_CALIBRATION", default=False):
+        try:
+            cal_try = _fit_affine_calibration(yva.astype(np.float64), pred.astype(np.float64), wva)
+            a = float(cal_try.get("a", 1.0))
+            b = float(cal_try.get("b", 0.0))
+            pred_cal = (a * pred.astype(np.float64)) + b
+            rmse_cal = float(np.sqrt(np.mean((pred_cal - yva.astype(np.float64)) ** 2)))
+            try:
+                err_raw = pred.astype(np.float64) - yva.astype(np.float64)
+                err_cal = pred_cal - yva.astype(np.float64)
+                if wva is not None:
+                    ww = np.asarray(wva, dtype=np.float64)
+                    m = np.isfinite(ww) & (ww > 0)
+                    bias_raw = float(np.average(err_raw[m], weights=ww[m])) if np.any(m) else float(np.mean(err_raw))
+                    bias_cal = float(np.average(err_cal[m], weights=ww[m])) if np.any(m) else float(np.mean(err_cal))
+                else:
+                    bias_raw = float(np.mean(err_raw))
+                    bias_cal = float(np.mean(err_cal))
+            except Exception:
+                bias_raw = 0.0
+                bias_cal = 0.0
+            keep = (rmse_cal <= (rmse * 0.999)) or (rmse_cal <= (rmse * 1.01) and abs(bias_cal) <= abs(bias_raw) * 0.9)
+            calib_msg = (
+                f"[sniper-train] calib affine: a={a:+.5f} b={b:+.5f} rmse_raw={rmse:.5f} rmse_cal={rmse_cal:.5f} "
+                f"bias_raw={bias_raw:+.5f} bias_cal={bias_cal:+.5f} keep={keep}"
+            )
+            if keep:
+                pw = _fit_piecewise_scale(yva.astype(np.float64), pred_cal.astype(np.float64))
+                rmse_pw = float(pw.get("rmse", rmse_cal))
+                s_pos = _clamp_scale(float(pw.get("s_pos", 1.0)))
+                s_neg = _clamp_scale(float(pw.get("s_neg", 1.0)))
+                force_pw = _env_bool("SNIPER_FORCE_PIECEWISE_CALIB", default=False)
+                use_pw = force_pw or (rmse_pw <= (rmse_cal * 1.02) and (abs(s_pos - 1.0) > 0.02 or abs(s_neg - 1.0) > 0.02))
+                calib_msg += f" rmse_pw={rmse_pw:.5f} s_pos={s_pos:+.3f} s_neg={s_neg:+.3f} use_pw={use_pw}"
+                if use_pw:
+                    calibration = {"kind": "affine_piecewise", "a": a, "b": b, "s_pos": s_pos, "s_neg": s_neg}
+                else:
+                    calibration = cal_try
+            print(calib_msg, flush=True)
+        except Exception:
+            calibration = None
+    meta = {
+        "best_iteration": int(getattr(model, "best_iteration_", 0) or 0),
+        "metrics": {"rmse": rmse, "mae": mae},
+        "pred_bias": pred_bias,
+        "calibration": calibration,
+    }
+    return model, meta
 
 
 def _next_run_dir(base: Path, prefix: str = "wf_") -> Path:
@@ -743,7 +931,7 @@ def _next_run_dir(base: Path, prefix: str = "wf_") -> Path:
     return run_dir
 
 
-def _save_model(booster: xgb.Booster, path: Path) -> None:
+def _save_model(booster: Any, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     booster.save_model(str(path))
     try:
@@ -778,6 +966,8 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
     else:
         run_dir = _next_run_dir(save_root)
     entry_params = dict(DEFAULT_ENTRY_PARAMS if cfg.entry_params is None else cfg.entry_params)
+    label_mode = str(getattr(cfg, "entry_label_mode", "signed") or "signed").strip().lower()
+    label_scale = float(getattr(cfg, "entry_label_scale", 1.0) or 1.0)
 
     def _default_feature_flags() -> dict:
         if asset_class == "stocks":
@@ -808,6 +998,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             asset_class=asset_class,
             # Se você pediu histórico completo (total_days<=0), garanta que o cache também foi feito assim.
             strict_total_days=(int(cfg.total_days) <= 0),
+            abort_ram_pct=float(getattr(cfg, "abort_ram_pct", 85.0)),
         )
         if timing_on:
             print(f"[sniper-train][timing] cache_build_s={time.perf_counter() - t_cache:.2f}", flush=True)
@@ -817,24 +1008,22 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         if not symbols:
             raise RuntimeError("Nenhum símbolo restou após gerar cache (ver logs [cache])")
 
-    windows = list(getattr(cfg.contract, "entry_label_windows_minutes", []) or [])
-    if not windows:
-        raise RuntimeError("entry_label_windows_minutes vazio")
-    entry_specs_full = entry_label_specs(cfg.contract, entry_label_sides=getattr(cfg, "entry_label_sides", None))
-    if not entry_specs_full:
-        raise RuntimeError("entry_label_specs vazio")
+    window_min = int(getattr(cfg, "entry_reg_window_min", 0) or 0)
+    if window_min <= 0:
+        window_min = 60
+    windows = [int(window_min)]
+    entry_specs_full = [
+        {
+            "name": f"ret_exp_{int(window_min)}m",
+            "window": int(window_min),
+        }
+    ]
     base_spec = entry_specs_full[0]
     base_name = str(base_spec.get("name") or "")
-    base_long_name = ""
-    base_short_name = ""
-    for s in entry_specs_full:
-        side = str(s.get("side") or "").strip().lower()
-        if side == "long" and not base_long_name:
-            base_long_name = str(s.get("name") or "")
-        if side == "short" and not base_short_name:
-            base_short_name = str(s.get("name") or "")
-    if not base_long_name:
-        base_long_name = base_name
+    entry_sides = list(getattr(cfg, "entry_sides", None) or ("long", "short"))
+    entry_sides = [str(s).strip().lower() for s in entry_sides if str(s).strip()]
+    if not entry_sides:
+        entry_sides = ["long", "short"]
 
     pool_dir = None
     pool_df_map: dict[str, dict[str, list[Path]]] | None = None
@@ -842,13 +1031,10 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
     pool_layout: dict[str, str] | None = None
     if bool(getattr(cfg, "entry_pool_full", False)):
         pool_dir = Path(cfg.entry_pool_dir) if getattr(cfg, "entry_pool_dir", None) else (run_dir / "entry_pool_full")
-        sides = list(getattr(cfg, "entry_label_sides", None) or ("long",))
+        sides = list(entry_sides)
         pool_df_map = {}
         pool_max_ts = {}
         pool_layout = {}
-        pool_ratio = float(getattr(cfg, "entry_pool_ratio_neg_per_pos", 0.0) or 0.0)
-        if pool_ratio <= 0:
-            pool_ratio = float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0))
         from utils.progress import ProgressPrinter
         # Tenta habilitar VT no Windows para permitir atualizaÃ§Ã£o in-place.
         vt_ok = _enable_vt_mode(sys.stderr)
@@ -867,11 +1053,15 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             progress = ProgressPrinter(
                 prefix=f"[sniper-train] pool_full {side_key}:",
                 total=len(symbols),
-                stream=sys.stderr,
+                stream=sys.stdout,
                 print_every_s=5.0,
                 force_inplace=vt_ok,
             )
             for i, symbol in enumerate(symbols):
+                _check_ram_or_abort(
+                    float(getattr(cfg, "abort_ram_pct", 0.0) or 0.0),
+                    where=f"pool_full:{side_key}:{symbol}",
+                )
                 if bool(getattr(cfg, "use_feature_cache", True)):
                     pack_sym = prepare_sniper_dataset_from_cache(
                         [symbol],
@@ -879,13 +1069,16 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                         remove_tail_days=0,
                         contract=contract,
                         cache_map=cache_map,
-                        entry_ratio_neg_per_pos=float(pool_ratio),
-                        max_rows_entry=0,
+                        max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
                         full_entry_pool=True,
                         seed=1337,
                         asset_class=asset_class,
                         feature_flags=feature_flags,
-                        entry_label_sides=(side_key,),
+                        entry_side=side_key,
+                        entry_reg_window_min=int(getattr(cfg, "entry_reg_window_min", 0)),
+                        entry_reg_weight_alpha=float(getattr(cfg, "entry_reg_weight_alpha", 4.0)),
+                        entry_reg_weight_power=float(getattr(cfg, "entry_reg_weight_power", 1.2)),
+                        entry_reg_balance_bins=getattr(cfg, "entry_reg_balance_bins", None),
                     )
                 else:
                     pack_sym = prepare_sniper_dataset(
@@ -893,30 +1086,20 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                         total_days=int(cfg.total_days),
                         remove_tail_days=0,
                         contract=contract,
-                        entry_ratio_neg_per_pos=float(pool_ratio),
-                        max_rows_entry=0,
+                        max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
                         full_entry_pool=True,
                         seed=1337,
                         asset_class=asset_class,
                         feature_flags=feature_flags,
-                        entry_label_sides=(side_key,),
+                        entry_side=side_key,
+                        entry_reg_window_min=int(getattr(cfg, "entry_reg_window_min", 0)),
+                        entry_reg_weight_alpha=float(getattr(cfg, "entry_reg_weight_alpha", 4.0)),
+                        entry_reg_weight_power=float(getattr(cfg, "entry_reg_weight_power", 1.2)),
+                        entry_reg_balance_bins=getattr(cfg, "entry_reg_balance_bins", None),
                     )
                 entry_batches_sym = pack_sym.entry_map or {}
                 if not entry_batches_sym:
-                    fallback_name = base_long_name if side_key != "short" else (base_short_name or base_long_name)
-                    entry_batches_sym = {fallback_name: pack_sym.entry_mid}
-                if not bool(getattr(cfg, "entry_pool_prefiltered", True)):
-                    rng_pool = np.random.default_rng(1337 + i)
-                    entry_batches_sym = {
-                        name: _filter_pool_batch(
-                            b,
-                            neg_per_pos=int(max(1, round(float(pool_ratio)))),
-                            neg_max=POOL_NEG_MAX,
-                            rng=rng_pool,
-                        )
-                        for name, b in entry_batches_sym.items()
-                        if b is not None and b.X.size > 0
-                    }
+                    entry_batches_sym = {base_name: pack_sym.entry}
                 _save_entry_pool_symbol(side_dir, symbol, entry_batches_sym)
                 for b in entry_batches_sym.values():
                     if b is None or b.ts.size == 0:
@@ -924,8 +1107,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                     ts_max = pd.to_datetime(b.ts).max()
                     if max_ts is None or ts_max > max_ts:
                         max_ts = ts_max
-                if (i + 1) % 2 == 0 or (i + 1) == len(symbols):
-                    progress.update(i + 1)
+                progress.update(i + 1, suffix=symbol)
                 del pack_sym, entry_batches_sym
             progress.close()
             _write_pool_meta(side_dir, windows, max_ts)
@@ -939,50 +1121,65 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             print(f"[sniper-train] {tail}d: jÃ¡ existe ({period_dir}), pulando", flush=True)
             continue
         print(f"[sniper-train] periodo T-{tail}d", flush=True)
+        _check_ram_or_abort(
+            float(getattr(cfg, "abort_ram_pct", 0.0) or 0.0),
+            where=f"period_start:{int(tail)}d",
+        )
+        pack_by_side: dict[str, SniperDataPack | None] = {}
         if pool_df_map is None and bool(getattr(cfg, "use_feature_cache", True)):
             t_pack = time.perf_counter()
-            pack = prepare_sniper_dataset_from_cache(
-                symbols,
-                total_days=int(cfg.total_days),
-                remove_tail_days=int(tail),
-                contract=contract,
-                cache_map=cache_map,
-                entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
-                max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
-                full_entry_pool=bool(getattr(cfg, "entry_pool_full", False)),
-                seed=1337,
-                asset_class=asset_class,
-                feature_flags=feature_flags,
-                entry_label_sides=getattr(cfg, "entry_label_sides", None),
-            )
+            for side in entry_sides:
+                pack_by_side[side] = prepare_sniper_dataset_from_cache(
+                    symbols,
+                    total_days=int(cfg.total_days),
+                    remove_tail_days=int(tail),
+                    contract=contract,
+                    cache_map=cache_map,
+                    max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
+                    full_entry_pool=bool(getattr(cfg, "entry_pool_full", False)),
+                    seed=1337,
+                    asset_class=asset_class,
+                    feature_flags=feature_flags,
+                    entry_side=str(side),
+                    entry_reg_window_min=int(getattr(cfg, "entry_reg_window_min", 0)),
+                    entry_reg_weight_alpha=float(getattr(cfg, "entry_reg_weight_alpha", 4.0)),
+                    entry_reg_weight_power=float(getattr(cfg, "entry_reg_weight_power", 1.2)),
+                    entry_reg_balance_bins=getattr(cfg, "entry_reg_balance_bins", None),
+                )
             if timing_on:
                 print(f"[sniper-train][timing] pack_from_cache_s={time.perf_counter() - t_pack:.2f}", flush=True)
         elif pool_df_map is None:
             t_pack = time.perf_counter()
-            pack = prepare_sniper_dataset(
-                symbols,
-                total_days=int(cfg.total_days),
-                remove_tail_days=int(tail),
-                contract=contract,
-                entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
-                max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
-                full_entry_pool=bool(getattr(cfg, "entry_pool_full", False)),
-                seed=1337,
-                asset_class=asset_class,
-                feature_flags=feature_flags,
-                entry_label_sides=getattr(cfg, "entry_label_sides", None),
-            )
+            for side in entry_sides:
+                pack_by_side[side] = prepare_sniper_dataset(
+                    symbols,
+                    total_days=int(cfg.total_days),
+                    remove_tail_days=int(tail),
+                    contract=contract,
+                    max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
+                    full_entry_pool=bool(getattr(cfg, "entry_pool_full", False)),
+                    seed=1337,
+                    asset_class=asset_class,
+                    feature_flags=feature_flags,
+                    entry_side=str(side),
+                    entry_reg_window_min=int(getattr(cfg, "entry_reg_window_min", 0)),
+                    entry_reg_weight_alpha=float(getattr(cfg, "entry_reg_weight_alpha", 4.0)),
+                    entry_reg_weight_power=float(getattr(cfg, "entry_reg_weight_power", 1.2)),
+                    entry_reg_balance_bins=getattr(cfg, "entry_reg_balance_bins", None),
+                )
             if timing_on:
                 print(f"[sniper-train][timing] pack_build_s={time.perf_counter() - t_pack:.2f}", flush=True)
         else:
             # usa pool completo salvo em disco e filtra por data
-            pack = None
-        if pack is not None:
+            pack_by_side = {}
+        if pack_by_side:
             try:
-                n_used = len(pack.symbols_used) if getattr(pack, "symbols_used", None) else len(pack.symbols)
-                n_skip = len(pack.symbols_skipped) if getattr(pack, "symbols_skipped", None) else 0
-                te = str(pd.to_datetime(pack.train_end_utc)) if getattr(pack, "train_end_utc", None) is not None else "None"
-                print(f"[sniper-train] {tail}d: train_end_utc={te} | symbols_used={n_used} skipped={n_skip}", flush=True)
+                sample_pack = next(iter(pack_by_side.values()))
+                if sample_pack is not None:
+                    n_used = len(sample_pack.symbols_used) if getattr(sample_pack, "symbols_used", None) else len(sample_pack.symbols)
+                    n_skip = len(sample_pack.symbols_skipped) if getattr(sample_pack, "symbols_skipped", None) else 0
+                    te = str(pd.to_datetime(sample_pack.train_end_utc)) if getattr(sample_pack, "train_end_utc", None) is not None else "None"
+                    print(f"[sniper-train] {tail}d: train_end_utc={te} | symbols_used={n_used} skipped={n_skip}", flush=True)
             except Exception:
                 pass
         # protecao anti-escassez: se poucos simbolos sobreviveram nesse tail, nao vale treinar.
@@ -990,9 +1187,10 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             min_used = int(getattr(cfg, "min_symbols_used_per_period", 0) or 0)
         except Exception:
             min_used = 0
-        if pack is not None and min_used > 0:
+        if pack_by_side and min_used > 0:
             try:
-                n_used = len(pack.symbols_used) if getattr(pack, "symbols_used", None) else len(pack.symbols)
+                sample_pack = next(iter(pack_by_side.values()))
+                n_used = len(sample_pack.symbols_used) if getattr(sample_pack, "symbols_used", None) else len(sample_pack.symbols)
             except Exception:
                 n_used = 0
             if int(n_used) < int(min_used):
@@ -1000,34 +1198,36 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 continue
         entry_specs = [(str(s.get("name")), int(s.get("window") or 0)) for s in entry_specs_full]
         spec_by_name = {str(s.get("name")): s for s in entry_specs_full}
+        entry_batches_by_side: dict[str, dict[str, SniperBatch]] = {}
+        base_batch_by_side: dict[str, SniperBatch] = {}
         if pool_df_map is None:
-            entry_batches = pack.entry_map or {}
-            if not entry_batches:
-                entry_batches = {base_name: pack.entry_mid}
-            base_batch = entry_batches.get(base_long_name) or entry_batches.get(base_name) or pack.entry_mid
+            for side in entry_sides:
+                pack = pack_by_side.get(side)
+                if pack is None:
+                    continue
+                entry_batches = pack.entry_map or {base_name: pack.entry}
+                base_batch = entry_batches.get(base_name) or pack.entry
+                entry_batches_by_side[side] = entry_batches
+                base_batch_by_side[side] = base_batch
         else:
-            entry_batches = {}
-            def _pool_for_name(name: str) -> tuple[dict[str, list[Path]] | None, pd.Timestamp | None, str | None]:
-                spec = spec_by_name.get(name, {})
-                side = str(spec.get("side") or "long").strip().lower() or "long"
+            def _pool_for_side_name(side: str, name: str) -> tuple[dict[str, list[Path]] | None, pd.Timestamp | None, str | None]:
                 df_map = pool_df_map.get(side) if pool_df_map else None
                 max_ts = pool_max_ts.get(side) if pool_max_ts else None
                 layout = pool_layout.get(side) if pool_layout else None
                 return df_map, max_ts, layout
 
-            def _load_pool_batch_combined(name: str, max_rows: int, ratio: float, rng: np.random.Generator) -> SniperBatch | None:
-                df_map, max_ts, layout = _pool_for_name(name)
+            def _load_pool_batch_combined(side: str, name: str, max_rows: int, rng: np.random.Generator) -> SniperBatch | None:
+                df_map, max_ts, layout = _pool_for_side_name(side, name)
                 files = df_map.get("_combined", []) if df_map else []
                 if not files:
                     return None
                 cutoff = None
                 if max_ts is not None:
                     cutoff = max_ts - pd.Timedelta(days=int(tail))
-                ambig_neg_weight_mul = 0.35
                 # cache por período + janela (evita reler todos os parquets)
                 cache_dir = period_dir / "entry_cache"
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                cache_key = f"{int(tail)}d_{name}_{int(max_rows)}_{int(ratio*100)}.npz"
+                cache_key = f"{int(tail)}d_{side}_{name}_{int(max_rows)}.npz"
                 cache_path = cache_dir / cache_key
                 if cache_path.exists():
                     try:
@@ -1041,173 +1241,116 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                         return SniperBatch(X=X, y=y, w=w, ts=ts, sym_id=sym_id, feature_cols=list(feat_cols))
                     except Exception:
                         pass
-                label_col = f"label_{name}"
-                weight_col = f"weight_{name}"
-                k = int(max_rows)
-                ratio = float(max(0.0, ratio))
-                if k <= 0:
-                    # fallback: carrega tudo (pode estourar RAM)
-                    parts = []
-                    for fp in files:
-                        df = pd.read_parquet(fp)
+                if True:
+                    k = int(max_rows)
+                    keys_res = np.empty((0,), dtype=np.float64)
+                    X_res = np.empty((0, 0), dtype=np.float32)
+                    y_res = np.empty((0,), dtype=np.float32)
+                    w_res = np.empty((0,), dtype=np.float32)
+                    ts_res = np.empty((0,), dtype="datetime64[ns]")
+                    base_feat_cols: list[str] | None = None
+                    cols_needed: list[str] | None = None
+                    try:
+                        df0 = pd.read_parquet(files[0])
+                        base_feat_cols = [c for c in df0.columns if c not in {"label_entry", "weight", "sym_id"}]
+                        cols_needed = list(base_feat_cols) + ["label_entry"]
+                        if "weight" in df0.columns:
+                            cols_needed.append("weight")
+                        del df0
+                    except Exception:
+                        cols_needed = None
+
+                    def _load_one_reg(fp: Path) -> pd.DataFrame:
+                        df = pd.read_parquet(fp, columns=cols_needed) if cols_needed else pd.read_parquet(fp)
                         if cutoff is not None:
                             df = df.loc[pd.to_datetime(df.index) < cutoff]
-                        if df.empty:
-                            continue
-                        parts.append(df)
-                    if not parts:
+                        return df
+
+                    max_workers = int(os.getenv("SNIPER_POOL_READERS", "8") or "8")
+                    max_workers = max(1, min(32, max_workers))
+                    total_files = len(files)
+                    last_report = -1
+                    try:
+                        progress_every_pct = int(os.getenv("SNIPER_POOL_LOAD_PROGRESS_PCT", "5") or "5")
+                    except Exception:
+                        progress_every_pct = 5
+                    progress_every_pct = max(1, min(50, progress_every_pct))
+                    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                        futures = {ex.submit(_load_one_reg, fp): fp for fp in files}
+                        for idx, fut in enumerate(as_completed(futures)):
+                            df = fut.result()
+                            if df.empty or "label_entry" not in df.columns:
+                                continue
+                            if base_feat_cols is None:
+                                base_feat_cols = [c for c in df.columns if c not in {"label_entry", "weight", "sym_id"}]
+                            chunk_rows = int(os.getenv("SNIPER_POOL_CHUNK_ROWS", "250000") or "250000")
+                            chunk_rows = max(10_000, chunk_rows)
+                            if k > 0 and df.shape[0] > chunk_rows:
+                                for start in range(0, df.shape[0], chunk_rows):
+                                    end = min(df.shape[0], start + chunk_rows)
+                                    df_chunk = df.iloc[start:end]
+                                    if df_chunk.empty:
+                                        continue
+                                    X = df_chunk[base_feat_cols].to_numpy(np.float32, copy=True)
+                                    y = df_chunk["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                                    if "weight" in df_chunk.columns:
+                                        w = df_chunk["weight"].to_numpy(dtype=np.float32, copy=False)
+                                    else:
+                                        w = np.ones((df_chunk.shape[0],), dtype=np.float32)
+                                    ts = pd.to_datetime(df_chunk.index).to_numpy(dtype="datetime64[ns]")
+                                    u = rng.random(size=y.shape[0], dtype=np.float64)
+                                    w_safe = np.maximum(w.astype(np.float64, copy=False), 1e-12)
+                                    keys = -np.log(u) / w_safe
+                                    keys_res, X_res, y_res, w_res, ts_res = _reservoir_update(
+                                        keys_res, X_res, y_res, w_res, ts_res, keys, X, y, w, ts, k
+                                    )
+                            else:
+                                X = df[base_feat_cols].to_numpy(np.float32, copy=True)
+                                y = df["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                                if "weight" in df.columns:
+                                    w = df["weight"].to_numpy(dtype=np.float32, copy=False)
+                                else:
+                                    w = np.ones((df.shape[0],), dtype=np.float32)
+                                ts = pd.to_datetime(df.index).to_numpy(dtype="datetime64[ns]")
+                                if k <= 0:
+                                    keys_res = np.concatenate([keys_res, np.zeros((y.shape[0],), dtype=np.float64)])
+                                    X_res = X if X_res.size == 0 else np.concatenate([X_res, X])
+                                    y_res = np.concatenate([y_res, y])
+                                    w_res = np.concatenate([w_res, w])
+                                    ts_res = np.concatenate([ts_res, ts])
+                                else:
+                                    u = rng.random(size=y.shape[0], dtype=np.float64)
+                                    w_safe = np.maximum(w.astype(np.float64, copy=False), 1e-12)
+                                    keys = -np.log(u) / w_safe
+                                    keys_res, X_res, y_res, w_res, ts_res = _reservoir_update(
+                                        keys_res, X_res, y_res, w_res, ts_res, keys, X, y, w, ts, k
+                                    )
+                            del df
+                            if total_files:
+                                pct = int((idx + 1) * 100 / total_files)
+                                if pct != last_report and (pct % progress_every_pct == 0 or pct == 100):
+                                    print(
+                                        f"[sniper-train] pool_load {side} {name}: {pct}% ({idx + 1}/{total_files})",
+                                        end="\r",
+                                        flush=True,
+                                    )
+                    if y_res.size == 0 or base_feat_cols is None:
                         return None
-                    df_all = pd.concat(parts, axis=0, ignore_index=False)
-                    base_feat_cols = [c for c in df_all.columns if not c.startswith("label_") and not c.startswith("weight_")]
-                    if label_col not in df_all.columns:
-                        return None
-                    X = df_all[base_feat_cols].to_numpy(np.float32, copy=True)
-                    y = df_all[label_col].to_numpy(dtype=np.float32, copy=False)
-                    if weight_col in df_all.columns:
-                        w = df_all[weight_col].to_numpy(dtype=np.float32, copy=False)
-                    else:
-                        w = np.ones((df_all.shape[0],), dtype=np.float32)
-                    ts = pd.to_datetime(df_all.index).to_numpy(dtype="datetime64[ns]")
-                    sym_id = np.zeros((df_all.shape[0],), dtype=np.int32)
-                    return SniperBatch(X=X, y=y, w=w, ts=ts, sym_id=sym_id, feature_cols=list(base_feat_cols))
-
-                max_pos = int(max(1, round(k / (1.0 + ratio))))
-                max_neg = int(max(0, k - max_pos))
-                keys_pos = np.empty((0,), dtype=np.float64)
-                keys_neg = np.empty((0,), dtype=np.float64)
-                X_pos = np.empty((0, 0), dtype=np.float32)
-                X_neg = np.empty((0, 0), dtype=np.float32)
-                y_pos = np.empty((0,), dtype=np.float32)
-                y_neg = np.empty((0,), dtype=np.float32)
-                w_pos = np.empty((0,), dtype=np.float32)
-                w_neg = np.empty((0,), dtype=np.float32)
-                ts_pos = np.empty((0,), dtype="datetime64[ns]")
-                ts_neg = np.empty((0,), dtype="datetime64[ns]")
-                base_feat_cols: list[str] | None = None
-
-                total_files = len(files)
-                cols_needed: list[str] | None = None
-                # descobre colunas uma vez (evita ler tudo em cada parquet)
-                try:
-                    df0 = pd.read_parquet(files[0])
-                    base_feat_cols = [c for c in df0.columns if not c.startswith("label_") and not c.startswith("weight_")]
-                    label_cols_all = [c for c in df0.columns if c.startswith("label_")]
-                    cols_needed = list(base_feat_cols) + [label_col]
-                    if weight_col in df0.columns and weight_col not in cols_needed:
-                        cols_needed.append(weight_col)
-                    for c in label_cols_all:
-                        if c not in cols_needed:
-                            cols_needed.append(c)
-                    del df0
-                except Exception:
-                    cols_needed = None
-                last_report = -1
-
-                def _load_one(fp: Path) -> pd.DataFrame:
-                    df = pd.read_parquet(fp, columns=cols_needed) if cols_needed else pd.read_parquet(fp)
-                    if cutoff is not None:
-                        df = df.loc[pd.to_datetime(df.index) < cutoff]
-                    return df
-
-                max_workers = int(os.getenv("SNIPER_POOL_READERS", "8") or "8")
-                max_workers = max(1, min(32, max_workers))
-                with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                    futures = {ex.submit(_load_one, fp): fp for fp in files}
-                    for idx, fut in enumerate(as_completed(futures)):
-                        df = fut.result()
-                        if df.empty or label_col not in df.columns:
-                            continue
-                        if base_feat_cols is None:
-                            base_feat_cols = [c for c in df.columns if not c.startswith("label_") and not c.startswith("weight_")]
-                        X = df[base_feat_cols].to_numpy(np.float32, copy=True)
-                        y = df[label_col].to_numpy(dtype=np.float32, copy=False)
-                        if weight_col in df.columns:
-                            w = df[weight_col].to_numpy(dtype=np.float32, copy=False)
-                        else:
-                            w = np.ones((df.shape[0],), dtype=np.float32)
-                        ts = pd.to_datetime(df.index).to_numpy(dtype="datetime64[ns]")
-                        # negativos ambiguos: mantem, mas reduz peso
-                        try:
-                            other_pos = np.zeros((df.shape[0],), dtype=bool)
-                            for c in df.columns:
-                                if c.startswith("label_") and c != label_col:
-                                    other_pos |= (df[c].to_numpy(dtype=np.float32, copy=False) >= 0.5)
-                            if np.any(other_pos):
-                                ambig_mask = (y < 0.5) & other_pos
-                                if np.any(ambig_mask):
-                                    w = w.copy()
-                                    w[ambig_mask] = w[ambig_mask] * ambig_neg_weight_mul
-                        except Exception:
-                            pass
-
-                        if y.size == 0:
-                            continue
-                        # keys for reservoir (lower is better)
-                        u = rng.random(size=y.shape[0], dtype=np.float64)
-                        w_safe = np.maximum(w.astype(np.float64, copy=False), 1e-12)
-                        keys = -np.log(u) / w_safe
-                        pos_mask = y >= 0.5
-                        neg_mask = ~pos_mask
-                        if np.any(pos_mask):
-                            keys_pos, X_pos, y_pos, w_pos, ts_pos = _reservoir_update(
-                                keys_pos,
-                                X_pos,
-                                y_pos,
-                                w_pos,
-                                ts_pos,
-                                keys[pos_mask],
-                                X[pos_mask],
-                                y[pos_mask],
-                                w[pos_mask],
-                                ts[pos_mask],
-                                max_pos,
-                            )
-                        if np.any(neg_mask):
-                            keys_neg, X_neg, y_neg, w_neg, ts_neg = _reservoir_update(
-                                keys_neg,
-                                X_neg,
-                                y_neg,
-                                w_neg,
-                                ts_neg,
-                                keys[neg_mask],
-                                X[neg_mask],
-                                y[neg_mask],
-                                w[neg_mask],
-                                ts[neg_mask],
-                                max_neg,
-                            )
-                        if total_files:
-                            pct = int((idx + 1) * 100 / total_files)
-                            if pct != last_report and (pct % 5 == 0 or pct == 100):
-                                print(
-                                    f"[sniper-train] pool_load {name}: {pct}% ({idx + 1}/{total_files})",
-                                    end="\r",
-                                    flush=True,
-                                )
-
-                if base_feat_cols is None:
-                    return None
-                print("", flush=True)
-                X_all = np.concatenate([X_pos, X_neg]) if X_pos.size or X_neg.size else np.empty((0, len(base_feat_cols)), dtype=np.float32)
-                y_all = np.concatenate([y_pos, y_neg]) if y_pos.size or y_neg.size else np.empty((0,), dtype=np.float32)
-                w_all = np.concatenate([w_pos, w_neg]) if w_pos.size or w_neg.size else np.empty((0,), dtype=np.float32)
-                ts_all = np.concatenate([ts_pos, ts_neg]) if ts_pos.size or ts_neg.size else np.empty((0,), dtype="datetime64[ns]")
-                sym_id = np.zeros((X_all.shape[0],), dtype=np.int32)
-                try:
-                    np.savez_compressed(
-                        cache_path,
-                        X=X_all,
-                        y=y_all,
-                        w=w_all,
-                        ts=ts_all,
-                        feat_cols=np.array(list(base_feat_cols), dtype=object),
-                    )
-                except Exception:
-                    pass
-                return SniperBatch(X=X_all, y=y_all, w=w_all, ts=ts_all, sym_id=sym_id, feature_cols=list(base_feat_cols))
-
-            def _load_pool_batch_legacy(name: str) -> SniperBatch | None:
-                df_map, max_ts, _layout = _pool_for_name(name)
+                    sym_id = np.zeros((y_res.shape[0],), dtype=np.int32)
+                    try:
+                        np.savez_compressed(
+                            cache_path,
+                            X=X_res,
+                            y=y_res,
+                            w=w_res,
+                            ts=ts_res,
+                            feat_cols=np.array(base_feat_cols, dtype=object),
+                        )
+                    except Exception:
+                        pass
+                    return SniperBatch(X=X_res, y=y_res, w=w_res, ts=ts_res, sym_id=sym_id, feature_cols=list(base_feat_cols))
+            def _load_pool_batch_legacy(side: str, name: str) -> SniperBatch | None:
+                df_map, max_ts, _layout = _pool_for_side_name(side, name)
                 files = df_map.get(name, []) if df_map else []
                 if not files:
                     return None
@@ -1228,7 +1371,10 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 feat_cols = [c for c in df_f.columns if c not in {"label_entry", "weight", "sym_id"}]
                 X = df_f[feat_cols].to_numpy(np.float32, copy=True)
                 y = df_f["label_entry"].to_numpy(dtype=np.float32, copy=False)
-                w = df_f["weight"].to_numpy(dtype=np.float32, copy=False)
+                if "weight" in df_f.columns:
+                    w = df_f["weight"].to_numpy(dtype=np.float32, copy=False)
+                else:
+                    w = np.ones((df_f.shape[0],), dtype=np.float32)
                 ts = pd.to_datetime(df_f.index).to_numpy(dtype="datetime64[ns]")
                 if "sym_id" in df_f.columns:
                     sym_id = df_f["sym_id"].to_numpy(dtype=np.int32, copy=False)
@@ -1236,165 +1382,301 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                     sym_id = np.zeros((df_f.shape[0],), dtype=np.int32)
                 return SniperBatch(X=X, y=y, w=w, ts=ts, sym_id=sym_id, feature_cols=list(feat_cols))
 
-            base_name = base_long_name
-            _df_map_base, _max_ts_base, base_layout = _pool_for_name(base_name)
-            if base_layout == "per_symbol_combined":
-                base_batch = _load_pool_batch_combined(
-                    base_name,
-                    int(getattr(cfg, "max_rows_entry", 2_000_000)),
-                    float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
-                    np.random.default_rng(1337),
-                )
-            else:
-                base_batch = _load_pool_batch_legacy(base_name)
-        if base_batch is None or base_batch.X.size == 0:
-            print(f"[sniper-train] {tail}d: dataset vazio, pulando")
-            continue
-        try:
-            pos_e = int((base_batch.y >= 0.5).sum())
-            neg_e = int((base_batch.y < 0.5).sum())
-            print((f"[sniper-train] dataset entry: pos={pos_e:,} neg={neg_e:,}").replace(",", "."), flush=True)
-        except Exception:
-            pass
-        entry_models: dict[str, tuple[xgb.Booster, dict]] = {}
-        for name, w in entry_specs:
-            if pool_df_map is not None:
-                _df_map_cur, _max_ts_cur, cur_layout = _pool_for_name(name)
-                if cur_layout == "per_symbol_combined":
-                    if name == base_name and base_batch is not None:
-                        b = base_batch
-                    else:
-                        b = _load_pool_batch_combined(
-                            name,
-                            int(getattr(cfg, "max_rows_entry", 2_000_000)),
-                            float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
-                            np.random.default_rng(1337 + int(w)),
-                        )
+            for side in entry_sides:
+                _df_map_base, _max_ts_base, base_layout = _pool_for_side_name(side, base_name)
+                if base_layout == "per_symbol_combined":
+                    base_batch = _load_pool_batch_combined(
+                        side,
+                        base_name,
+                        int(getattr(cfg, "max_rows_entry", 2_000_000)),
+                        np.random.default_rng(1337),
+                    )
                 else:
-                    b = _load_pool_batch_legacy(name)
-                if b is None:
-                    b = base_batch
-            else:
-                b = entry_batches.get(name, base_batch)
-            if b is None or b.X.size == 0:
-                print(f"[sniper-train] EntryScore {name} ({w}m): dataset vazio, pulando", flush=True)
+                    base_batch = _load_pool_batch_legacy(side, base_name)
+                if base_batch is not None and base_batch.X.size > 0:
+                    base_batch_by_side[side] = base_batch
+                    entry_batches_by_side[side] = {}
+        if not base_batch_by_side:
+            print(f"[sniper-train] {tail}d: dataset vazio, pulando", flush=True)
+            continue
+        entry_models_by_side: dict[str, dict[str, tuple[Any, dict]]] = {s: {} for s in entry_sides}
+        for side in entry_sides:
+            base_batch = base_batch_by_side.get(side)
+            entry_batches = entry_batches_by_side.get(side, {})
+            if base_batch is None or base_batch.X.size == 0:
                 continue
             try:
-                pos_m = int((b.y >= 0.5).sum())
-                neg_m = int((b.y < 0.5).sum())
-                print((f"[sniper-train] {name}: pos={pos_m:,} neg={neg_m:,}").replace(",", "."), flush=True)
-            except Exception:
-                pass
-            # se pool full, amostra por modelo aqui
-            if bool(getattr(cfg, "entry_pool_full", False)):
-                max_rows = int(getattr(cfg, "max_rows_entry", 2_000_000))
-                ratio = float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0))
-                if max_rows > 0 and b.y.size > max_rows:
-                    rng = np.random.default_rng(1337 + int(w))
-                    keep = _sample_indices_weighted(
-                        b.y.astype(np.float32, copy=False),
-                        b.w.astype(np.float32, copy=False),
-                        ratio,
-                        max_rows,
-                        rng=rng,
-                    )
-                    if keep.size > 0:
-                        b = SniperBatch(
-                            X=b.X[keep],
-                            y=b.y[keep],
-                            w=b.w[keep],
-                            ts=b.ts[keep],
-                            sym_id=b.sym_id[keep],
-                            feature_cols=b.feature_cols,
-                        )
-            print(f"[sniper-train] treinando EntryScore {name} ({w}m)...", flush=True)
-            t_train = time.perf_counter()
-            m, m_meta = _train_xgb_classifier(b, entry_params)
-            if timing_on:
+                yb = base_batch.y.astype(np.float64, copy=False)
                 print(
-                    f"[sniper-train][timing] train_entry_{name}_{int(w)}m_s={time.perf_counter() - t_train:.2f}",
+                    f"[sniper-train] dataset entry {side}: n={int(yb.size)} mean={yb.mean():.5f} std={yb.std():.5f} "
+                    f"min={yb.min():.5f} max={yb.max():.5f}",
                     flush=True,
                 )
-            entry_models[name] = (m, m_meta)
-            print(f"[sniper-train] EntryScore {name}: best_iter={m_meta['best_iteration']}", flush=True)
+            except Exception:
+                pass
+            for name, w in entry_specs:
+                _check_ram_or_abort(
+                    float(getattr(cfg, "abort_ram_pct", 0.0) or 0.0),
+                    where=f"train_entry:{side}:{name}",
+                )
+                if pool_df_map is not None:
+                    _df_map_cur, _max_ts_cur, cur_layout = _pool_for_side_name(side, name)
+                    if cur_layout == "per_symbol_combined":
+                        if name == base_name and base_batch is not None:
+                            b = base_batch
+                        else:
+                            b = _load_pool_batch_combined(
+                                side,
+                                name,
+                                int(getattr(cfg, "max_rows_entry", 2_000_000)),
+                                np.random.default_rng(1337 + int(w)),
+                            )
+                    else:
+                        b = _load_pool_batch_legacy(side, name)
+                    if b is None:
+                        b = base_batch
+                else:
+                    b = entry_batches.get(name, base_batch)
+                if b is None or b.X.size == 0:
+                    print(f"[sniper-train] EntryScore {side} {name} ({w}m): dataset vazio, pulando", flush=True)
+                    continue
+                try:
+                    yb = b.y.astype(np.float64, copy=False)
+                    print(
+                        f"[sniper-train] {side} {name}: n={int(yb.size)} mean={yb.mean():.5f} std={yb.std():.5f} "
+                        f"min={yb.min():.5f} max={yb.max():.5f}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+                # se pool full, amostra por modelo aqui
+                if bool(getattr(cfg, "entry_pool_full", False)):
+                    max_rows = int(getattr(cfg, "max_rows_entry", 2_000_000))
+                    if max_rows > 0 and b.y.size > max_rows:
+                        rng = np.random.default_rng(1337 + int(w))
+                        keep = _sample_indices_regression(
+                            b.y.astype(np.float32, copy=False),
+                            getattr(cfg, "entry_reg_balance_bins", None),
+                            max_rows,
+                            rng=rng,
+                            distance_power=float(getattr(cfg, "entry_reg_balance_distance_power", 0.0) or 0.0),
+                            min_frac=float(getattr(cfg, "entry_reg_balance_min_frac", 0.0) or 0.0),
+                        )
+                        if keep.size > 0:
+                            b = SniperBatch(
+                                X=b.X[keep],
+                                y=b.y[keep],
+                                w=b.w[keep],
+                                ts=b.ts[keep],
+                                sym_id=b.sym_id[keep],
+                                feature_cols=b.feature_cols,
+                            )
+                alpha = float(getattr(cfg, "entry_reg_weight_alpha", 4.0))
+                power = float(getattr(cfg, "entry_reg_weight_power", 1.2))
+                base_w = b.w.astype(np.float32, copy=False) if getattr(b, "w", None) is not None else np.ones_like(b.y, dtype=np.float32)
+                if _env_bool("SNIPER_ENABLE_REG_SHAPE_WEIGHT", default=True):
+                    reg_w = (1.0 + alpha * np.power(np.abs(b.y.astype(np.float32, copy=False)), power)).astype(np.float32)
+                else:
+                    reg_w = np.ones_like(base_w, dtype=np.float32)
+                tail_abs = float(_env_float("SNIPER_TAIL_ABS", 0.04))
+                tail_mult = float(_env_float("SNIPER_TAIL_WEIGHT_MULT", 1.0))
+                tail_abs_use = float(tail_abs) * (float(label_scale) if label_mode == "split_0_100" else 1.0)
+                if tail_mult > 1.0:
+                    tail_mask = np.abs(b.y.astype(np.float32, copy=False)) >= float(tail_abs_use)
+                    if np.any(tail_mask):
+                        reg_w[tail_mask] = (reg_w[tail_mask] * float(tail_mult)).astype(np.float32, copy=False)
+                w_final = (base_w * reg_w).astype(np.float32, copy=False)
+                if label_mode == "signed" and _env_bool("SNIPER_BALANCE_SIGN", default=True):
+                    try:
+                        yv = b.y.astype(np.float32, copy=False)
+                        pos = yv > 0
+                        neg = yv < 0
+                        sum_pos = float(np.sum(w_final[pos])) if np.any(pos) else 0.0
+                        sum_neg = float(np.sum(w_final[neg])) if np.any(neg) else 0.0
+                        if sum_pos > 0.0 and sum_neg > 0.0:
+                            tgt = 0.5 * (sum_pos + sum_neg)
+                            w_final = w_final.copy()
+                            w_final[pos] *= float(tgt / sum_pos)
+                            w_final[neg] *= float(tgt / sum_neg)
+                    except Exception:
+                        pass
+                if label_mode == "signed" and _env_bool("SNIPER_BALANCE_TAIL_SIGN", default=True):
+                    try:
+                        yv = b.y.astype(np.float32, copy=False)
+                        tail_sign_mask = np.abs(yv) >= float(tail_abs_use)
+                        pos = tail_sign_mask & (yv > 0)
+                        neg = tail_sign_mask & (yv < 0)
+                        sum_pos = float(np.sum(w_final[pos])) if np.any(pos) else 0.0
+                        sum_neg = float(np.sum(w_final[neg])) if np.any(neg) else 0.0
+                        if sum_pos > 0.0 and sum_neg > 0.0:
+                            tgt = 0.5 * (sum_pos + sum_neg)
+                            w_final = w_final.copy()
+                            w_final[pos] *= float(tgt / sum_pos)
+                            w_final[neg] *= float(tgt / sum_neg)
+                    except Exception:
+                        pass
+                if label_mode == "signed" and _env_bool("SNIPER_BALANCE_BINS_SIGN", default=False):
+                    try:
+                        edges = list(getattr(cfg, "entry_reg_balance_bins", None) or [])
+                        if edges:
+                            edges = [-np.inf] + sorted(float(x) for x in edges) + [np.inf]
+                            yv = b.y.astype(np.float32, copy=False)
+                            bin_idx = np.digitize(yv, edges) - 1
+                            bins_n = max(1, len(edges) - 1)
+                            for i in range(int(bins_n // 2)):
+                                j = (bins_n - 1) - i
+                                if i == j:
+                                    continue
+                                m_i = bin_idx == i
+                                m_j = bin_idx == j
+                                if not (np.any(m_i) and np.any(m_j)):
+                                    continue
+                                sum_i = float(np.sum(w_final[m_i]))
+                                sum_j = float(np.sum(w_final[m_j]))
+                                if sum_i > 0.0 and sum_j > 0.0:
+                                    tgt = 0.5 * (sum_i + sum_j)
+                                    w_final = w_final.copy()
+                                    w_final[m_i] *= float(tgt / sum_i)
+                                    w_final[m_j] *= float(tgt / sum_j)
+                    except Exception:
+                        pass
+                max_mult = float(_env_float("SNIPER_WEIGHT_MAX_MULT", 0.0))
+                if max_mult > 1.0:
+                    try:
+                        med = float(np.median(w_final[np.isfinite(w_final)]))
+                        cap = med * max_mult if med > 0 else 0.0
+                        if cap > 0.0:
+                            w_final = np.clip(w_final, 0.0, cap).astype(np.float32, copy=False)
+                    except Exception:
+                        pass
+                y_final = b.y.astype(np.float32, copy=False)
+                if label_mode == "signed" and _env_bool("SNIPER_TARGET_CENTER_WEIGHTED", default=True):
+                    try:
+                        ww = w_final.astype(np.float64, copy=False)
+                        yy = y_final.astype(np.float64, copy=False)
+                        center_method = str(os.getenv("SNIPER_TARGET_CENTER_METHOD", "median")).strip().lower()
+                        if center_method == "mean":
+                            den = float(np.sum(ww))
+                            if den > 0.0:
+                                y_bias = float(np.sum(yy * ww) / den)
+                            else:
+                                y_bias = float(np.mean(yy))
+                        else:
+                            y_bias = _weighted_median(yy, ww)
+                        if np.isfinite(y_bias):
+                            y_final = (y_final - np.float32(y_bias)).astype(np.float32, copy=False)
+                            y_final = np.clip(y_final, -0.2, 0.2).astype(np.float32, copy=False)
+                            print(
+                                f"[sniper-train] target_center {name}: method={center_method} bias={y_bias:+.5f}",
+                                flush=True,
+                            )
+                    except Exception:
+                        pass
+                b = SniperBatch(
+                    X=b.X,
+                    y=y_final,
+                    w=w_final.astype(np.float32, copy=False),
+                    ts=b.ts,
+                    sym_id=b.sym_id,
+                    feature_cols=b.feature_cols,
+                )
+                _print_dist_stats(f"{side} {name} y_final", b.y, weights=b.w)
+                _print_dist_stats(f"{side} {name} w_final", b.w)
+                print(f"[sniper-train] treinando EntryScore {side} {name} ({w}m)...", flush=True)
+                t_train = time.perf_counter()
+                if str(getattr(cfg, "entry_model_type", "xgb")).strip().lower() == "catboost":
+                    m, m_meta = _train_catboost_regressor(b, entry_params)
+                else:
+                    reg_params = dict(entry_params)
+                    reg_params.setdefault("objective", "reg:squarederror")
+                    m, m_meta = _train_xgb_regressor(b, reg_params, y_transform="none")
+                if timing_on:
+                    print(
+                        f"[sniper-train][timing] train_entry_{side}_{name}_{int(w)}m_s={time.perf_counter() - t_train:.2f}",
+                        flush=True,
+                    )
+                entry_models_by_side[side][name] = (m, m_meta)
+                print(f"[sniper-train] EntryScore {side} {name}: best_iter={m_meta['best_iteration']}", flush=True)
 
-        if not entry_models:
+        if not any(entry_models_by_side[s] for s in entry_sides):
             print(f"[sniper-train] {tail}d: nenhum modelo treinado, pulando", flush=True)
             continue
 
         period_train_end = None
         try:
-            if pack is not None and getattr(pack, "train_end_utc", None) is not None:
-                period_train_end = pd.to_datetime(pack.train_end_utc)
-            elif base_batch.ts.size:
-                period_train_end = pd.to_datetime(base_batch.ts.max())
+            sample_pack = None
+            if pack_by_side:
+                sample_pack = pack_by_side.get(entry_sides[0]) or next(iter(pack_by_side.values()), None)
+            sample_batch = base_batch_by_side.get(entry_sides[0]) if base_batch_by_side else None
+            if sample_pack is not None and getattr(sample_pack, "train_end_utc", None) is not None:
+                period_train_end = pd.to_datetime(sample_pack.train_end_utc)
+            elif sample_batch is not None and sample_batch.ts.size:
+                period_train_end = pd.to_datetime(sample_batch.ts.max())
         except Exception:
             period_train_end = None
 
-        # salva modelo entry (mantem entry_model como alias do base_long_name)
-        for name, w in entry_specs:
-            if name not in entry_models:
-                continue
-            model, _m_meta = entry_models[name]
-            spec = spec_by_name.get(name, {})
-            side = str(spec.get("side") or "long").strip().lower()
-            w_int = int(spec.get("window") or w)
-            if side == "short":
-                d = period_dir / f"entry_model_short_{w_int}m"
-            else:
-                d = period_dir / f"entry_model_{w_int}m"
-            d.mkdir(parents=True, exist_ok=True)
-            _save_model(model, d / "model_entry.json")
-        if base_long_name in entry_models:
-            (period_dir / "entry_model").mkdir(parents=True, exist_ok=True)
-            _save_model(entry_models[base_long_name][0], period_dir / "entry_model" / "model_entry.json")
-        if base_short_name and base_short_name in entry_models:
-            (period_dir / "entry_model_short").mkdir(parents=True, exist_ok=True)
-            _save_model(entry_models[base_short_name][0], period_dir / "entry_model_short" / "model_entry.json")
-        if base_long_name in entry_batches:
-            base_batch = entry_batches[base_long_name]
-        base_meta = entry_models[base_long_name][1] if base_long_name in entry_models else next(iter(entry_models.values()))[1]
+        # salva modelos entry por janela + alias entry_model (base)
+        for side in entry_sides:
+            entry_models = entry_models_by_side.get(side, {})
+            for name, w in entry_specs:
+                if name not in entry_models:
+                    continue
+                model, _m_meta = entry_models[name]
+                spec = spec_by_name.get(name, {})
+                w_int = int(spec.get("window") or w)
+                d = period_dir / f"entry_model_{side}_{w_int}m"
+                d.mkdir(parents=True, exist_ok=True)
+                _save_model(model, d / "model_entry.json")
+            if base_name in entry_models:
+                (period_dir / f"entry_model_{side}").mkdir(parents=True, exist_ok=True)
+                _save_model(entry_models[base_name][0], period_dir / f"entry_model_{side}" / "model_entry.json")
+
+        sample_batch = base_batch_by_side.get(entry_sides[0]) if base_batch_by_side else None
         meta = {
             "entry": {
-                "feature_cols": base_batch.feature_cols,
-                "calibration": base_meta.get("calibrator", {"type": "identity"}),
+                "feature_cols": (sample_batch.feature_cols if sample_batch is not None else []),
+                "label_mode": str(label_mode),
+                "label_scale": float(label_scale),
+                "sides": list(entry_sides),
             },
             # Ponto final do treino (auditavel): preferimos o valor deterministico vindo do dataflow
             # (cutoff - lookahead). Se nao existir, cai no max(ts) do dataset amostrado.
             "train_end_utc": (
                 str(pd.to_datetime(period_train_end))
                 if period_train_end is not None
-                else (np.datetime_as_string(np.max(base_batch.ts), unit="s") if base_batch.ts.size else None)
+                else (np.datetime_as_string(np.max(sample_batch.ts), unit="s") if sample_batch is not None and sample_batch.ts.size else None)
             ),
             "symbols": (
-                pack.symbols_used if (pack is not None and getattr(pack, "symbols_used", None)) else (pack.symbols if pack is not None else list(symbols))
+                sample_pack.symbols_used if (sample_pack is not None and getattr(sample_pack, "symbols_used", None)) else (sample_pack.symbols if sample_pack is not None else list(symbols))
             ),
-            "symbols_total": int(len(pack.symbols) if pack is not None and getattr(pack, "symbols", None) else len(symbols)),
-            "symbols_used": (pack.symbols_used or None) if pack is not None else None,
-            "symbols_skipped": (pack.symbols_skipped or None) if pack is not None else None,
+            "symbols_total": int(len(sample_pack.symbols) if sample_pack is not None and getattr(sample_pack, "symbols", None) else len(symbols)),
+            "symbols_used": (sample_pack.symbols_used or None) if sample_pack is not None else None,
+            "symbols_skipped": (sample_pack.symbols_skipped or None) if sample_pack is not None else None,
         }
-        if base_short_name and base_short_name in entry_models:
-            short_meta = entry_models[base_short_name][1]
-            short_feat_cols = entry_batches.get(base_short_name, base_batch).feature_cols if entry_batches else base_batch.feature_cols
-            meta["entry_short"] = {
-                "feature_cols": short_feat_cols,
-                "calibration": short_meta.get("calibrator", {"type": "identity"}),
-            }
-        # meta extra por janela
-        for name, w in entry_specs:
-            if name not in entry_models:
-                continue
-            _m, _m_meta = entry_models[name]
-            if name in entry_batches:
-                feat_cols = entry_batches[name].feature_cols
-            else:
-                # fallback para o batch base carregado on-demand
-                feat_cols = base_batch.feature_cols
-            spec = spec_by_name.get(name, {})
-            side = str(spec.get("side") or "long").strip().lower()
-            w_int = int(spec.get("window") or w)
-            meta_key = f"entry_short_{w_int}m" if side == "short" else f"entry_{w_int}m"
-            meta[meta_key] = {"feature_cols": feat_cols, "calibration": _m_meta["calibrator"]}
+        # meta extra por janela e lado
+        for side in entry_sides:
+            entry_models = entry_models_by_side.get(side, {})
+            entry_batches = entry_batches_by_side.get(side, {})
+            base_batch = base_batch_by_side.get(side)
+            for name, w in entry_specs:
+                if name not in entry_models:
+                    continue
+                if name in entry_batches:
+                    feat_cols = entry_batches[name].feature_cols
+                else:
+                    # fallback para o batch base carregado on-demand
+                    feat_cols = base_batch.feature_cols if base_batch is not None else []
+                _model, _m_meta = entry_models[name]
+                spec = spec_by_name.get(name, {})
+                w_int = int(spec.get("window") or w)
+                meta_key = f"entry_{side}_{w_int}m"
+                meta[meta_key] = {
+                    "feature_cols": feat_cols,
+                    "best_iteration": int((_m_meta or {}).get("best_iteration", 0) or 0),
+                    "metrics": ((_m_meta or {}).get("metrics", None) or None),
+                    "pred_bias": float((_m_meta or {}).get("pred_bias", 0.0) or 0.0),
+                    "calibration": ((_m_meta or {}).get("calibration", None) or None),
+                }
         (period_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[sniper-train] {tail}d salvo em {period_dir}")
 

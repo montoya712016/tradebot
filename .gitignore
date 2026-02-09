@@ -25,6 +25,9 @@ cache_sniper/
 data/generated/
 test/out_*.png
 modules/data/generated/
+state.json
+tmp_*.json
+tmp_*.py
 
 # Secrets (local only)
 modules/config/secrets.py

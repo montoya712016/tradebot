@@ -1,14 +1,16 @@
 # modules/
 
-Shared building blocks used across training, backtesting, realtime bots, and sweep tooling.
+Shared building blocks across training, backtesting, realtime execution, and the hybrid RL pipeline.
 
-## Subpackages
-- `backtest/` — portfolio and single‑symbol backtest engines plus plotting aids.
-- `config/` — typed configuration loaders and defaults shared by scripts.
-- `prepare_features/` — feature engineering, labeling, and dataset assembly.
-- `realtime/` — websocket ingestion, decision loop helpers, dashboard server.
-- `thresholds/` — utilities to search/score entry/exit thresholds.
-- `train/` — model training helpers (XGBoost wrappers, CV, sweep support).
-- `utils/` — generic helpers: MySQL, caching, date/time, logging, etc.
-
-Each subfolder has its own README with entry points and key functions.
+Subpackages
+-----------
+- `prepare_features/` - feature engineering, labeling, cache refresh.
+- `train/` - walk-forward supervised training.
+- `backtest/` - single-symbol and portfolio backtesting.
+- `thresholds/` - threshold search and scoring utilities.
+- `realtime/` - realtime dashboard server and assets.
+- `supervised/` - long/short signal export for RL.
+- `env_rl/` - RL trading environment, action space, reward/cost components.
+- `rl/` - RL walk-forward training, evaluation, and orchestration.
+- `utils/` - shared helpers (paths, notifications, progress, etc.).
+- `config/` - symbols/threshold defaults and local secrets loader.

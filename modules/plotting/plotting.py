@@ -49,21 +49,6 @@ ENTRY_PALETTE = [
     "#3169cc",
     "#2956b3",  # darker for longer windows
 ]
-LONG_PALETTE = [
-    "#7ee787",  # light green
-    "#4fd18b",
-    "#2ea043",
-    "#238636",
-    "#196c2e",  # darker green
-]
-SHORT_PALETTE = [
-    "#ff7b72",  # light red
-    "#f85149",
-    "#e5534b",
-    "#cc3d3d",
-    "#8e2f2f",  # darker red
-]
-
 try:
     from prepare_features import pf_config as cfg  # type: ignore[import]
 except Exception:
@@ -95,20 +80,26 @@ def _safe_series(df: pd.DataFrame, col: str) -> np.ndarray | None:
 def _color_for_name(name: str) -> str:
     try:
         s = str(name)
-        if s.startswith("sniper_long_") or s.startswith("sniper_short_"):
-            is_short = "short" in s
+        if s == "timing_label_long":
+            return "#3fb950"
+        if s == "timing_label_short":
+            return "#ff7b72"
+        if s == "timing_weight_long":
+            return "#56d364"
+        if s == "timing_weight_short":
+            return "#f85149"
+        if s.startswith("ret_exp_") or s.startswith("entry_"):
             import re
 
-            m = re.search(r"(?:_|w)(\\d+)m", s)
+            m = re.search(r"(\\d+)m", s)
             w = int(m.group(1)) if m else 0
             windows = [30, 60, 120, 240, 360]
             try:
                 idx = windows.index(w)
             except Exception:
                 idx = 0
-            palette = SHORT_PALETTE if is_short else LONG_PALETTE
-            idx = max(0, min(idx, len(palette) - 1))
-            return palette[idx]
+            idx = max(0, min(idx, len(ENTRY_PALETTE) - 1))
+            return ENTRY_PALETTE[idx]
         if s.startswith("p_entry_w") and s[9:].isdigit():
             # map window minutes to a light->dark palette
             w = int(s[9:])
@@ -214,6 +205,11 @@ def _add_markers(fig, *, row: int, x, y, name: str, color: str, symbol: str):
 
 def _build_panels(flags: dict[str, Any]) -> list[str]:
     panels = ["candles"]
+    has_non_label_feature = any(
+        bool(v)
+        for k, v in (flags or {}).items()
+        if k not in {"label", "plot_candles"}
+    )
     if flags.get("shitidx"):
         panels.append("shitidx")
     if flags.get("keltner"):
@@ -267,7 +263,11 @@ def _build_panels(flags: dict[str, Any]) -> list[str]:
     if flags.get("wick_stats"):
         panels.append("wick_stats")
     if flags.get("label"):
-        panels.extend(["long_short_weights", "long_short_returns"])
+        # If only label is enabled, keep a single label subplot.
+        if not has_non_label_feature:
+            panels.append("label")
+        else:
+            panels.extend(["weights", "label", "timing_label"])
     return panels
 
 
@@ -959,57 +959,78 @@ def plot_all(
                 gap_threshold=gap_threshold,
             )
 
-        # long_short_weights
-        if "long_short_weights" in row_map:
-            for col in df.columns:
-                if col.startswith("sniper_short_weight_") and col.endswith("m"):
-                    suf = str(col).replace("sniper_short_weight_", "")
-                    name = f"sniper_short_weight_{suf}"
+        # labels de regressÃ£o (fallback quando nÃ£o houver painel dedicado)
+        # labels de regressao: prioriza labels por lado (0..100).
+        if "label" in row_map:
+            added_side_labels = False
+            for col in ("timing_label_long", "timing_label_short"):
+                if col in df.columns:
                     _add_line(
                         fig,
-                        row=row_map["long_short_weights"],
+                        row=row_map["label"],
                         x=x,
                         y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
-                        name=name,
+                        name=col,
                         gap_threshold=gap_threshold,
                     )
-                elif col.startswith("sniper_long_weight_") and col.endswith("m"):
-                    suf = str(col).replace("sniper_long_weight_", "")
-                    name = f"sniper_long_weight_{suf}"
+                    added_side_labels = True
+            if not added_side_labels and "timing_label" in df.columns and "timing_label" not in row_map:
+                _add_line(
+                    fig,
+                    row=row_map["label"],
+                    x=x,
+                    y=_apply_gap_nan(_safe_series(line_df, "timing_label"), gap_mask),
+                    name="timing_label",
+                    gap_threshold=gap_threshold,
+                )
+        # weights da regressao (timing)
+        if "weights" in row_map:
+            added_side_weights = False
+            for col in ("timing_weight_long", "timing_weight_short"):
+                if col in df.columns:
                     _add_line(
                         fig,
-                        row=row_map["long_short_weights"],
+                        row=row_map["weights"],
                         x=x,
                         y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
-                        name=name,
+                        name=col,
                         gap_threshold=gap_threshold,
                     )
-            # labels sao marcadas no candle via linhas verticais; aqui mantemos apenas weights
-        # long_short_returns
-        if "long_short_returns" in row_map:
-            for col in df.columns:
-                if col.startswith("sniper_short_ret_pct_") and col.endswith("m"):
-                    suf = str(col).replace("sniper_short_ret_pct_", "")
-                    name = f"sniper_short_ret_pct_{suf}"
+                    added_side_weights = True
+            if not added_side_weights and "timing_weight" in df.columns:
+                _add_line(
+                    fig,
+                    row=row_map["weights"],
+                    x=x,
+                    y=_apply_gap_nan(_safe_series(line_df, "timing_weight"), gap_mask),
+                    name="timing_weight",
+                    gap_threshold=gap_threshold,
+                )
+        # timing regression labels (signed/raw context)
+        if "timing_label" in row_map:
+            added_raw_labels = False
+            for col in ("timing_label", "timing_profit_now"):
+                if col in df.columns:
                     _add_line(
                         fig,
-                        row=row_map["long_short_returns"],
+                        row=row_map["timing_label"],
                         x=x,
                         y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
-                        name=name,
+                        name=col,
                         gap_threshold=gap_threshold,
                     )
-                elif col.startswith("sniper_long_ret_pct_") and col.endswith("m"):
-                    suf = str(col).replace("sniper_long_ret_pct_", "")
-                    name = f"sniper_long_ret_pct_{suf}"
-                    _add_line(
-                        fig,
-                        row=row_map["long_short_returns"],
-                        x=x,
-                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
-                        name=name,
-                        gap_threshold=gap_threshold,
-                    )
+                    added_raw_labels = True
+            if not added_raw_labels:
+                for col in ("timing_label_pct", "timing_profit_now_pct"):
+                    if col in df.columns:
+                        _add_line(
+                            fig,
+                            row=row_map["timing_label"],
+                            x=x,
+                            y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                            name=col,
+                            gap_threshold=gap_threshold,
+                        )
     else:
         # fallback: detect columns by prefix (evita dependência circular com pf_config)
         def _plot_prefix(panel: str, prefixes: tuple[str, ...]):
@@ -1055,61 +1076,55 @@ def plot_all(
         _plot_prefix("breakout", ("break_high_", "break_low_", "bars_since_bhigh_", "bars_since_blow_"))
         _plot_prefix("mom_short", ("slope_diff_",))
         _plot_prefix("wick_stats", ("wick_lower_", "wick_upper_", "wick_"))
-        _plot_prefix("long_short_weights", ("sniper_long_weight_", "sniper_short_weight_"))
-        _plot_prefix("long_short_returns", ("sniper_long_ret_pct_", "sniper_short_ret_pct_"))
+        if "label" in row_map:
+            side_added = False
+            for col in ("timing_label_long", "timing_label_short"):
+                if col in df.columns:
+                    _add_line(
+                        fig,
+                        row=row_map["label"],
+                        x=x,
+                        y=_safe_series(df, col),
+                        name=col,
+                        gap_threshold=gap_threshold,
+                    )
+                    side_added = True
+            if not side_added:
+                _plot_prefix("label", ("timing_label", "timing_profit_now"))
 
-    # Label markers on candles (sniper_long_label_* == 1 / sniper_short_label_* == 1)
+        if "weights" in row_map:
+            weight_added = False
+            for col in ("timing_weight_long", "timing_weight_short", "timing_weight"):
+                if col in df.columns:
+                    _add_line(
+                        fig,
+                        row=row_map["weights"],
+                        x=x,
+                        y=_safe_series(df, col),
+                        name=col,
+                        gap_threshold=gap_threshold,
+                    )
+                    weight_added = True
+            if not weight_added:
+                _plot_prefix("weights", ("timing_weight",))
+
+        if "timing_label" in row_map:
+            raw_added = False
+            for col in ("timing_label", "timing_profit_now"):
+                if col in df.columns:
+                    _add_line(
+                        fig,
+                        row=row_map["timing_label"],
+                        x=x,
+                        y=_safe_series(df, col),
+                        name=col,
+                        gap_threshold=gap_threshold,
+                    )
+                    raw_added = True
+            if not raw_added:
+                _plot_prefix("timing_label", ("timing_label_pct", "timing_profit_now_pct"))
+
     shapes = []
-    if "candles" in row_map:
-        try:
-            y0 = float(np.nanmin(df["low"].to_numpy(dtype=float, copy=False)))
-            y1 = float(np.nanmax(df["high"].to_numpy(dtype=float, copy=False)))
-            label_cols = [c for c in df.columns if c.startswith("sniper_long_label_") and c.endswith("m")]
-            if label_cols:
-                for col in label_cols:
-                    suffix = str(col).replace("sniper_long_label_", "")
-                    weight_col = f"sniper_long_weight_{suffix}"
-                    line_color = _color_for_name(weight_col)
-                    sel = df[col].to_numpy(copy=False) == 1
-                    if np.any(sel):
-                        for i in np.where(sel)[0].tolist():
-                            shapes.append(
-                                dict(
-                                    type="line",
-                                    xref="x",
-                                    yref="y1",
-                                    x0=x[i],
-                                    x1=x[i],
-                                    y0=y0,
-                                    y1=y1,
-                                    line=dict(color=line_color, width=1, dash="dash"),
-                                    layer="above",
-                                )
-                            )
-            label_cols_short = [c for c in df.columns if c.startswith("sniper_short_label_") and c.endswith("m")]
-            if label_cols_short:
-                for col in label_cols_short:
-                    suffix = str(col).replace("sniper_short_label_", "")
-                    weight_col = f"sniper_short_weight_{suffix}"
-                    line_color = _color_for_name(weight_col)
-                    sel = df[col].to_numpy(copy=False) == 1
-                    if np.any(sel):
-                        for i in np.where(sel)[0].tolist():
-                            shapes.append(
-                                dict(
-                                    type="line",
-                                    xref="x",
-                                    yref="y1",
-                                    x0=x[i],
-                                    x1=x[i],
-                                    y0=y0,
-                                    y1=y1,
-                                    line=dict(color=line_color, width=1, dash="dot"),
-                                    layer="above",
-                                )
-                            )
-        except Exception:
-            pass
 
     # Shade market-closed gaps
     if mark_gaps and gap_mask is not None:
@@ -1161,6 +1176,7 @@ def plot_backtest_single(
     trades,
     equity: np.ndarray,
     p_entry: np.ndarray,
+    p_entry_short: np.ndarray | None = None,
     p_entry_map: dict[str, np.ndarray] | None = None,
     p_entry_long_map: dict[str, np.ndarray] | None = None,
     p_entry_short_map: dict[str, np.ndarray] | None = None,
@@ -1182,10 +1198,11 @@ def plot_backtest_single(
     plot_probs: bool = True,
     plot_signals: bool = True,
     plot_candles: bool = True,
+    probs_simple: bool = False,
     modebar_undo: bool = True,
 ) -> go.Figure:
     """
-    Plot resultado de backtest single-symbol com candles, probs, sinais e equity.
+    Plot resultado de backtest single-symbol com candles, scores, sinais e equity.
     """
     if df is None or df.empty:
         raise ValueError("df vazio para plot.")
@@ -1321,102 +1338,142 @@ def plot_backtest_single(
 
     # Probabilidades
     if plot_probs:
-        if p_entry_long_map or p_entry_short_map:
-            for name, arr in (p_entry_long_map or {}).items():
+        if probs_simple:
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=_apply_gap_nan(np.asarray(p_entry, dtype=float), gap_mask),
+                    name="p_entry_long",
+                    mode="lines",
+                    line=dict(color="#3fb950", width=1),
+                ),
+                row=row_map["probs"],
+                col=1,
+            )
+            if p_entry_short is not None:
                 fig.add_trace(
                     go.Scatter(
                         x=idx,
-                        y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
-                        name=f"p_entry_long_{name}",
-                        mode="lines",
-                        line=dict(color="#3fb950", width=1),
-                    ),
-                    row=row_map["probs"],
-                    col=1,
-                )
-            for name, arr in (p_entry_short_map or {}).items():
-                fig.add_trace(
-                    go.Scatter(
-                        x=idx,
-                        y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
-                        name=f"p_entry_short_{name}",
+                        y=_apply_gap_nan(np.asarray(p_entry_short, dtype=float), gap_mask),
+                        name="p_entry_short",
                         mode="lines",
                         line=dict(color="#ff7b72", width=1),
                     ),
                     row=row_map["probs"],
                     col=1,
                 )
-        elif p_entry_map:
-            for name, arr in p_entry_map.items():
+        else:
+            if p_entry_long_map or p_entry_short_map:
+                for name, arr in (p_entry_long_map or {}).items():
+                    fig.add_trace(
+                        go.Scatter(
+                            x=idx,
+                            y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                            name=f"p_entry_long_{name}",
+                            mode="lines",
+                            line=dict(color="#3fb950", width=1),
+                        ),
+                        row=row_map["probs"],
+                        col=1,
+                    )
+                for name, arr in (p_entry_short_map or {}).items():
+                    fig.add_trace(
+                        go.Scatter(
+                            x=idx,
+                            y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                            name=f"p_entry_short_{name}",
+                            mode="lines",
+                            line=dict(color="#ff7b72", width=1),
+                        ),
+                        row=row_map["probs"],
+                        col=1,
+                    )
+            elif p_entry_map:
+                for name, arr in p_entry_map.items():
+                    fig.add_trace(
+                        go.Scatter(
+                            x=idx,
+                            y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                            name=f"p_entry_{name} (lighter=shorter, darker=longer)",
+                            mode="lines",
+                            line=dict(color=_color_for_name(f"p_entry_{name}"), width=1),
+                        ),
+                        row=row_map["probs"],
+                        col=1,
+                    )
+            else:
                 fig.add_trace(
                     go.Scatter(
                         x=idx,
-                        y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
-                        name=f"p_entry_{name} (lighter=shorter, darker=longer)",
+                        y=_apply_gap_nan(np.asarray(p_entry, dtype=float), gap_mask),
+                        name="p_entry",
                         mode="lines",
-                        line=dict(color=_color_for_name(f"p_entry_{name}"), width=1),
+                        line=dict(color="#58a6ff", width=1),
                     ),
                     row=row_map["probs"],
                     col=1,
                 )
-        else:
             fig.add_trace(
                 go.Scatter(
                     x=idx,
-                    y=_apply_gap_nan(np.asarray(p_entry, dtype=float), gap_mask),
-                    name="p_entry",
+                    y=[float(tau_entry_long if tau_entry_long is not None else tau_entry)] * len(idx),
+                    name="tau_entry_long",
                     mode="lines",
-                    line=dict(color="#58a6ff", width=1),
+                    line=dict(color="#3fb950", dash="dash", width=1),
                 ),
                 row=row_map["probs"],
                 col=1,
             )
-        fig.add_trace(
-            go.Scatter(
-                x=idx,
-                y=[float(tau_entry_long if tau_entry_long is not None else tau_entry)] * len(idx),
-                name="tau_entry_long",
-                mode="lines",
-                line=dict(color="#3fb950", dash="dash", width=1),
-            ),
-            row=row_map["probs"],
-            col=1,
-        )
-        if tau_entry_short is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=idx,
-                    y=[float(tau_entry_short)] * len(idx),
-                    name="tau_entry_short",
-                    mode="lines",
-                    line=dict(color="#ff7b72", dash="dash", width=1),
-                ),
-                row=row_map["probs"],
-                col=1,
-            )
-        if np.any(np.asarray(p_danger, dtype=float)):
-            fig.add_trace(
-                go.Scatter(
-                    x=idx,
-                    y=_apply_gap_nan(np.asarray(p_danger, dtype=float), gap_mask),
-                    name="p_danger",
-                    mode="lines",
-                    line=dict(color="#ff7b72", width=1),
-                ),
-                row=row_map["probs"],
-                col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=idx,
-                    y=[float(tau_danger)] * len(idx),
-                    name="tau_danger",
-                    mode="lines",
-                    line=dict(color="#ff7b72", dash="dash", width=1),
-                ),
-                row=row_map["probs"],
-                col=1,
-            )
+            if tau_entry_short is not None:
+                tau_short_plot = float(tau_entry_short)
+                if p_entry_short is not None:
+                    tau_short_plot = -tau_short_plot
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=[tau_short_plot] * len(idx),
+                        name="tau_entry_short",
+                        mode="lines",
+                        line=dict(color="#ff7b72", dash="dash", width=1),
+                    ),
+                    row=row_map["probs"],
+                    col=1,
+                )
+            if p_entry_short is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=_apply_gap_nan(-np.asarray(p_entry_short, dtype=float), gap_mask),
+                        name="p_entry_short",
+                        mode="lines",
+                        line=dict(color="#ff7b72", width=1),
+                    ),
+                    row=row_map["probs"],
+                    col=1,
+                )
+            if np.any(np.asarray(p_danger, dtype=float)):
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=_apply_gap_nan(np.asarray(p_danger, dtype=float), gap_mask),
+                        name="p_danger",
+                        mode="lines",
+                        line=dict(color="#ff7b72", width=1),
+                    ),
+                    row=row_map["probs"],
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=[float(tau_danger)] * len(idx),
+                        name="tau_danger",
+                        mode="lines",
+                        line=dict(color="#ff7b72", dash="dash", width=1),
+                    ),
+                    row=row_map["probs"],
+                    col=1,
+                )
 
     # Sinais (0/1)
     if plot_signals:
@@ -1524,6 +1581,280 @@ def plot_backtest_single(
     config = None
     if modebar_undo:
         # Add a reset view button (acts as undo for pan/zoom).
+        config = {"displaylogo": False, "modeBarButtonsToAdd": ["resetScale2d"]}
+
+    if save_path:
+        from plotly.io import write_html
+
+        Path(save_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+        write_html(fig, file=str(save_path), auto_open=bool(show), include_plotlyjs="cdn", config=config)
+    elif show:
+        fig.show(config=config)
+
+    return fig
+
+
+def plot_backtest_single_rl(
+    df: pd.DataFrame,
+    *,
+    trades,
+    equity: np.ndarray,
+    action_id: np.ndarray,
+    exposure: np.ndarray | None = None,
+    rl_q_map: dict[str, np.ndarray] | None = None,
+    regressor_map: dict[str, np.ndarray] | None = None,
+    title: str = "backtest_rl",
+    save_path: str | None = None,
+    show: bool = True,
+    mark_gaps: bool = True,
+    gap_hours: float = 2.0,
+    plot_candles: bool = True,
+    modebar_undo: bool = True,
+) -> go.Figure:
+    """
+    Plot de backtest single-symbol para RL:
+    - candles + trades
+    - Q-values agregados do policy
+    - sinais dos regressores supervisionados
+    - acoes do RL + exposicao
+    - curva de equity
+    """
+    if df is None or df.empty:
+        raise ValueError("df vazio para plot RL.")
+
+    idx = pd.to_datetime(df.index)
+    n = len(df)
+    gap_mask = None
+    if mark_gaps:
+        gth = timedelta(hours=float(gap_hours))
+        gth64 = np.timedelta64(gth)
+        gap_mask = np.zeros(n, dtype=bool)
+        for i in range(1, n):
+            if (idx[i] - idx[i - 1]) >= gth64:
+                gap_mask[i] = True
+
+    panels = ["candles", "rl_q", "regressors", "actions", "equity"]
+    ratios = [3.0, 1.2, 1.2, 1.0, 1.2]
+    total = float(sum(ratios))
+    heights = [r / total for r in ratios]
+    row_map = {p: i + 1 for i, p in enumerate(panels)}
+
+    fig = make_subplots(
+        rows=len(panels),
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=heights,
+    )
+
+    # Price panel
+    if plot_candles:
+        fig.add_trace(
+            go.Candlestick(
+                x=idx,
+                open=df["open"],
+                high=df["high"],
+                low=df["low"],
+                close=df["close"],
+                name="candles",
+            ),
+            row=row_map["candles"],
+            col=1,
+        )
+    else:
+        fig.add_trace(
+            go.Scatter(
+                x=idx,
+                y=_apply_gap_nan(df["close"].to_numpy(dtype=float, copy=False), gap_mask),
+                name="close",
+                mode="lines",
+                line=dict(color="#e6edf3", width=1.0),
+            ),
+            row=row_map["candles"],
+            col=1,
+        )
+
+    # Trades overlay
+    shapes = []
+    px_low = float(np.nanmin(df["low"].to_numpy(dtype=float, copy=False)))
+    px_high = float(np.nanmax(df["high"].to_numpy(dtype=float, copy=False)))
+    for t in trades:
+        try:
+            et = pd.to_datetime(getattr(t, "entry_ts"))
+            xt = pd.to_datetime(getattr(t, "exit_ts"))
+        except Exception:
+            continue
+        side = str(getattr(t, "side", "long")).lower()
+        trade_color = "rgba(248,81,73,0.22)" if side == "short" else "rgba(63,185,80,0.22)"
+        shapes.append(
+            dict(
+                type="rect",
+                xref="x",
+                yref="y1",
+                x0=et,
+                x1=xt,
+                y0=px_low,
+                y1=px_high,
+                fillcolor=trade_color,
+                line=dict(width=0),
+                layer="below",
+            )
+        )
+        if side == "short":
+            marks = ((et, "triangle-down", "#ff7b72"), (xt, "triangle-up", "#3fb950"))
+        else:
+            marks = ((et, "triangle-up", "#3fb950"), (xt, "triangle-down", "#f85149"))
+        for ts, symbol, color in marks:
+            try:
+                pos = int(idx.get_indexer([ts], method="nearest")[0])
+            except Exception:
+                continue
+            if pos < 0 or pos >= n:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=[ts],
+                    y=[float(df.iloc[pos]["close"])],
+                    mode="markers",
+                    marker=dict(symbol=symbol, color=color, size=7),
+                    name="trade_marker",
+                    showlegend=False,
+                ),
+                row=row_map["candles"],
+                col=1,
+            )
+
+    # RL Q panel
+    for name, arr in (rl_q_map or {}).items():
+        fig.add_trace(
+            go.Scatter(
+                x=idx,
+                y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                name=f"q_{name}",
+                mode="lines",
+                line=dict(width=1.1),
+            ),
+            row=row_map["rl_q"],
+            col=1,
+        )
+
+    # Regressors panel
+    for name, arr in (regressor_map or {}).items():
+        fig.add_trace(
+            go.Scatter(
+                x=idx,
+                y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                name=name,
+                mode="lines",
+                line=dict(width=1.0),
+            ),
+            row=row_map["regressors"],
+            col=1,
+        )
+
+    # Actions + exposure panel
+    if exposure is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=idx,
+                y=_apply_gap_nan(np.asarray(exposure, dtype=float), gap_mask),
+                name="exposure",
+                mode="lines",
+                line=dict(color="#58a6ff", width=1.2),
+            ),
+            row=row_map["actions"],
+            col=1,
+        )
+    action_arr = np.asarray(action_id, dtype=float)
+    m_action = np.isfinite(action_arr)
+    if np.any(m_action):
+        x_a = idx[m_action]
+        y_a = action_arr[m_action]
+        action_colors = {
+            0: "#8b949e",
+            1: "#3fb950",
+            2: "#2ea043",
+            3: "#ff7b72",
+            4: "#f85149",
+            5: "#d29922",
+            6: "#d29922",
+        }
+        c = [action_colors.get(int(v), "#58a6ff") for v in y_a]
+        fig.add_trace(
+            go.Scatter(
+                x=x_a,
+                y=y_a,
+                mode="markers",
+                marker=dict(size=5, color=c, symbol="circle"),
+                name="action_id",
+            ),
+            row=row_map["actions"],
+            col=1,
+        )
+        fig.update_yaxes(
+            row=row_map["actions"],
+            col=1,
+            range=[-0.5, 6.5],
+            tickmode="array",
+            tickvals=[0, 1, 2, 3, 4, 5, 6],
+            ticktext=["hold", "long_s", "long_b", "short_s", "short_b", "close_l", "close_s"],
+        )
+
+    # Equity panel
+    eq_arr = np.asarray(equity, dtype=float)
+    if len(eq_arr) != n:
+        if len(eq_arr) < n:
+            pad = np.full(n - len(eq_arr), eq_arr[-1] if len(eq_arr) else 1.0, dtype=np.float64)
+            eq_arr = np.concatenate([eq_arr, pad], axis=0)
+        else:
+            eq_arr = eq_arr[:n]
+    fig.add_trace(
+        go.Scatter(
+            x=idx,
+            y=_apply_gap_nan(eq_arr, gap_mask),
+            name="equity",
+            mode="lines",
+            line=dict(color="#58a6ff", width=1.5),
+        ),
+        row=row_map["equity"],
+        col=1,
+    )
+
+    # Gap shading
+    if mark_gaps and gap_mask is not None:
+        for i in range(1, n):
+            if gap_mask[i]:
+                shapes.append(
+                    dict(
+                        type="rect",
+                        xref="x",
+                        yref="y1",
+                        x0=idx[i - 1],
+                        x1=idx[i],
+                        y0=px_low,
+                        y1=px_high,
+                        fillcolor="rgba(255,215,0,0.25)",
+                        line=dict(width=0),
+                        layer="below",
+                    )
+                )
+
+    fig.update_layout(
+        title=title,
+        xaxis_rangeslider_visible=False,
+        template=DARK_TEMPLATE,
+        paper_bgcolor=DARK_BG,
+        plot_bgcolor=DARK_BG,
+        font=dict(color=DARK_FONT),
+        shapes=shapes,
+        legend=dict(orientation="h"),
+        hovermode="x unified",
+    )
+    fig.update_xaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID)
+    fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID)
+
+    config = None
+    if modebar_undo:
         config = {"displaylogo": False, "modeBarButtonsToAdd": ["resetScale2d"]}
 
     if save_path:

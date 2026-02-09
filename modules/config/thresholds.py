@@ -5,7 +5,7 @@ from __future__ import annotations
 Central de thresholds manuais (usados nos backtests/simulacoes).
 
 Objetivo:
-- Permitir que você altere os thresholds (ex.: tau_entry=0.8)
+- Permitir que você altere os thresholds (ex.: tau_entry=0.002)
   em UM lugar e isso reflita em todas as simulações.
 - Sem depender de variáveis de ambiente.
 
@@ -19,7 +19,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ThresholdOverrides:
-    tau_entry: float | None = 0.75
+    # Regressao: threshold em retorno previsto (ex.: 0.002 = 0.2%)
+    tau_entry: float | None = 0.002
 
     # Fallback para campos legados (danger/exit) que não são mais usados.
     def __getattr__(self, name: str):

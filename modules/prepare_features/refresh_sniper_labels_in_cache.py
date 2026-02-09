@@ -2,17 +2,11 @@
 from __future__ import annotations
 
 """
-Recalcula APENAS os labels sniper_* dentro do cache de features (parquet/pickle),
+Recalcula APENAS os labels de regressão (timing_label/weight) dentro do cache de features,
 sem recomputar features.
-
-Útil quando ajustamos a lógica de Danger/Entry/Exit em `prepare_features/labels.py`
-ou os parâmetros do `TradeContract` (ex.: entry_label_windows_minutes / exit_ema_span).
 
 Uso:
 python modules/prepare_features/refresh_sniper_labels_in_cache.py
-
-Observação:
-- Isso reescreve os arquivos do cache (operação atômica: escreve tmp e renomeia).
 """
 
 from dataclasses import dataclass
@@ -23,7 +17,6 @@ import sys
 import time
 import uuid
 
-import numpy as np
 import pandas as pd
 
 # permitir rodar como script direto (sem PYTHONPATH)
@@ -37,35 +30,25 @@ for _p in _HERE.parents:
                 sys.path.insert(0, _sp)
         break
 
-_asset = os.getenv("SNIPER_ASSET_CLASS", "").strip().lower()
-if _asset == "stocks":
-    from stocks.trade_contract import (  # noqa: E402
-        DEFAULT_TRADE_CONTRACT,
-        TradeContract,
-        exit_ema_span_from_window,
-    )
-else:
-    from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract, exit_ema_span_from_window  # noqa: E402
-
-# Contrato padrão (crypto) alinhado com o treino atual
-ENTRY_LABEL_WINDOWS_MIN = (60,)
-ENTRY_LABEL_MIN_PROFIT_PCTS = (0.03,)
-ENTRY_LABEL_MAX_DD_PCTS = (0.03,)
-ENTRY_LABEL_WEIGHT_ALPHA = 0.5
-EXIT_EMA_INIT_OFFSET_PCT = 0.002
-
-if _asset != "stocks":
-    DEFAULT_TRADE_CONTRACT = TradeContract(
-        entry_label_windows_minutes=ENTRY_LABEL_WINDOWS_MIN,
-        entry_label_min_profit_pcts=ENTRY_LABEL_MIN_PROFIT_PCTS,
-        entry_label_max_dd_pcts=ENTRY_LABEL_MAX_DD_PCTS,
-        entry_label_weight_alpha=ENTRY_LABEL_WEIGHT_ALPHA,
-        exit_ema_init_offset_pct=EXIT_EMA_INIT_OFFSET_PCT,
-    )
 from config.symbols import default_top_market_cap_path, load_market_caps  # noqa: E402
 from utils.progress import ProgressPrinter  # noqa: E402
 from train.sniper_dataflow import _cache_dir, _cache_format, _symbol_cache_paths  # type: ignore  # noqa: E402
-from prepare_features.labels import apply_trade_contract_labels  # noqa: E402
+from prepare_features.labels import (  # noqa: E402
+    apply_timing_regression_labels,
+    TIMING_HORIZON_PROFIT,
+    TIMING_K_LOOKAHEAD,
+    TIMING_TOP_N,
+    TIMING_ALPHA,
+    TIMING_LABEL_CLIP,
+    TIMING_WEIGHT_LABEL_MULT,
+    TIMING_WEIGHT_VOL_MULT,
+    TIMING_WEIGHT_MIN,
+    TIMING_WEIGHT_MAX,
+    TIMING_VOL_WINDOW,
+    TIMING_SIDE_MAE_PENALTY,
+    TIMING_SIDE_TIME_PENALTY,
+    TIMING_SIDE_CROSS_PENALTY,
+)
 
 
 @dataclass
@@ -76,11 +59,31 @@ class RefreshLabelsSettings:
     symbols: list[str] | None = None
     # filtro por market cap (se symbols vazio)
     symbols_file: Path | None = None
-    mcap_min_usd: float = 100_000_000.0
+    mcap_min_usd: float = 50_000_000.0
     mcap_max_usd: float = 150_000_000_000.0
     max_symbols: int = 0
     candle_sec: int = 60
-    contract: TradeContract = DEFAULT_TRADE_CONTRACT
+    # overrides opcionais do timing label
+    horizon_profit: int | None = None
+    k_lookahead: int | None = None
+    top_n: int | None = None
+    alpha: float | None = None
+    label_clip: float | None = None
+    weight_label_mult: float | None = None
+    weight_vol_mult: float | None = None
+    weight_min: float | None = None
+    weight_max: float | None = None
+    vol_window: int | None = None
+    # centraliza labels ao redor de 0 (reduz bias direcional)
+    label_center: bool | None = None
+    # usa movimento dominante (pos/neg) quando mais forte
+    use_dominant: bool | None = None
+    # mistura entre profit_now e dominante (0..1)
+    dominant_mix: float | None = None
+    # penalidades do label por lado (anti-entrada antecipada)
+    side_mae_penalty: float | None = None
+    side_time_penalty: float | None = None
+    side_cross_penalty: float | None = None
     # se True, imprime 1 linha por símbolo
     verbose: bool = True
 
@@ -128,8 +131,7 @@ def _select_symbols_by_market_cap(s: RefreshLabelsSettings) -> list[str]:
 
 def run(settings: RefreshLabelsSettings | None = None) -> dict:
     """
-    Recalcula labels `sniper_*` no cache, sem recomputar features.
-    Retorna métricas básicas para logging/integração.
+    Recalcula labels de regressão (timing_*) no cache, sem recomputar features.
     """
     s = settings or RefreshLabelsSettings()
     try:
@@ -144,13 +146,11 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
 
     symbols = [x.strip().upper() for x in (s.symbols or []) if str(x).strip()]
     if not symbols:
-        # crypto: prefer cache list (reflete exatamente o que já foi gerado)
-        if asset_class == "stocks":
-            symbols = _list_symbols_from_cache(cache_dir, fmt)
-        else:
-            symbols = _list_symbols_from_cache(cache_dir, fmt)
-            if not symbols:
-                symbols = _select_symbols_by_market_cap(s)
+        symbols = _list_symbols_from_cache(cache_dir, fmt)
+        if not symbols:
+            symbols = _select_symbols_by_market_cap(s)
+    if int(s.max_symbols) > 0:
+        symbols = symbols[: int(s.max_symbols)]
     if int(s.limit) > 0:
         symbols = symbols[: int(s.limit)]
 
@@ -159,13 +159,19 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
         f"mcap_min={float(s.mcap_min_usd):.0f} mcap_max={float(s.mcap_max_usd):.0f} max_symbols={int(s.max_symbols)}",
         flush=True,
     )
-    eff_ema_span = exit_ema_span_from_window(s.contract, int(s.candle_sec))
     print(
-        "[labels-refresh] contract: "
-        f"entry_label_windows_minutes={s.contract.entry_label_windows_minutes} "
-        f"entry_label_min_profit_pcts={s.contract.entry_label_min_profit_pcts} "
-        f"exit_ema_span={eff_ema_span} "
-        f"exit_ema_init_offset_pct={s.contract.exit_ema_init_offset_pct}",
+        "[labels-refresh] timing_label: "
+        f"horizon_profit={s.horizon_profit or TIMING_HORIZON_PROFIT} "
+        f"k_lookahead={s.k_lookahead or TIMING_K_LOOKAHEAD} "
+        f"top_n={s.top_n or TIMING_TOP_N} "
+        f"alpha={s.alpha or TIMING_ALPHA} "
+        f"clip={s.label_clip or TIMING_LABEL_CLIP} "
+        f"side_mae={s.side_mae_penalty if s.side_mae_penalty is not None else TIMING_SIDE_MAE_PENALTY} "
+        f"side_time={s.side_time_penalty if s.side_time_penalty is not None else TIMING_SIDE_TIME_PENALTY} "
+        f"side_cross={s.side_cross_penalty if s.side_cross_penalty is not None else TIMING_SIDE_CROSS_PENALTY} "
+        f"center={s.label_center if s.label_center is not None else 'env'} "
+        f"dominant={s.use_dominant if s.use_dominant is not None else 'env'} "
+        f"dominant_mix={s.dominant_mix if s.dominant_mix is not None else 'env'}",
         flush=True,
     )
 
@@ -184,51 +190,52 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
             df = pd.read_parquet(data_path) if data_path.suffix.lower() == ".parquet" else pd.read_pickle(data_path)
             if df is None or df.empty:
                 raise RuntimeError("df vazio")
-            need = {"close", "high", "low"}
-            if not need.issubset(df.columns):
-                raise RuntimeError(f"faltam colunas: {sorted(need - set(df.columns))}")
+            if "close" not in df.columns:
+                raise RuntimeError("faltam colunas: close")
 
-            # recalcula labels (somente sniper_*)
-            df_lab = apply_trade_contract_labels(df[["close", "high", "low"]].copy(), contract=s.contract, candle_sec=int(s.candle_sec))
-            cols = [
-                "sniper_long_label",
-                "sniper_long_weight",
-                "sniper_mae_pct",
-                "sniper_long_ret_pct",
-                "sniper_short_label",
-                "sniper_short_weight",
-                "sniper_short_ret_pct",
-                "sniper_exit_code",
-                "sniper_exit_wait_bars",
-            ]
-            windows = list(getattr(s.contract, "entry_label_windows_minutes", []) or [])
-            for w in windows:
-                suf = f"{int(w)}m"
-                cols.extend(
-                    [
-                        f"sniper_long_label_{suf}",
-                        f"sniper_long_weight_{suf}",
-                        f"sniper_mae_pct_{suf}",
-                        f"sniper_long_ret_pct_{suf}",
-                        f"sniper_short_label_{suf}",
-                        f"sniper_short_weight_{suf}",
-                        f"sniper_mae_pct_short_{suf}",
-                        f"sniper_short_ret_pct_{suf}",
-                        f"sniper_exit_code_{suf}",
-                        f"sniper_exit_wait_bars_{suf}",
-                    ]
-                )
-            for c in cols:
+            # recalcula timing labels
+            df_lab = df[["close"]].copy()
+            apply_timing_regression_labels(
+                df_lab,
+                candle_sec=int(s.candle_sec),
+                horizon_profit=s.horizon_profit,
+                k_lookahead=s.k_lookahead,
+                top_n=s.top_n,
+                alpha=s.alpha,
+                label_clip=s.label_clip,
+                weight_label_mult=s.weight_label_mult,
+                weight_vol_mult=s.weight_vol_mult,
+                weight_min=s.weight_min,
+                weight_max=s.weight_max,
+                vol_window=s.vol_window,
+                label_center=s.label_center,
+                use_dominant=s.use_dominant,
+                dominant_mix=s.dominant_mix,
+                side_mae_penalty=s.side_mae_penalty,
+                side_time_penalty=s.side_time_penalty,
+                side_cross_penalty=s.side_cross_penalty,
+            )
+            for c in [
+                "timing_label",
+                "timing_label_pct",
+                "timing_profit_now",
+                "timing_profit_now_pct",
+                "timing_weight",
+                "timing_label_long",
+                "timing_label_short",
+                "timing_weight_long",
+                "timing_weight_short",
+            ]:
                 if c in df_lab.columns:
                     df[c] = df_lab[c]
-            # remove colunas antigas/legadas
-            old_cols = [c for c in df.columns if str(c).startswith("sniper_entry_")]
-            old_cols.extend([c for c in df.columns if str(c).endswith("_short") and str(c).startswith("sniper_")])
-            if old_cols:
-                df.drop(columns=old_cols, inplace=True, errors="ignore")
+
+            # remove colunas legadas (labels antigos)
+            legacy_prefixes = ("sniper_long_", "sniper_short_", "sniper_exit_", "sniper_mae_", "sniper_entry_")
+            legacy_cols = [c for c in df.columns if str(c).startswith(legacy_prefixes)]
+            if legacy_cols:
+                df.drop(columns=legacy_cols, inplace=True, errors="ignore")
 
             _atomic_save_df(df, data_path)
-            # atualiza meta com um carimbo (opcional)
             try:
                 meta = {}
                 if meta_path.exists():
@@ -266,4 +273,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

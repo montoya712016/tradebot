@@ -104,23 +104,6 @@ class SymbolData:
     low: np.ndarray | None = None
 
 
-def _sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-x))
-
-
-CALIBRATION_ENABLED = False
-
-
-def _apply_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
-    if not isinstance(calib, dict):
-        return p
-    if (not CALIBRATION_ENABLED) or calib.get("type") != "platt":
-        return p
-    a = float(calib.get("coef", 1.0))
-    b = float(calib.get("intercept", 0.0))
-    z = a * p + b
-    return _sigmoid(z)
-
 
 def _rank_score(p_entry: float, p_danger: float, mode: str) -> float:
     if mode == "p_entry":

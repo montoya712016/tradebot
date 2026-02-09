@@ -5,7 +5,7 @@ Model Bundle - Empacotamento de modelos ML.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict
 import xgboost as xgb
 
 
@@ -16,6 +16,6 @@ class ModelBundle:
     """
     model: xgb.Booster
     feature_cols: List[str]
-    calib: Dict[str, Any]
+    calib: Dict[str, float]
     tau_entry: float
     predictor: str = "cpu_predictor"

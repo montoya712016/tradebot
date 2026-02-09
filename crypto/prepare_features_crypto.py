@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
-from dataclasses import replace
 import pandas as pd
+import numpy as np
 
 
 def _add_repo_paths() -> None:
@@ -32,7 +32,7 @@ from modules.prepare_features import pf_config as cfg
 from modules.prepare_features import features as featmod
 from modules.prepare_features.plotting import plot_all
 from modules.prepare_features.feature_studio import render_feature_studio
-from crypto.trade_contract import DEFAULT_TRADE_CONTRACT as CRYPTO_CONTRACT, TradeContract
+from crypto.trade_contract import DEFAULT_TRADE_CONTRACT as CRYPTO_CONTRACT
 from modules.prepare_features.prepare_features import (
     DEFAULT_SYMBOL,
     DEFAULT_DAYS,
@@ -46,15 +46,15 @@ from modules.prepare_features.prepare_features import (
 # Exemplo pronto (compatível com o estilo antigo) — pode importar direto como FLAGS
 FLAGS_CRYPTO: dict[str, bool] = {
     "shitidx": False,
-    "atr": True,
-    "rsi": True,
-    "slope": True,
-    "vol": True,
+    "atr": False,
+    "rsi": False,
+    "slope": False,
+    "vol": False,
     "ci": False,
     "cum_logret": False,
     "keltner": False,
     "cci": False,
-    "adx": True,
+    "adx": False,
     "time_since": False,
     "zlog": False,
     "slope_reserr": False,
@@ -91,30 +91,54 @@ CFG_CRYPTO_WINDOWS = {
 }
 
 # ======== Config fixa (sem env) ========
-SYMBOL = "PSGUSDT"
+SYMBOL = "XLMUSDT"
 DAYS = 180
 TAIL_DAYS = DEFAULT_REMOVE_TAIL_DAYS
 CANDLE_SEC = DEFAULT_CANDLE_SEC
 
-# Labels multi-janela (minutos) e lucros minimos
-ENTRY_LABEL_WINDOWS_MIN = (60,)
-ENTRY_LABEL_MIN_PROFIT_PCTS = (0.03,)
-ENTRY_LABEL_MAX_DD_PCTS = (0.03,)
-
 # Plot
 PLOT_INTERACTIVE = True
 PLOT_OUT = "data/generated/plots/crypto_prepare_features.html"
-PLOT_DAYS = 180
+PLOT_DAYS = DAYS
 PLOT_CANDLES = False
 
 
-def _build_label_contract(base: TradeContract) -> TradeContract:
-    return replace(
-        base,
-        entry_label_windows_minutes=tuple(int(x) for x in ENTRY_LABEL_WINDOWS_MIN),
-        entry_label_min_profit_pcts=tuple(float(x) for x in ENTRY_LABEL_MIN_PROFIT_PCTS),
-        entry_label_max_dd_pcts=tuple(float(x) for x in ENTRY_LABEL_MAX_DD_PCTS),
-    )
+def _print_label_stats(df: pd.DataFrame) -> None:
+    def _print_stats_for(col: str) -> None:
+        if col not in df.columns:
+            return
+        arr = df[col].dropna().to_numpy(dtype=float)
+        if arr.size == 0:
+            print(f"[{col}] vazio", flush=True)
+            return
+        nz = float(np.mean(np.abs(arr) > 1e-12))
+        print(f"\n[{col}]", flush=True)
+        print(f"  mean : {arr.mean(): .6f}", flush=True)
+        print(f"  std  : {arr.std(): .6f}", flush=True)
+        print(f"  min  : {arr.min(): .6f}", flush=True)
+        print(f"  max  : {arr.max(): .6f}", flush=True)
+        print(f"  nz   : {nz:.2%}", flush=True)
+        try:
+            qs = [q / 100.0 for q in range(0, 101, 5)]
+            qv = np.quantile(arr, qs)
+            print("  pct  :", flush=True)
+            line = []
+            for q, v in zip(range(0, 101, 5), qv):
+                line.append(f"p{q:02d}={v:+.6f}")
+                if len(line) == 5:
+                    print("    " + "  ".join(line), flush=True)
+                    line = []
+            if line:
+                print("    " + "  ".join(line), flush=True)
+        except Exception:
+            pass
+
+    print("\n[labels] resumo", flush=True)
+    # Label assinado (retorno em escala bruta, clipado em +/- TIMING_LABEL_CLIP)
+    _print_stats_for("timing_label")
+    # Labels usados no treino dos regressors long/short (escala 0..100)
+    _print_stats_for("timing_label_long")
+    _print_stats_for("timing_label_short")
 
 
 def _apply_crypto_windows() -> None:
@@ -127,6 +151,11 @@ def _apply_crypto_windows() -> None:
 
 def _build_panels_from_flags(flags: dict[str, bool]) -> list[str]:
     panels = ["candles"]
+    has_non_label_feature = any(
+        bool(v)
+        for k, v in (flags or {}).items()
+        if k not in {"label", "plot_candles"}
+    )
     if flags.get("shitidx"):
         panels.append("shitidx")
     if flags.get("keltner"):
@@ -180,7 +209,13 @@ def _build_panels_from_flags(flags: dict[str, bool]) -> list[str]:
     if flags.get("wick_stats"):
         panels.append("wick_stats")
     if flags.get("label"):
-        panels.extend(["long_short_weights", "long_short_returns"])
+        # Keep only one label subplot when label is the only enabled block.
+        if not has_non_label_feature:
+            panels.append("label")
+        else:
+            # manter o mesmo layout de `plot_all` (modules/plotting/plotting.py)
+            # para evitar desalinhamento de row -> panel no Feature Studio.
+            panels.extend(["weights", "label", "timing_label"])
     return panels
 
 
@@ -239,8 +274,9 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         "breakout": "breakout",
         "mom_short": "mom_short",
         "wick_stats": "wick_stats",
-        "long_short_weights": "label",
-        "long_short_returns": "long_short_returns",
+        "weights": "timing_weight",
+        "label": "timing_label_side",
+        "timing_label": "timing_label_raw",
     }
 
     trace_meta = []
@@ -255,10 +291,26 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
             row = 1
         panel = panels[row - 1] if 0 <= row - 1 < len(panels) else "candles"
         group = panel_to_group.get(panel, panel)
+        tname = str(getattr(tr, "name", "") or "")
+        if panel == "label":
+            if tname.endswith("_pct"):
+                group = "timing_label_pct"
+            else:
+                group = "timing_label_side"
+        elif panel == "timing_label":
+            if tname.endswith("_pct"):
+                group = "timing_label_pct"
+            else:
+                group = "timing_label_raw"
+        elif panel == "weights":
+            if tname.endswith("_long") or tname.endswith("_short"):
+                group = "timing_weight_side"
+            else:
+                group = "timing_weight"
         trace_meta.append(
             {
                 "i": i,
-                "name": str(getattr(tr, "name", "") or ""),
+                "name": tname,
                 "panel": panel,
                 "group": group,
                 "type": str(getattr(tr, "type", "")),
@@ -271,6 +323,17 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         if tr["group"] == "price":
             continue
         groups.setdefault(tr["group"], []).append(tr)
+    # remove duplicatas por nome dentro de cada grupo (evita sobreplot por painÃ©is redundantes)
+    for g, items in list(groups.items()):
+        seen = set()
+        dedup = []
+        for it in items:
+            key = str(it.get("name") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(it)
+        groups[g] = dedup
 
     out_path = Path(PLOT_OUT).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -307,7 +370,7 @@ def main() -> None:
     print(f"[crypto] símbolo={sym} dias={days} features_on={feats_on}", flush=True)
 
     # Calcula todas as features para habilitar os controles, mas inicia os painéis ocultos.
-    contract = _build_label_contract(CRYPTO_CONTRACT) if flags.get("label") else CRYPTO_CONTRACT
+    contract = CRYPTO_CONTRACT
     df = run_from_flags_dict(
         df_ohlc,
         flags,
@@ -318,35 +381,12 @@ def main() -> None:
         trade_contract=contract,
         mark_gaps=True,
     )
-    if flags.get("label"):
-        label_cols = [
-            c
-            for c in df.columns
-            if str(c).startswith("sniper_long_label_") and str(c).endswith("m")
-        ]
-        if label_cols:
-            total_true = 0
-            parts = []
-            for col in label_cols:
-                try:
-                    cnt = int((df[col].to_numpy(copy=False) == 1).sum())
-                except Exception:
-                    cnt = int(df[col].sum())
-                parts.append(f"{col}={cnt}")
-                total_true += cnt
-            print(f"[labels] true_total={total_true} | " + " | ".join(parts), flush=True)
-        label_cols_short = [c for c in df.columns if str(c).startswith("sniper_short_label_") and str(c).endswith("m")]
-        if label_cols_short:
-            total_true_s = 0
-            parts_s = []
-            for col in label_cols_short:
-                try:
-                    cnt = int((df[col].to_numpy(copy=False) == 1).sum())
-                except Exception:
-                    cnt = int(df[col].sum())
-                parts_s.append(f"{col}={cnt}")
-                total_true_s += cnt
-            print(f"[labels-short] true_total={total_true_s} | " + " | ".join(parts_s), flush=True)
+
+    # estatistica dos labels (assinado + long/short)
+    try:
+        _print_label_stats(df)
+    except Exception as e:
+        print(f"[labels] falhou ao imprimir estatisticas: {type(e).__name__}: {e}", flush=True)
     # opcional: filtra colunas para ficar apenas com as features selecionadas
     allow = getattr(cfg, "FEATURE_ALLOWLIST", None)
     if allow:
@@ -356,7 +396,7 @@ def main() -> None:
             if c in {"open", "high", "low", "close", "volume"}:
                 keep.append(c)
                 continue
-            if str(c).startswith(("sniper_", "label_", "exit_")):
+            if str(c).startswith(("timing_", "label_", "exit_")):
                 keep.append(c)
                 continue
             if c in allow_set:
@@ -378,17 +418,14 @@ def main() -> None:
         plot_all(
             df_plot,
             flags,
+            u_threshold=float(DEFAULT_U_THRESHOLD),
             candle_sec=int(candle_sec),
             plot_candles=bool(PLOT_CANDLES),
+            grey_zone=DEFAULT_GREY_ZONE,
             show=True,
+            save_path=PLOT_OUT,
             mark_gaps=True,
-            show_price_ema=True,
-            price_ema_span=30,
         )
-    try:
-        print(f"OK: rows={len(df):,} | cols={len(df.columns):,}".replace(",", "."), flush=True)
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":

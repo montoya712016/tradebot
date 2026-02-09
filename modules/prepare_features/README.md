@@ -1,12 +1,12 @@
 # modules/prepare_features
 
-Feature engineering and labeling pipeline for both crypto and stocks.
+Feature engineering and regression-label pipeline for both crypto and stocks.
 
 ## Main scripts / modules
-- `feature_builder.py` — computes price/volume features, EMAs, ATR, ranges.
-- `label_maker.py` — generates forward‑return labels and meta info (hit windows).
-- `dataset_export.py` — writes training matrices to Parquet/CSV for model fitting.
-- `db_ops.py` — fetch/store OHLCV windows in MySQL; chunked to avoid RAM spikes.
+- `features.py` — computes price/volume features, EMAs, ATR, ranges.
+- `labels.py` — timing‑adjusted regression labels (entry return + weights).
+- `prepare_features.py` — main entrypoint (features + labels + optional plot).
+- `refresh_sniper_labels_in_cache.py` — recompute timing labels inside cached feature files.
 
 ## Usage examples
 ```bash

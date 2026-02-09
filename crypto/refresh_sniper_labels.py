@@ -22,21 +22,21 @@ def _add_repo_paths() -> None:
 def main() -> None:
     _add_repo_paths()
     os.environ.setdefault("SNIPER_ASSET_CLASS", "crypto")
-    from trade_contract import TradeContract  # type: ignore
     from prepare_features.refresh_sniper_labels_in_cache import (  # type: ignore
         RefreshLabelsSettings,
         run as refresh_run,
     )
-
-    contract = TradeContract(
-        entry_label_windows_minutes=(60,),
-        entry_label_min_profit_pcts=(0.03,),
-        entry_label_max_dd_pcts=(0.03,),
-        entry_label_weight_alpha=0.5,
-        exit_ema_span=120,
-        exit_ema_init_offset_pct=0.002,
+    settings = RefreshLabelsSettings(
+        candle_sec=60,
+        mcap_min_usd=50_000_000.0,
+        label_clip=0.20,
+        label_center=True,
+        use_dominant=True,
+        dominant_mix=0.50,
+        side_mae_penalty=1.25,
+        side_time_penalty=0.35,
+        side_cross_penalty=0.85,
     )
-    settings = RefreshLabelsSettings(contract=contract, candle_sec=60)
     refresh_run(settings)
 
 

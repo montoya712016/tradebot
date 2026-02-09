@@ -8,7 +8,7 @@ Regras:
 - parâmetros definidos em código (sem ENV)
 - usa cache parquet/pickle (features+labels) para evitar recalcular features
 - simula walk-forward real (modelo escolhido por train_end_utc no WF)
-- plota com plotly: candles, faixas de trades, probabilidades, sinais e equity
+- plota com plotly: candles, faixas de trades, scores, sinais e equity
 """
 
 from dataclasses import dataclass, field, replace
@@ -53,15 +53,12 @@ from plotting.plotting import plot_backtest_single
 
 def _best_run_contract() -> TradeContract:
     """
-    Contrato alinhado com o WF atual (janela 60m, min_profit 3%, alpha 0.5, EMA 60 / offset 0.2%).
+    Contrato alinhado com o WF atual (janela 60m, EMA 60 / offset 0.2%).
     """
     base = DEFAULT_TRADE_CONTRACT
     return TradeContract(
         timeframe_sec=60,
         entry_label_windows_minutes=(60,),
-        entry_label_min_profit_pcts=(0.03,),
-        entry_label_max_dd_pcts=(0.03,),
-        entry_label_weight_alpha=0.5,
         exit_ema_init_offset_pct=0.002,
         fee_pct_per_side=base.fee_pct_per_side,
         slippage_pct=base.slippage_pct,
@@ -126,8 +123,10 @@ class SingleSymbolDemoSettings:
     plot_candles: bool = True
     # Diagnóstico (prints)
     print_signal_diagnostics: bool = True
+    # True: executa simulacao completa; False: so calcula previsoes e plota sinais/probabilidades
+    run_backtest: bool = True
     # Thresholds são definidos manualmente em config/thresholds.py.
-    override_tau_entry: float | None = 0.75  # campeão do WF recente
+    override_tau_entry: float | None = None  # opcional: threshold em retorno previsto (ex.: 0.002 = 0.2%)
     # Danger desativado por enquanto
     use_danger_model: bool = False
     # Contrato usado para cache/simulação
@@ -199,11 +198,12 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         raise RuntimeError(f"Poucos candles para simular: rows={len(df)}")
 
     # scores WF (sem vazamento)
-    p_entry_map, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
-    # seleciona a melhor prob por candle (entre janelas)
-    # separa long/short
-    long_map = {k: v for k, v in p_entry_map.items() if k.startswith("long_") or (not k.startswith("short_"))}
-    short_map = {k: v for k, v in p_entry_map.items() if k.startswith("short_")}
+    p_entry_long_map, p_entry_short_map, p_danger, p_exit, used, pid = predict_scores_walkforward(
+        df, periods=periods, return_period_id=True
+    )
+    # seleciona a melhor pontuação por candle (entre janelas)
+    long_map = dict(p_entry_long_map)
+    short_map: dict[str, np.ndarray] = dict(p_entry_short_map)
 
     def _best_from_map(m: dict[str, np.ndarray]):
         best_pe = None
@@ -228,16 +228,39 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
                 best_win = np.where(msk, float(w), best_win)
         return best_pe, best_win
 
+    def _best_from_map_short(m: dict[str, np.ndarray]):
+        best_ps = None
+        best_win = None
+        for name, arr in m.items():
+            a = np.asarray(arr, dtype=np.float32)
+            if best_ps is None:
+                best_ps = a
+                try:
+                    w = int(re.sub(r"\D", "", str(name)) or 0)
+                except Exception:
+                    w = 0
+                best_win = np.full(len(a), w, dtype=np.float32)
+                continue
+            msk = a >= best_ps
+            best_ps = np.where(msk, a, best_ps)
+            try:
+                w = int(re.sub(r"\D", "", str(name)) or 0)
+            except Exception:
+                w = 0
+            if best_win is not None:
+                best_win = np.where(msk, float(w), best_win)
+        return best_ps, best_win
+
     best_pe_long, best_win_long = _best_from_map(long_map)
-    best_pe_short, best_win_short = _best_from_map(short_map)
+    best_ps_short, best_win_short = _best_from_map_short(short_map if short_map else p_entry_long_map)
 
     if best_pe_long is not None:
         p_entry_long = best_pe_long
     else:
-        p_entry_long = select_entry_mid(long_map) if long_map else select_entry_mid(p_entry_map)
-    p_entry_short = best_pe_short
-    tau_entry_long = float(settings.override_tau_entry) if settings.override_tau_entry is not None else float(used.tau_entry)
-    tau_entry_short = float(settings.override_tau_entry) if settings.override_tau_entry is not None else float(used.tau_entry)
+        p_entry_long = select_entry_mid(long_map) if long_map else select_entry_mid(p_entry_long_map)
+    p_entry_short = best_ps_short
+    tau_entry_long = float(settings.override_tau_entry) if settings.override_tau_entry is not None else float(used.tau_entry_long)
+    tau_entry_short = tau_entry_long
     if not bool(settings.use_danger_model):
         p_danger = np.zeros(len(p_entry_long), dtype=np.float32)
     tau_danger = 1.0
@@ -248,7 +271,8 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     if settings.override_tau_entry is not None:
         thresholds = replace(
             used,
-            tau_entry=float(tau_entry_long),
+            tau_entry_long=float(tau_entry_long),
+            tau_entry_short=float(tau_entry_long),
             # mantém consistência dos thresholds derivados
             tau_add=float(used.tau_add),
             tau_danger_add=float(used.tau_danger_add),
@@ -274,29 +298,41 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     danger_sig = (pdg >= float(tau_danger))
     entry_ok = (entry_sig_long | entry_sig_short) if not bool(settings.use_danger_model) else ((entry_sig_long | entry_sig_short) & (~danger_sig))
 
-    res = simulate_sniper_from_scores(
-        df,
-        p_entry=p_entry_long,
-        p_entry_short=p_entry_short,
-        entry_best_win_mins=best_win_long,
-        entry_best_win_mins_short=best_win_short,
-        p_danger=p_danger,
-        thresholds=thresholds,
-        periods=periods,
-        period_id=pid,
-        contract=contract,
-        candle_sec=int(settings.candle_sec),
-        exit_min_hold_bars=int(settings.exit_min_hold_bars),
-        exit_confirm_bars=int(settings.exit_confirm_bars),
-    )
-
-    eq_end = float(res.equity_curve[-1]) if len(res.equity_curve) else 1.0
-    ret_total = eq_end - 1.0
-    dt = time.perf_counter() - t0
-    print(
-        f"SINGLE sym={symbol} days={settings.days} trades={len(res.trades)} "
-        f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={float(res.max_dd):.2%} sec={dt:.2f}"
-    )
+    if bool(settings.run_backtest):
+        res = simulate_sniper_from_scores(
+            df,
+            p_entry=p_entry_long,
+            p_entry_short=p_entry_short,
+            entry_best_win_mins=best_win_long,
+            entry_best_win_mins_short=best_win_short,
+            p_danger=p_danger,
+            thresholds=thresholds,
+            periods=periods,
+            period_id=pid,
+            contract=contract,
+            candle_sec=int(settings.candle_sec),
+            exit_min_hold_bars=int(settings.exit_min_hold_bars),
+            exit_confirm_bars=int(settings.exit_confirm_bars),
+        )
+        trades = list(res.trades)
+        equity_curve = np.asarray(res.equity_curve, dtype=np.float64)
+        eq_end = float(equity_curve[-1]) if len(equity_curve) else 1.0
+        ret_total = eq_end - 1.0
+        max_dd = float(res.max_dd)
+        dt = time.perf_counter() - t0
+        print(
+            f"SINGLE sym={symbol} days={settings.days} trades={len(trades)} "
+            f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={max_dd:.2%} sec={dt:.2f}"
+        )
+    else:
+        trades = []
+        equity_curve = np.ones(len(df), dtype=np.float64)
+        ret_total = 0.0
+        dt = time.perf_counter() - t0
+        print(
+            f"SINGLE-PRED sym={symbol} days={settings.days} rows={len(df)} "
+            f"signals_long={int(np.sum(entry_sig_long))} signals_short={int(np.sum(entry_sig_short))} sec={dt:.2f}"
+        )
 
     ema_exit = np.full(len(df), np.nan, dtype=np.float32)
     try:
@@ -307,7 +343,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         offset = float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
         close = df["close"].to_numpy(np.float64, copy=False)
         idx = pd.to_datetime(df.index)
-        for t in res.trades:
+        for t in trades:
             try:
                 entry_ts = pd.to_datetime(t.entry_ts)
                 exit_ts = pd.to_datetime(t.exit_ts)
@@ -328,9 +364,10 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     if settings.save_plot:
         plot_backtest_single(
             df,
-            trades=res.trades,
-            equity=np.asarray(res.equity_curve, dtype=np.float64),
+            trades=trades,
+            equity=equity_curve,
             p_entry=np.asarray(p_entry_long, dtype=np.float64),
+            p_entry_short=np.asarray(p_entry_short, dtype=np.float64) if p_entry_short is not None else None,
             p_entry_map=None,
             p_entry_long_map=long_map,
             p_entry_short_map=short_map,
@@ -343,13 +380,18 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             tau_entry_long=tau_entry_long,
             tau_entry_short=tau_entry_short,
             tau_danger=tau_danger,
-            title=f"{symbol} | days={settings.days} | ret={ret_total:+.2%} | trades={len(res.trades)}",
+            title=(
+                f"{symbol} | days={settings.days} | ret={ret_total:+.2%} | trades={len(trades)}"
+                if bool(settings.run_backtest)
+                else f"{symbol} | days={settings.days} | prediction only"
+            ),
             save_path=settings.plot_out,
             show=True,
             ema_exit=ema_exit,
             plot_probs=True,
             plot_signals=False,
             plot_candles=bool(settings.plot_candles),
+            probs_simple=(not bool(settings.run_backtest)),
         )
 
 

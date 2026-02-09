@@ -1,17 +1,13 @@
 # modules/backtest
 
-Backtesting utilities for both single symbols and portfolios.
+Backtesting utilities for supervised and hybrid supervised+RL workflows.
 
-## Key pieces
-- `portfolio_backtester.py` — multi‑symbol, capital‑aware executor; supports fee, slippage, position sizing, and walk‑forward style evaluation.
-- `single_symbol_bt.py` — fast single‑symbol simulation for debugging labels/thresholds.
-- `plot_equity.py` — helpers to plot equity curves and drawdowns.
-- `perf_metrics.py` — CAGR, max DD, Sharpe, hit‑rate, turnover, exposure stats.
-
-## Typical use
-```bash
-python modules/backtest/single_symbol_bt.py --symbol BTCUSDT --threshold 0.7
-python modules/backtest/portfolio_backtester.py --config configs/bt_crypto.yml
-```
-
-Outputs (CSV/PNG) are written beside the config or to `data/generated/*` depending on the caller.
+Core files
+----------
+- `single_symbol.py` - single-symbol walk-forward backtest.
+- `sniper_walkforward.py` - load WF models, generate scores, and simulate cycles.
+- `sniper_portfolio.py` - multi-symbol portfolio simulation.
+- `wf_portfolio.py` - batch walk-forward portfolio runner.
+- `wf_backtest_sweep.py` - batch parameter sweeps for WF runs.
+- `backtest_supervised_only.py` - baseline backtest from exported supervised signals.
+- `backtest_supervised_plus_rl.py` - backtest using a trained RL policy on top of supervised signals.

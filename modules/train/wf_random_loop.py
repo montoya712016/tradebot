@@ -186,12 +186,9 @@ RESULTS_HEADER = [
     "error",
     # contract params
     "entry_window_min",
-    "entry_min_profit",
-    "entry_weight_alpha",
     "exit_ema_span",
     "exit_ema_init_offset_pct",
     # train params
-    "entry_ratio_neg_per_pos",
     "train_total_days",
     "train_offsets_years",
     "train_offsets_step_days",
@@ -242,7 +239,6 @@ class RandomLoopSettings:
     min_symbols_used_per_period: int = 30
     max_rows_entry: int = 2_000_000
     xgb_device: str = "cuda:0"
-    entry_ratio_neg_per_pos: float = 6.0
     backtests_per_train: int = 5
     years: int = 6
     step_days: int = 180
@@ -261,16 +257,10 @@ def _sample_contract(rng: random.Random, s: RandomLoopSettings) -> tuple[TradeCo
     r = s.train_contract_ranges
     win_lo, win_hi, win_step = r.entry_window
     w = _rand_int(rng, int(win_lo), int(win_hi), int(win_step))
-    p = _rand_float(rng, *r.entry_min_profit, decimals=4)
-    windows = (int(w),)
-    profits = [float(p)]
-    alpha = _rand_float(rng, *r.entry_weight_alpha, decimals=3)
     ema_span = int(max(1, round((float(w) * 60.0) / float(max(1, int(s.candle_sec))))))
     ema_offset = _rand_float(rng, *r.exit_ema_init_offset_pct, decimals=4)
     overrides = {
-        "entry_label_windows_minutes": tuple(int(w) for w in windows),
-        "entry_label_min_profit_pcts": tuple(float(p) for p in profits),
-        "entry_label_weight_alpha": float(alpha),
+        "entry_label_windows_minutes": (int(w),),
         "exit_ema_span": int(ema_span),
         "exit_ema_init_offset_pct": float(ema_offset),
     }
@@ -468,7 +458,6 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                 "max_symbols": int(s.max_symbols_train),
                 "min_symbols_used_per_period": int(s.min_symbols_used_per_period),
                 "max_rows_entry": int(s.max_rows_entry),
-                "entry_ratio_neg_per_pos": float(s.entry_ratio_neg_per_pos),
                 "xgb_device": str(s.xgb_device),
             },
             "backtest": {
@@ -535,7 +524,6 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                     offsets_days=tuple(range(int(s.offsets_step_days), int(365 * s.offsets_years) + 1, int(s.offsets_step_days))),
                     max_symbols=int(s.max_symbols_train),
                     min_symbols_used_per_period=int(s.min_symbols_used_per_period),
-                    entry_ratio_neg_per_pos=float(s.entry_ratio_neg_per_pos),
                     max_rows_entry=int(s.max_rows_entry),
                     entry_params=entry_params,
                     use_feature_cache=True,
@@ -579,12 +567,9 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                 "error": err_msg,
                 # contract params
                 "entry_window_min": (contract.entry_label_windows_minutes[0] if len(contract.entry_label_windows_minutes) > 0 else ""),
-                "entry_min_profit": (contract.entry_label_min_profit_pcts[0] if len(contract.entry_label_min_profit_pcts) > 0 else ""),
-                "entry_weight_alpha": float(getattr(contract, "entry_label_weight_alpha", 1.0)),
                 "exit_ema_span": int(getattr(contract, "exit_ema_span", 0) or 0),
                 "exit_ema_init_offset_pct": float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
                 # train params
-                "entry_ratio_neg_per_pos": float(s.entry_ratio_neg_per_pos),
                 "train_total_days": int(s.total_days),
                 "train_offsets_years": int(s.offsets_years),
                 "train_offsets_step_days": int(s.offsets_step_days),
@@ -688,12 +673,9 @@ def run(settings: RandomLoopSettings | None = None) -> None:
                     "error": err_msg,
                     # contract params
                     "entry_window_min": (contract.entry_label_windows_minutes[0] if len(contract.entry_label_windows_minutes) > 0 else ""),
-                    "entry_min_profit": (contract.entry_label_min_profit_pcts[0] if len(contract.entry_label_min_profit_pcts) > 0 else ""),
-                    "entry_weight_alpha": float(getattr(contract, "entry_label_weight_alpha", 1.0)),
                     "exit_ema_span": int(getattr(contract, "exit_ema_span", 0) or 0),
                     "exit_ema_init_offset_pct": float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
                     # train params
-                    "entry_ratio_neg_per_pos": float(s.entry_ratio_neg_per_pos),
                     "train_total_days": int(s.total_days),
                     "train_offsets_years": int(s.offsets_years),
                     "train_offsets_step_days": int(s.offsets_step_days),

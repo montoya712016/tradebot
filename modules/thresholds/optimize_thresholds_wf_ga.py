@@ -993,7 +993,7 @@ def _prepare_symbol_frame(
     if df.empty:
         return df
     try:
-        pe_map, pdg, pex, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+        pe_map, _pe_short_map, pdg, pex, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
         pe = pe_map.get('mid') if isinstance(pe_map, dict) else pe_map
     except RuntimeError:
         # range de timestamps pode estar antes do primeiro perÃ­odo do wf_* (sem modelo "vÃ¡lido").
@@ -1105,14 +1105,13 @@ class SimPeriod:
     PerÃ­odo mÃ­nimo para simulaÃ§Ã£o.
 
     IMPORTANT: NÃƒO carrega entry_model/danger_model no worker (economiza RAM).
-    O simulador sÃ³ precisa de taus + exit_model (para pxit on-the-fly) e calib/cols.
+    O simulador sÃ³ precisa de taus + exit_model (para pxit on-the-fly) e cols.
     """
 
     period_days: int
     train_end_utc: pd.Timestamp
     exit_model: Any
     exit_cols: list[str]
-    exit_calib: dict
     tau_entry: float
     tau_danger: float
     tau_exit: float
@@ -1170,7 +1169,6 @@ def _load_periods_for_sim(run_dir: Path) -> list[SimPeriod]:
 
         # exit model (opcional)
         exit_cols = list((meta.get("exit") or {}).get("feature_cols") or [])
-        exit_calib = dict((meta.get("exit") or {}).get("calibration") or {"type": "identity"})
         exit_path = pd_dir / "exit_model" / "model_exit.json"
         exit_model = None
         if exit_path.exists() and exit_cols:
@@ -1188,7 +1186,6 @@ def _load_periods_for_sim(run_dir: Path) -> list[SimPeriod]:
                 train_end_utc=train_end_ts,
                 exit_model=exit_model,
                 exit_cols=list(exit_cols),
-                exit_calib=dict(exit_calib),
                 tau_entry=float(tau_entry),
                 tau_danger=float(tau_danger),
                 tau_exit=float(tau_exit),
@@ -1224,7 +1221,6 @@ def _apply_threshold_overrides_sim(
                 train_end_utc=pd.to_datetime(pm.train_end_utc),
                 exit_model=pm.exit_model,
                 exit_cols=list(pm.exit_cols),
-                exit_calib=dict(pm.exit_calib),
                 tau_entry=float(te),
                 tau_danger=float(td),
                 tau_exit=float(tx),

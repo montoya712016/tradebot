@@ -33,7 +33,6 @@ def _ensure_modules_on_sys_path() -> None:
 
 
 _ensure_modules_on_sys_path()
-
 from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore
 
 # Defaults de performance/telemetria para rodar com "Run" sem flags externas.
@@ -41,11 +40,7 @@ os.environ.setdefault("SNIPER_CACHE_PROGRESS_EVERY_S", "3")
 os.environ.setdefault("SNIPER_CACHE_WORKERS", "6")
 os.environ.setdefault("PF_PREFER_PURE_FOR_THREADS", "0")
 
-from train.sniper_trainer import (  # type: ignore[import]
-    TrainConfig,
-    train_sniper_models,
-    DEFAULT_ENTRY_PARAMS,
-)
+# lazy import do sniper_trainer para evitar travar no import em ambientes instáveis
 
 
 @dataclass
@@ -79,26 +74,37 @@ class TrainSniperWFSettings:
 
     # sizing (use RAM/VRAM)
     max_rows_entry: int = 6_000_000
-    entry_ratio_neg_per_pos: float = 6.0
     # se True, monta pool completo e amostra por modelo no treino
     entry_pool_full: bool = False
     entry_pool_dir: str | None = None
     entry_pool_prefiltered: bool = True
-    # razao de negativos para o pool completo (pode ser maior para garantir negs nos tails)
-    entry_pool_ratio_neg_per_pos: float = 10.0
-    # quais labels de entry usar ("long", "short" ou ambos)
-    entry_label_sides: tuple[str, ...] = ("long",)
+    # modelo para regressao
+    entry_model_type: str = "xgb"
+    # regressao: janela de target (min). Se 0, usa contrato
+    entry_reg_window_min: int = 0
+    # regressao: pesos por amostra
+    entry_reg_weight_alpha: float = 4.0
+    entry_reg_weight_power: float = 1.2
+    # regressao: bins para balanceamento (labels 0..100)
+    entry_reg_balance_bins: tuple[float, ...] = (0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 80.0)
+    # modo do label: "split_0_100" (long/short)
+    entry_label_mode: str = "split_0_100"
+    entry_label_scale: float = 100.0
+    entry_sides: tuple[str, ...] = ("long", "short")
+    # regressao: balanceamento por distancia do zero (0 = uniforme)
+    entry_reg_balance_distance_power: float = 1.0
+    # regressao: fração mínima por bin (relativo ao bin mais pesado)
+    entry_reg_balance_min_frac: float = 0.1
+    # aborta treino se RAM ultrapassar esse percentual (<=0 desativa)
+    abort_ram_pct: float = 99.0
 
     # device
 
     xgb_device: str = "cuda:0"  # "cpu" se quiser forÃ§ar
 
-    # metrica de treino: "loss" (logloss) ou "aucpr"
-    entry_metric_mode: str = "loss"
-
     # thresholds são definidos manualmente em config/thresholds.py
     # params xgb
-    entry_params: dict = field(default_factory=lambda: dict(DEFAULT_ENTRY_PARAMS))
+    entry_params: dict = field(default_factory=dict)
     # opcional: flags de features custom (senão usa o default por asset)
     feature_flags: dict | None = None
     # opcional: diretório para cache de features
@@ -122,6 +128,13 @@ class TrainSniperWFSettings:
 
 def run(settings: TrainSniperWFSettings | None = None) -> str:
     settings = settings or TrainSniperWFSettings()
+    print("[train-wf] run(): importing sniper_trainer...", flush=True)
+    from train.sniper_trainer import (  # type: ignore[import]
+        TrainConfig,
+        train_sniper_models,
+        DEFAULT_ENTRY_PARAMS,
+    )
+    print("[train-wf] run(): sniper_trainer imported", flush=True)
 
     try:
         print(
@@ -135,11 +148,7 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
 
     entry_params = dict(settings.entry_params)
     entry_params["device"] = settings.xgb_device
-    metric_mode = str(getattr(settings, "entry_metric_mode", "loss") or "loss").strip().lower()
-    if metric_mode in {"aucpr", "aucpr_weighted", "pr"}:
-        entry_params["eval_metric"] = "aucpr"
-    else:
-        entry_params["eval_metric"] = "logloss"
+    entry_params.setdefault("eval_metric", "rmse")
     print(f"[train-wf] entry_metric={entry_params.get('eval_metric')}", flush=True)
     contract_obj = settings.contract or DEFAULT_TRADE_CONTRACT
 
@@ -152,12 +161,19 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         min_symbols_used_per_period=int(settings.min_symbols_used_per_period),
         entry_params=entry_params,
         max_rows_entry=int(settings.max_rows_entry),
-        entry_ratio_neg_per_pos=float(settings.entry_ratio_neg_per_pos),
         entry_pool_full=bool(settings.entry_pool_full),
         entry_pool_dir=Path(settings.entry_pool_dir) if settings.entry_pool_dir else None,
         entry_pool_prefiltered=bool(settings.entry_pool_prefiltered),
-        entry_pool_ratio_neg_per_pos=float(settings.entry_pool_ratio_neg_per_pos),
-        entry_label_sides=tuple(str(s) for s in (settings.entry_label_sides or ())),
+        entry_model_type=str(settings.entry_model_type or "xgb"),
+        entry_reg_window_min=int(settings.entry_reg_window_min),
+        entry_reg_weight_alpha=float(settings.entry_reg_weight_alpha),
+        entry_reg_weight_power=float(settings.entry_reg_weight_power),
+        entry_reg_balance_bins=tuple(float(x) for x in (settings.entry_reg_balance_bins or ())),
+        entry_reg_balance_distance_power=float(settings.entry_reg_balance_distance_power),
+        entry_reg_balance_min_frac=float(settings.entry_reg_balance_min_frac),
+        entry_label_mode=str(settings.entry_label_mode or "split_0_100"),
+        entry_label_scale=float(settings.entry_label_scale),
+        entry_sides=tuple(str(s) for s in (settings.entry_sides or ())),
         use_feature_cache=bool(settings.use_feature_cache),
         asset_class=str(settings.asset_class or "crypto"),
         symbols=tuple(settings.symbols),
@@ -166,6 +182,7 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         feature_cache_dir=Path(settings.feature_cache_dir) if settings.feature_cache_dir else None,
         contract=contract_obj,
         run_dir=Path(settings.run_dir) if settings.run_dir else None,
+        abort_ram_pct=float(settings.abort_ram_pct),
     )
     run_dir = train_sniper_models(cfg)
     return str(run_dir)

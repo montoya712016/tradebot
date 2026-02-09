@@ -22,12 +22,12 @@ except Exception as e:  # pragma: no cover
     raise
 
 try:
-    from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
+    from modules.trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 except Exception:
     try:
         from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
     except Exception:
-        from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
+        from modules.trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # type: ignore[import]
 from modules.config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 
 
@@ -41,10 +41,6 @@ class SniperModels:
     entry_feature_cols_map: Dict[str, List[str]]
     danger_feature_cols: List[str]
     exit_feature_cols: List[str]
-    entry_calib: dict
-    entry_calib_map: Dict[str, dict]
-    danger_calib: dict
-    exit_calib: dict
     tau_entry: float
     tau_entry_map: Dict[str, float]
     tau_danger: float
@@ -54,11 +50,40 @@ class SniperModels:
     entry_windows_minutes: Tuple[int, ...] | None = None
 
 
+def _apply_calibration(pred: np.ndarray, calib: dict | None) -> np.ndarray:
+    """
+    Aplica calibração afim + escala por sinal.
+    Compatível com metadados salvos no treino:
+      {"a": float, "b": float, "s_pos": float, "s_neg": float}
+    """
+    p = np.asarray(pred, dtype=np.float64)
+    if p.size == 0:
+        return p
+    if not isinstance(calib, dict) or not calib:
+        return p
+    a = float(calib.get("a", 1.0))
+    b = float(calib.get("b", 0.0))
+    out = (p * a) + b
+    s_pos = float(calib.get("s_pos", 1.0))
+    s_neg = float(calib.get("s_neg", 1.0))
+    if s_pos != 1.0 or s_neg != 1.0:
+        pos = out >= 0.0
+        if np.any(pos):
+            out[pos] = out[pos] * s_pos
+        if np.any(~pos):
+            out[~pos] = out[~pos] * s_neg
+    return out
+
+
 def _entry_specs_from_models(models: SniperModels) -> list[tuple[str, int]]:
     specs: list[tuple[str, int]] = []
     for name in (models.entry_models or {}).keys():
-        if name.startswith("w") and name[1:].isdigit():
-            specs.append((name, int(name[1:])))
+        digits = "".join(ch for ch in str(name) if ch.isdigit())
+        if digits:
+            try:
+                specs.append((name, int(digits)))
+            except Exception:
+                continue
     if specs:
         return sorted(specs, key=lambda x: x[1])
     return _entry_specs()
@@ -68,25 +93,8 @@ def _entry_specs() -> list[tuple[str, int]]:
     windows = list(getattr(DEFAULT_TRADE_CONTRACT, "entry_label_windows_minutes", []) or [])
     if len(windows) < 1:
         raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
-    return [(f"w{int(w)}", int(w)) for w in windows]
+    return [(f"ret_exp_{int(w)}m", int(w)) for w in windows]
 
-
-def _sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-x))
-
-
-CALIBRATION_ENABLED = False
-
-
-def _apply_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
-    if not isinstance(calib, dict):
-        return p
-    if (not CALIBRATION_ENABLED) or calib.get("type") != "platt":
-        return p
-    a = float(calib.get("coef", 1.0))
-    b = float(calib.get("intercept", 0.0))
-    z = a * p + b
-    return _sigmoid(z)
 
 
 def _load_booster(path_json: Path) -> "xgb.Booster":
@@ -110,7 +118,7 @@ def load_sniper_models(
     tau_add_multiplier: float = 1.10,
 ) -> SniperModels:
     """
-    Carrega EntryScore e DangerScore + meta (features, calibração).
+    Carrega EntryScore + meta (features).
 
     tau_add e tau_danger_add são derivados do threshold principal por multiplicadores
     (thresholds definidos manualmente em config/thresholds.py).
@@ -125,7 +133,6 @@ def load_sniper_models(
 
     entry_models: Dict[str, xgb.Booster] = {}
     entry_feature_cols_map: Dict[str, List[str]] = {}
-    entry_calib_map: Dict[str, dict] = {}
     entry_windows: list[int] = []
     for d in pd_dir.iterdir():
         if not d.is_dir() or not d.name.startswith("entry_model_") or not d.name.endswith("m"):
@@ -137,28 +144,27 @@ def load_sniper_models(
         p = d / "model_entry.json"
         if not p.exists():
             continue
-        name = f"w{w}"
+        name = f"ret_exp_{w}m"
         entry_models[name] = _load_booster(p)
         meta_key = f"entry_{int(w)}m"
         entry_feature_cols_map[name] = list((meta.get(meta_key) or {}).get("feature_cols") or meta["entry"]["feature_cols"])
-        entry_calib_map[name] = dict((meta.get(meta_key) or {}).get("calibration") or meta["entry"].get("calibration") or {"type": "identity"})
         entry_windows.append(w)
 
     if not entry_models:
-        entry_models["mid"] = _load_booster(entry_path)
-        entry_feature_cols_map["mid"] = list(meta["entry"]["feature_cols"])
-        entry_calib_map["mid"] = dict(meta["entry"].get("calibration") or {"type": "identity"})
+        fallback_specs = _entry_specs()
+        fallback_w = int(fallback_specs[0][1]) if fallback_specs else 60
+        name = f"ret_exp_{fallback_w}m"
+        entry_models[name] = _load_booster(entry_path)
+        entry_feature_cols_map[name] = list(meta["entry"]["feature_cols"])
+        entry_windows.append(fallback_w)
 
-    entry_model = entry_models.get("mid") or list(entry_models.values())[0]
+    entry_model = list(entry_models.values())[0]
     danger_model = None
     exit_model = None
 
     entry_cols = list(meta["entry"]["feature_cols"])
     danger_cols: list[str] = []
     exit_cols: list[str] = []
-    entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
-    danger_calib: dict = {}
-    exit_calib: dict = {}
     tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
     tau_danger = 1.0
     tau_exit = 1.0
@@ -179,10 +185,6 @@ def load_sniper_models(
         entry_feature_cols_map=entry_feature_cols_map,
         danger_feature_cols=danger_cols,
         exit_feature_cols=exit_cols,
-        entry_calib=entry_calib,
-        entry_calib_map=entry_calib_map,
-        danger_calib=danger_calib,
-        exit_calib=exit_calib,
         tau_entry=tau_entry,
         tau_entry_map=tau_entry_map,
         tau_danger=tau_danger,
@@ -371,10 +373,8 @@ def simulate_sniper_cycle(
             for name, w in _entry_specs_from_models(models):
                 feat_cols = models.entry_feature_cols_map.get(name, models.entry_feature_cols)
                 model = models.entry_models.get(name, models.entry_model)
-                calib = models.entry_calib_map.get(name, models.entry_calib)
                 x_e = _build_row_vector(df, i, feat_cols, cycle_state=cycle_state)
                 p_e = _predict_1row(model, x_e)
-                p_e = float(_apply_calibration(np.array([p_e], dtype=np.float64), calib)[0])
                 if p_e >= best_pe:
                     best_pe = p_e
                     best_name = name
@@ -511,6 +511,7 @@ __all__ = [
     "SniperModels",
     "SniperTrade",
     "SniperBacktestResult",
+    "_apply_calibration",
     "load_sniper_models",
     "simulate_sniper_cycle",
 ]
