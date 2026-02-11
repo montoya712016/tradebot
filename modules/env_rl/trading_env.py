@@ -352,10 +352,26 @@ def _step_core_py(
     strength_thr: float,
     min_reentry_gap_bars: int,
     min_hold_bars: int,
+    max_hold_bars: int,
     cooldown_bars: int,
     fee_rate: float,
     slippage_rate: float,
     dd_penalty: float,
+    dd_level_penalty: float,
+    dd_soft_limit: float,
+    dd_excess_penalty: float,
+    dd_hard_limit: float,
+    dd_hard_penalty: float,
+    hold_bar_penalty: float,
+    hold_soft_bars: int,
+    hold_excess_penalty: float,
+    hold_regret_penalty: float,
+    stagnation_bars: int,
+    stagnation_ret_epsilon: float,
+    stagnation_penalty: float,
+    reverse_penalty: float,
+    entry_penalty: float,
+    weak_entry_penalty: float,
     turnover_penalty: float,
     regret_penalty: float,
     idle_penalty: float,
@@ -408,11 +424,21 @@ def _step_core_py(
     if prev_side == 0 and target_side != 0 and bars_since_last_exit_prev < int(max(0, min_reentry_gap_bars)):
         target_side, target_size = 0, 0.0
     if prev_side != 0 and time_in_trade_prev < int(max(0, min_hold_bars)):
-        close_req = bool((a == 5 and prev_side > 0) or (a == 6 and prev_side < 0))
-        if (not close_req) and (target_side != prev_side or abs(target_size - prev_size) > 1e-12):
+        # Enforce true minimum hold: no size/side/close changes before min_hold_bars.
+        if target_side != prev_side or abs(target_size - prev_size) > 1e-12:
             target_side, target_size = prev_side, prev_size
 
+    forced_max_hold_close = 0
+    if prev_side != 0 and int(max_hold_bars) > 0 and int(time_in_trade_prev) >= int(max_hold_bars):
+        target_side, target_size = 0, 0.0
+        forced_max_hold_close = 1
+
+    # Hard DD lock: apos ultrapassar o limite, nao permite manter/abrir risco no episodio.
+    if float(dd_hard_limit) < 1.0 and float(max_dd_prev) >= float(dd_hard_limit):
+        target_side, target_size = 0, 0.0
+
     changed = (target_side != prev_side) or (abs(target_size - prev_size) > 1e-12)
+    is_reverse = bool(prev_side != 0 and target_side != 0 and target_side != prev_side)
     if cooldown_left_prev > 0 and changed:
         is_entry_or_reverse = bool(
             (prev_side == 0 and target_side != 0)
@@ -428,7 +454,7 @@ def _step_core_py(
     tx_cost = float(turn * (float(fee_rate) + float(slippage_rate)))
 
     close_prev_trade = int(prev_side != 0 and (target_side != prev_side or target_side == 0))
-    open_new_trade = int(prev_side == 0 and target_side != 0)
+    open_new_trade = int(target_side != 0 and (prev_side == 0 or target_side != prev_side))
     position_side = int(target_side)
     position_size = float(target_size)
 
@@ -448,23 +474,27 @@ def _step_core_py(
     dd = float((equity_peak - equity) / max(1e-12, equity_peak))
     max_dd = float(max(float(max_dd_prev), dd))
     dd_increase = float(max(0.0, dd - float(prev_dd_prev)))
+    hard_dd_triggered = bool(
+        (float(dd_hard_limit) < 1.0) and (float(max_dd_prev) < float(dd_hard_limit)) and (dd >= float(dd_hard_limit))
+    )
 
+    unr_now = 0.0
     if position_side != 0:
         base_tit = 0 if open_new_trade == 1 else int(time_in_trade_prev)
         time_in_trade = int(base_tit + 1)
         next_idx = t + 1 if (t + 1) < n else t
         if entry_price > 0.0 and close[next_idx] > 0.0:
-            unr = ((float(close[next_idx]) / float(entry_price)) - 1.0) * float(position_side) * float(position_size)
+            unr_now = ((float(close[next_idx]) / float(entry_price)) - 1.0) * float(position_side) * float(position_size)
         else:
-            unr = 0.0
+            unr_now = 0.0
         base_peak = 0.0 if open_new_trade == 1 else float(trade_peak_prev)
-        trade_peak_pnl = float(max(base_peak, unr))
+        trade_peak_pnl = float(max(base_peak, unr_now))
     else:
         time_in_trade = 0
         trade_peak_pnl = 0.0
 
     regret = 0.0
-    if prev_side == 0 and position_side != 0:
+    if position_side != 0 and (prev_side == 0 or prev_side != position_side):
         fut_min = float(future_min_ret[t])
         fut_max = float(future_max_ret[t])
         if position_side > 0:
@@ -476,7 +506,43 @@ def _step_core_py(
     delta_equity = float(equity - equity_prev)
     was_idle = bool(position_side == 0 and strength_now > 1.0)
     idle_pen = float(idle_penalty) if was_idle else 0.0
-    reward = float(delta_equity - float(turnover_penalty) * turn - float(dd_penalty) * dd_increase - float(regret_penalty) * regret - idle_pen)
+    dd_level_pen = float(dd_level_penalty) * float(dd)
+    dd_excess = max(0.0, float(dd) - float(dd_soft_limit))
+    dd_excess_pen = float(dd_excess_penalty) * float(dd_excess * dd_excess)
+    dd_hard_pen = float(dd_hard_penalty) if hard_dd_triggered else 0.0
+    hold_bar_pen = float(hold_bar_penalty) * float(max(0.0, position_size)) if position_side != 0 else 0.0
+    hold_soft = int(max(1, hold_soft_bars))
+    hold_excess = max(0.0, float(time_in_trade) - float(hold_soft)) / float(hold_soft) if position_side != 0 else 0.0
+    hold_excess_pen = float(hold_excess_penalty) * float(hold_excess * hold_excess)
+    hold_regret = max(0.0, float(trade_peak_pnl - unr_now)) if position_side != 0 else 0.0
+    hold_regret_pen = float(hold_regret_penalty) * float(hold_regret)
+    stagnation_pen = 0.0
+    if position_side != 0 and int(time_in_trade) > int(max(1, stagnation_bars)):
+        if abs(float(step_ret)) <= float(max(0.0, stagnation_ret_epsilon)):
+            st_norm = float(int(time_in_trade) - int(stagnation_bars)) / float(max(1, int(stagnation_bars)))
+            stagnation_pen = float(stagnation_penalty) * float(max(0.0, st_norm))
+    entry_pen = 0.0
+    if open_new_trade == 1:
+        edge_abs = float(abs(edge_now))
+        edge_ref = float(max(1e-6, abs(edge_thr)))
+        weak_ratio = float(max(0.0, (edge_ref - edge_abs) / edge_ref))
+        entry_pen = float(entry_penalty) + float(weak_entry_penalty) * weak_ratio
+    reward = float(
+        delta_equity
+        - float(turnover_penalty) * turn
+        - float(dd_penalty) * dd_increase
+        - dd_level_pen
+        - dd_excess_pen
+        - dd_hard_pen
+        - hold_bar_pen
+        - hold_excess_pen
+        - hold_regret_pen
+        - stagnation_pen
+        - (float(reverse_penalty) if is_reverse else 0.0)
+        - entry_pen
+        - float(regret_penalty) * regret
+        - idle_pen
+    )
 
     if changed:
         cooldown_left = int(max(0, cooldown_bars))
@@ -504,6 +570,14 @@ def _step_core_py(
         tx_cost,
         pnl_step,
         regret,
+        int(hard_dd_triggered),
+        hold_bar_pen,
+        hold_excess_pen,
+        hold_regret_pen,
+        stagnation_pen,
+        float(reverse_penalty) if is_reverse else 0.0,
+        entry_pen,
+        int(forced_max_hold_close),
         bars_since_last_exit,
         int(close_prev_trade),
         int(open_new_trade),
@@ -540,10 +614,26 @@ def _step_core_numba(*args):
             strength_thr: float,
             min_reentry_gap_bars: int,
             min_hold_bars: int,
+            max_hold_bars: int,
             cooldown_bars: int,
             fee_rate: float,
             slippage_rate: float,
             dd_penalty: float,
+            dd_level_penalty: float,
+            dd_soft_limit: float,
+            dd_excess_penalty: float,
+            dd_hard_limit: float,
+            dd_hard_penalty: float,
+            hold_bar_penalty: float,
+            hold_soft_bars: int,
+            hold_excess_penalty: float,
+            hold_regret_penalty: float,
+            stagnation_bars: int,
+            stagnation_ret_epsilon: float,
+            stagnation_penalty: float,
+            reverse_penalty: float,
+            entry_penalty: float,
+            weak_entry_penalty: float,
             turnover_penalty: float,
             regret_penalty: float,
             idle_penalty: float,
@@ -596,11 +686,21 @@ def _step_core_numba(*args):
             if prev_side == 0 and target_side != 0 and bars_since_last_exit_prev < max(0, min_reentry_gap_bars):
                 target_side, target_size = 0, 0.0
             if prev_side != 0 and time_in_trade_prev < max(0, min_hold_bars):
-                close_req = (action == 5 and prev_side > 0) or (action == 6 and prev_side < 0)
-                if (not close_req) and ((target_side != prev_side) or (np.abs(target_size - prev_size) > 1e-12)):
+                # Enforce true minimum hold: no size/side/close changes before min_hold_bars.
+                if (target_side != prev_side) or (np.abs(target_size - prev_size) > 1e-12):
                     target_side, target_size = prev_side, prev_size
 
+            forced_max_hold_close = 0
+            if prev_side != 0 and max_hold_bars > 0 and time_in_trade_prev >= max_hold_bars:
+                target_side, target_size = 0, 0.0
+                forced_max_hold_close = 1
+
+            # Hard DD lock: apos ultrapassar o limite, nao permite manter/abrir risco no episodio.
+            if (dd_hard_limit < 1.0) and (max_dd_prev >= dd_hard_limit):
+                target_side, target_size = 0, 0.0
+
             changed = (target_side != prev_side) or (np.abs(target_size - prev_size) > 1e-12)
+            is_reverse = (prev_side != 0 and target_side != 0 and target_side != prev_side)
             if cooldown_left_prev > 0 and changed:
                 is_entry_or_reverse = (
                     (prev_side == 0 and target_side != 0)
@@ -616,7 +716,7 @@ def _step_core_numba(*args):
             tx_cost = turn * (fee_rate + slippage_rate)
 
             close_prev_trade = 1 if (prev_side != 0 and (target_side != prev_side or target_side == 0)) else 0
-            open_new_trade = 1 if (prev_side == 0 and target_side != 0) else 0
+            open_new_trade = 1 if (target_side != 0 and (prev_side == 0 or target_side != prev_side)) else 0
 
             position_side = int(target_side)
             position_size = float(target_size)
@@ -636,23 +736,25 @@ def _step_core_numba(*args):
             dd = float((equity_peak - equity) / max(1e-12, equity_peak))
             max_dd = float(max_dd_prev if max_dd_prev > dd else dd)
             dd_increase = float(dd - prev_dd_prev if dd > prev_dd_prev else 0.0)
+            hard_dd_triggered = (dd_hard_limit < 1.0) and (max_dd_prev < dd_hard_limit) and (dd >= dd_hard_limit)
 
+            unr_now = 0.0
             if position_side != 0:
                 base_tit = 0 if open_new_trade == 1 else int(time_in_trade_prev)
                 time_in_trade = int(base_tit + 1)
                 next_idx = t + 1 if (t + 1) < n else t
                 if entry_price > 0.0 and close[next_idx] > 0.0:
-                    unr = ((float(close[next_idx]) / float(entry_price)) - 1.0) * float(position_side) * float(position_size)
+                    unr_now = ((float(close[next_idx]) / float(entry_price)) - 1.0) * float(position_side) * float(position_size)
                 else:
-                    unr = 0.0
+                    unr_now = 0.0
                 base_peak = 0.0 if open_new_trade == 1 else float(trade_peak_prev)
-                trade_peak_pnl = float(base_peak if base_peak > unr else unr)
+                trade_peak_pnl = float(base_peak if base_peak > unr_now else unr_now)
             else:
                 time_in_trade = 0
                 trade_peak_pnl = 0.0
 
             regret = 0.0
-            if prev_side == 0 and position_side != 0:
+            if position_side != 0 and (prev_side == 0 or prev_side != position_side):
                 fut_min = float(future_min_ret[t])
                 fut_max = float(future_max_ret[t])
                 if position_side > 0:
@@ -665,7 +767,53 @@ def _step_core_numba(*args):
 
             delta_equity = float(equity - equity_prev)
             idle_pen = float(idle_penalty) if (position_side == 0 and strength_now > 1.0) else 0.0
-            reward = float(delta_equity - turnover_penalty * turn - dd_penalty * dd_increase - regret_penalty * regret - idle_pen)
+            dd_level_pen = dd_level_penalty * dd
+            dd_excess = dd - dd_soft_limit
+            if dd_excess < 0.0:
+                dd_excess = 0.0
+            dd_excess_pen = dd_excess_penalty * (dd_excess * dd_excess)
+            dd_hard_pen = dd_hard_penalty if hard_dd_triggered else 0.0
+            hold_bar_pen = hold_bar_penalty * (position_size if position_size > 0.0 else 0.0) if position_side != 0 else 0.0
+            hold_soft = max(1, hold_soft_bars)
+            hold_excess = ((time_in_trade - hold_soft) / float(hold_soft)) if (position_side != 0 and time_in_trade > hold_soft) else 0.0
+            hold_excess_pen = hold_excess_penalty * (hold_excess * hold_excess)
+            hold_regret = (trade_peak_pnl - unr_now) if position_side != 0 else 0.0
+            if hold_regret < 0.0:
+                hold_regret = 0.0
+            hold_regret_pen = hold_regret_penalty * hold_regret
+            stagnation_pen = 0.0
+            if position_side != 0 and time_in_trade > max(1, stagnation_bars):
+                if np.abs(step_ret) <= max(0.0, stagnation_ret_epsilon):
+                    st_norm = float(time_in_trade - stagnation_bars) / float(max(1, stagnation_bars))
+                    if st_norm < 0.0:
+                        st_norm = 0.0
+                    stagnation_pen = stagnation_penalty * st_norm
+            entry_pen = 0.0
+            if open_new_trade == 1:
+                edge_abs = np.abs(edge_now)
+                edge_ref = np.abs(edge_thr)
+                if edge_ref < 1e-6:
+                    edge_ref = 1e-6
+                weak_ratio = (edge_ref - edge_abs) / edge_ref
+                if weak_ratio < 0.0:
+                    weak_ratio = 0.0
+                entry_pen = entry_penalty + (weak_entry_penalty * weak_ratio)
+            reward = float(
+                delta_equity
+                - turnover_penalty * turn
+                - dd_penalty * dd_increase
+                - dd_level_pen
+                - dd_excess_pen
+                - dd_hard_pen
+                - hold_bar_pen
+                - hold_excess_pen
+                - hold_regret_pen
+                - stagnation_pen
+                - (reverse_penalty if is_reverse else 0.0)
+                - entry_pen
+                - regret_penalty * regret
+                - idle_pen
+            )
 
             if changed:
                 cooldown_left = int(max(0, cooldown_bars))
@@ -693,6 +841,14 @@ def _step_core_numba(*args):
                 tx_cost,
                 pnl_step,
                 regret,
+                1 if hard_dd_triggered else 0,
+                hold_bar_pen,
+                hold_excess_pen,
+                hold_regret_pen,
+                stagnation_pen,
+                (reverse_penalty if is_reverse else 0.0),
+                entry_pen,
+                forced_max_hold_close,
                 bars_since_last_exit,
                 close_prev_trade,
                 open_new_trade,
@@ -744,10 +900,26 @@ def _warmup_numba_kernels() -> None:
             0.2,
             0,
             0,
+            0,
             1,
             0.0005,
             0.0001,
             0.1,
+            0.0,
+            0.15,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            360,
+            0.0,
+            0.0,
+            240,
+            0.00005,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
             0.0005,
             0.02,
             0.0,
@@ -773,9 +945,24 @@ class TradingEnvConfig:
     regret_window: int = 10
     min_reentry_gap_bars: int = 0
     min_hold_bars: int = 0
+    max_hold_bars: int = 0
     use_signal_gate: bool = True
     edge_entry_threshold: float = 0.2
     strength_entry_threshold: float = 0.2
+    force_close_on_adverse: bool = True
+    edge_exit_threshold: float = 0.18
+    strength_exit_threshold: float = 0.08
+    allow_direct_flip: bool = True
+    allow_scale_in: bool = False
+    # Feature switches no estado (mantem state_dim fixo por compatibilidade).
+    # Se False, o slot correspondente eh zerado.
+    state_use_uncertainty: bool = False
+    state_use_vol_long: bool = False
+    state_use_shock: bool = False
+    # Contexto temporal do estado (janela curta/longa em barras de 1m).
+    state_use_window_context: bool = True
+    state_window_short_bars: int = 30
+    state_window_long_bars: int = 30
     reward: RewardConfig = field(default_factory=RewardConfig)
 
 
@@ -788,6 +975,7 @@ class HybridTradingEnv:
     - fwd_ret_1
     - mu_long_norm, mu_short_norm, edge_norm, strength_norm, uncertainty_norm
     - vol_short_norm, vol_long_norm, trend_strength_norm, shock_flag
+    Obs: algumas features podem ser zeradas via TradingEnvConfig.state_use_*.
     """
 
     def __init__(self, df: pd.DataFrame, cfg: TradingEnvConfig | None = None):
@@ -815,6 +1003,7 @@ class HybridTradingEnv:
                 self.df[col] = d
         self.df = self.df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
+        self.n = len(self.df)
         self.close = self.df["close"].to_numpy(dtype=np.float64, copy=False)
         self.fwd_ret = self.df["fwd_ret_1"].to_numpy(dtype=np.float64, copy=False)
         self.mu_long_norm = self.df["mu_long_norm"].to_numpy(dtype=np.float32, copy=False)
@@ -826,9 +1015,14 @@ class HybridTradingEnv:
         self.vol_long_norm = self.df["vol_long_norm"].to_numpy(dtype=np.float32, copy=False)
         self.trend_strength_norm = self.df["trend_strength_norm"].to_numpy(dtype=np.float32, copy=False)
         self.shock_flag = self.df["shock_flag"].to_numpy(dtype=np.float32, copy=False)
-
-        self.n = len(self.df)
+        if not bool(self.cfg.state_use_uncertainty):
+            self.uncertainty_norm = np.zeros(self.n, dtype=np.float32)
+        if not bool(self.cfg.state_use_vol_long):
+            self.vol_long_norm = np.zeros(self.n, dtype=np.float32)
+        if not bool(self.cfg.state_use_shock):
+            self.shock_flag = np.zeros(self.n, dtype=np.float32)
         self.future_min_ret, self.future_max_ret = self._build_future_regret_arrays(int(self.cfg.regret_window))
+        self._window_state_feats = self._build_window_state_features(int(self.cfg.state_window_short_bars))
         self.reset()
 
     def _build_future_regret_arrays(self, window: int) -> tuple[np.ndarray, np.ndarray]:
@@ -836,7 +1030,26 @@ class HybridTradingEnv:
 
     @property
     def state_dim(self) -> int:
-        return 17
+        # estado minimo: mu_long, mu_short + estado da operacao
+        base = 9
+        if bool(self.cfg.state_use_window_context):
+            return int(base + self._window_state_feats.shape[1])
+        return int(base)
+
+    def _build_window_state_features(self, w_short: int) -> np.ndarray:
+        w = int(max(1, w_short))
+        n = int(self.n)
+        out = np.zeros((n, 2 * w), dtype=np.float32)
+        mu_l = self.mu_long_norm.astype(np.float32, copy=False)
+        mu_s = self.mu_short_norm.astype(np.float32, copy=False)
+        for lag in range(w):
+            if lag == 0:
+                out[:, lag] = mu_l
+                out[:, w + lag] = mu_s
+            else:
+                out[lag:, lag] = mu_l[:-lag]
+                out[lag:, w + lag] = mu_s[:-lag]
+        return out
 
     def reset(self, *, start_idx: int = 0) -> np.ndarray:
         self.t = int(max(0, min(start_idx, self.n - 2)))
@@ -854,6 +1067,11 @@ class HybridTradingEnv:
         self.trade_peak_pnl = 0.0
         self.trade_returns: list[float] = []
         self.trade_holds_bars: list[int] = []
+        self.trade_holds_long_bars: list[int] = []
+        self.trade_holds_short_bars: list[int] = []
+        self.trade_peak_returns: list[float] = []
+        self.trade_givebacks: list[float] = []
+        self.trade_efficiencies: list[float] = []
         self.entry_indices: list[int] = []
         self.current_entry_t: int = -1
         self.bars_since_last_exit: int = int(max(0, self.cfg.min_reentry_gap_bars))
@@ -879,13 +1097,23 @@ class HybridTradingEnv:
             return
         r = ((px / self.entry_price) - 1.0) * float(side) * float(size)
         self.trade_returns.append(float(r))
+        peak = float(max(0.0, self.trade_peak_pnl))
+        giveback = float(max(0.0, peak - float(r))) if peak > 0.0 else 0.0
+        eff = float(r / peak) if peak > 1e-12 else 0.0
+        self.trade_peak_returns.append(float(peak))
+        self.trade_givebacks.append(float(giveback))
+        self.trade_efficiencies.append(float(np.clip(eff, -3.0, 3.0)))
         if self.current_entry_t >= 0:
             hold = int(max(1, int(t) - int(self.current_entry_t)))
             self.trade_holds_bars.append(hold)
+            if int(side) > 0:
+                self.trade_holds_long_bars.append(hold)
+            elif int(side) < 0:
+                self.trade_holds_short_bars.append(hold)
         self.current_entry_t = -1
 
     def _state(self) -> np.ndarray:
-        return _state_vec_numba(
+        base_state = _state_vec_numba(
             int(self.t),
             int(self.position_side),
             float(self.position_size),
@@ -905,6 +1133,13 @@ class HybridTradingEnv:
             self.trend_strength_norm,
             self.shock_flag,
         )
+        # estado minimo: [mu_long, mu_short, pos_flat, pos_long, pos_short, t_norm, unr_norm, dd_trade, cooldown]
+        base_state = base_state[[0, 1, 9, 10, 11, 13, 14, 15, 16]]
+        if not bool(self.cfg.state_use_window_context):
+            return base_state
+        t = int(max(0, min(self.t, self.n - 1)))
+        ctx = self._window_state_feats[t]
+        return np.concatenate((base_state, ctx), axis=0).astype(np.float32, copy=False)
 
     def valid_actions(self) -> list[int]:
         """
@@ -921,29 +1156,95 @@ class HybridTradingEnv:
             if int(self.bars_since_last_exit) < int(max(0, self.cfg.min_reentry_gap_bars)):
                 return out
             if not bool(self.cfg.use_signal_gate):
-                out.extend([ACTION_OPEN_LONG_SMALL, ACTION_OPEN_LONG_BIG, ACTION_OPEN_SHORT_SMALL, ACTION_OPEN_SHORT_BIG])
+                out.extend([ACTION_OPEN_LONG_SMALL, ACTION_OPEN_SHORT_SMALL])
                 return out
             strength_now = float(self.strength_norm[t])
             edge_now = float(self.edge_norm[t])
             if strength_now < float(self.cfg.strength_entry_threshold):
                 return out
             if edge_now >= float(self.cfg.edge_entry_threshold):
-                out.extend([ACTION_OPEN_LONG_SMALL, ACTION_OPEN_LONG_BIG])
+                out.extend([ACTION_OPEN_LONG_SMALL])
                 return out
             if edge_now <= -float(self.cfg.edge_entry_threshold):
-                out.extend([ACTION_OPEN_SHORT_SMALL, ACTION_OPEN_SHORT_BIG])
+                out.extend([ACTION_OPEN_SHORT_SMALL])
                 return out
             return out
 
         if side > 0:
+            if not can_adjust:
+                return out
+            edge_now = float(self.edge_norm[t])
+            strength_now = float(self.strength_norm[t])
+            flip_edge_thr = float(1.25 * float(self.cfg.edge_entry_threshold))
+            flip_strength_thr = float(1.05 * float(self.cfg.strength_entry_threshold))
+            flip_ok = bool(
+                self.cfg.allow_direct_flip
+                and (
+                    (not bool(self.cfg.use_signal_gate))
+                    or (
+                        strength_now >= flip_strength_thr
+                        and edge_now <= -flip_edge_thr
+                    )
+                )
+            )
+            adverse = False
+            if bool(self.cfg.force_close_on_adverse):
+                edge_thr = float(max(0.0, self.cfg.edge_exit_threshold))
+                strength_weak = float(max(self.cfg.strength_exit_threshold, 0.85 * self.cfg.strength_entry_threshold))
+                adverse = bool(
+                    (edge_now <= -max(0.25, 1.6 * edge_thr))
+                    or ((edge_now <= -edge_thr) and (strength_now <= strength_weak))
+                )
+                if adverse:
+                    out_adv = [ACTION_HOLD, ACTION_CLOSE_LONG]
+                    if flip_ok:
+                        out_adv.append(ACTION_OPEN_SHORT_SMALL)
+                    return out_adv
+            if int(self.cfg.max_hold_bars) > 0 and int(self.time_in_trade) >= int(self.cfg.max_hold_bars):
+                return [ACTION_CLOSE_LONG]
             out.append(ACTION_CLOSE_LONG)
-            if can_adjust:
-                out.extend([ACTION_OPEN_LONG_SMALL, ACTION_OPEN_LONG_BIG])
+            if flip_ok:
+                out.extend([ACTION_OPEN_SHORT_SMALL])
+            if bool(self.cfg.allow_scale_in) and (not adverse):
+                out.extend([ACTION_OPEN_LONG_SMALL])
             return out
 
+        if not can_adjust:
+            return out
+        edge_now = float(self.edge_norm[t])
+        strength_now = float(self.strength_norm[t])
+        flip_edge_thr = float(1.25 * float(self.cfg.edge_entry_threshold))
+        flip_strength_thr = float(1.05 * float(self.cfg.strength_entry_threshold))
+        flip_ok = bool(
+            self.cfg.allow_direct_flip
+            and (
+                (not bool(self.cfg.use_signal_gate))
+                or (
+                    strength_now >= flip_strength_thr
+                    and edge_now >= flip_edge_thr
+                )
+            )
+        )
+        adverse = False
+        if bool(self.cfg.force_close_on_adverse):
+            edge_thr = float(max(0.0, self.cfg.edge_exit_threshold))
+            strength_weak = float(max(self.cfg.strength_exit_threshold, 0.85 * self.cfg.strength_entry_threshold))
+            adverse = bool(
+                (edge_now >= max(0.25, 1.6 * edge_thr))
+                or ((edge_now >= edge_thr) and (strength_now <= strength_weak))
+            )
+            if adverse:
+                out_adv = [ACTION_HOLD, ACTION_CLOSE_SHORT]
+                if flip_ok:
+                    out_adv.append(ACTION_OPEN_LONG_SMALL)
+                return out_adv
+        if int(self.cfg.max_hold_bars) > 0 and int(self.time_in_trade) >= int(self.cfg.max_hold_bars):
+            return [ACTION_CLOSE_SHORT]
         out.append(ACTION_CLOSE_SHORT)
-        if can_adjust:
-            out.extend([ACTION_OPEN_SHORT_SMALL, ACTION_OPEN_SHORT_BIG])
+        if flip_ok:
+            out.extend([ACTION_OPEN_LONG_SMALL])
+        if bool(self.cfg.allow_scale_in) and (not adverse):
+            out.extend([ACTION_OPEN_SHORT_SMALL])
         return out
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
@@ -984,10 +1285,26 @@ class HybridTradingEnv:
             float(self.cfg.strength_entry_threshold),
             int(self.cfg.min_reentry_gap_bars),
             int(self.cfg.min_hold_bars),
+            int(self.cfg.max_hold_bars),
             int(self.cfg.cooldown_bars),
             float(self.cfg.fee_rate),
             float(self.cfg.slippage_rate),
             float(self.cfg.reward.dd_penalty),
+            float(self.cfg.reward.dd_level_penalty),
+            float(self.cfg.reward.dd_soft_limit),
+            float(self.cfg.reward.dd_excess_penalty),
+            float(self.cfg.reward.dd_hard_limit),
+            float(self.cfg.reward.dd_hard_penalty),
+            float(self.cfg.reward.hold_bar_penalty),
+            int(self.cfg.reward.hold_soft_bars),
+            float(self.cfg.reward.hold_excess_penalty),
+            float(self.cfg.reward.hold_regret_penalty),
+            int(self.cfg.reward.stagnation_bars),
+            float(self.cfg.reward.stagnation_ret_epsilon),
+            float(self.cfg.reward.stagnation_penalty),
+            float(self.cfg.reward.reverse_penalty),
+            float(self.cfg.reward.entry_penalty),
+            float(self.cfg.reward.weak_entry_penalty),
             float(self.cfg.reward.turnover_penalty),
             float(self.cfg.reward.regret_penalty),
             float(self.cfg.reward.idle_penalty),
@@ -1015,6 +1332,14 @@ class HybridTradingEnv:
             tx_cost,
             pnl_step,
             regret,
+            hard_dd_triggered,
+            hold_bar_pen,
+            hold_excess_pen,
+            hold_regret_pen,
+            stagnation_pen,
+            reverse_pen,
+            entry_pen,
+            forced_max_hold_close,
             new_bars_since_last_exit,
             close_prev_trade,
             open_new_trade,
@@ -1073,6 +1398,15 @@ class HybridTradingEnv:
             "delta_equity": float(self.equity_curve[-1] - self.equity_curve[-2]) if len(self.equity_curve) >= 2 else 0.0,
             "turnover_pen": float(self.cfg.reward.turnover_penalty) * float(turn),
             "dd_pen": float(self.cfg.reward.dd_penalty) * float(dd_increase),
+            "dd_level_pen": float(self.cfg.reward.dd_level_penalty) * float(dd),
+            "dd_excess_pen": float(self.cfg.reward.dd_excess_penalty) * float(max(0.0, dd - float(self.cfg.reward.dd_soft_limit)) ** 2),
+            "dd_hard_pen": float(self.cfg.reward.dd_hard_penalty) if int(hard_dd_triggered) == 1 else 0.0,
+            "hold_bar_pen": float(hold_bar_pen),
+            "hold_excess_pen": float(hold_excess_pen),
+            "hold_regret_pen": float(hold_regret_pen),
+            "stagnation_pen": float(stagnation_pen),
+            "reverse_pen": float(reverse_pen),
+            "entry_pen": float(entry_pen),
             "regret_pen": float(self.cfg.reward.regret_penalty) * float(regret),
             "idle_pen": float(self.cfg.reward.idle_penalty) if (self.position_side == 0 and float(self.strength_norm[max(0, self.t - 1)]) > 1.0) else 0.0,
         }
@@ -1083,6 +1417,8 @@ class HybridTradingEnv:
             "close_prev_trade": int(close_prev_trade),
             "open_new_trade": int(open_new_trade),
             "changed": int(changed),
+            "hard_dd_triggered": int(hard_dd_triggered),
+            "forced_max_hold_close": int(forced_max_hold_close),
             "forced_eod_close": int(forced_eod_close),
             "forced_exit_ts": forced_exit_ts,
             "forced_exit_price": float(forced_exit_price),
@@ -1120,6 +1456,16 @@ class HybridTradingEnv:
         trades_per_day = float(trades / total_days)
         trades_per_week = float(trades_per_day * 7.0)
         avg_hold_bars = float(np.mean(self.trade_holds_bars)) if self.trade_holds_bars else 0.0
+        avg_hold_hours = float(avg_hold_bars * (dt_min / 60.0))
+        avg_hold_long_bars = float(np.mean(self.trade_holds_long_bars)) if self.trade_holds_long_bars else 0.0
+        avg_hold_short_bars = float(np.mean(self.trade_holds_short_bars)) if self.trade_holds_short_bars else 0.0
+        avg_hold_long_hours = float(avg_hold_long_bars * (dt_min / 60.0))
+        avg_hold_short_hours = float(avg_hold_short_bars * (dt_min / 60.0))
+        n_long = float(len(self.trade_holds_long_bars))
+        n_short = float(len(self.trade_holds_short_bars))
+        avg_peak_ret = float(np.mean(self.trade_peak_returns)) if self.trade_peak_returns else 0.0
+        avg_giveback = float(np.mean(self.trade_givebacks)) if self.trade_givebacks else 0.0
+        trade_eff_mean = float(np.mean(self.trade_efficiencies)) if self.trade_efficiencies else 0.0
         return {
             "equity_end": float(self.equity),
             "ret_total": float(self.equity - 1.0),
@@ -1128,6 +1474,16 @@ class HybridTradingEnv:
             "trades_per_day": trades_per_day,
             "trades_per_week": trades_per_week,
             "avg_hold_bars": avg_hold_bars,
+            "avg_hold_hours": avg_hold_hours,
+            "trades_long": n_long,
+            "trades_short": n_short,
+            "avg_hold_long_bars": avg_hold_long_bars,
+            "avg_hold_short_bars": avg_hold_short_bars,
+            "avg_hold_long_hours": avg_hold_long_hours,
+            "avg_hold_short_hours": avg_hold_short_hours,
+            "avg_peak_ret": avg_peak_ret,
+            "avg_giveback": avg_giveback,
+            "trade_efficiency_mean": trade_eff_mean,
             "win_rate": float(win_rate),
             "profit_factor": float(pf),
             "avg_turnover": float(avg_turn),

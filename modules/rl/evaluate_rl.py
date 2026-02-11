@@ -34,9 +34,7 @@ from env_rl import HybridTradingEnv, TradingEnvConfig  # type: ignore
 from env_rl.action_space import (  # type: ignore
     ACTION_HOLD,
     ACTION_OPEN_LONG_SMALL,
-    ACTION_OPEN_LONG_BIG,
     ACTION_OPEN_SHORT_SMALL,
-    ACTION_OPEN_SHORT_BIG,
     ACTION_CLOSE_LONG,
     ACTION_CLOSE_SHORT,
 )
@@ -95,6 +93,14 @@ def _aggregate(rows: list[dict[str, float]]) -> dict[str, float]:
             "trades_per_day_mean": 0.0,
             "trades_per_week_mean": 0.0,
             "avg_hold_bars_mean": 0.0,
+            "avg_hold_hours_mean": 0.0,
+            "avg_hold_long_hours_mean": 0.0,
+            "avg_hold_short_hours_mean": 0.0,
+            "trades_long_total": 0.0,
+            "trades_short_total": 0.0,
+            "avg_peak_ret_mean": 0.0,
+            "avg_giveback_mean": 0.0,
+            "trade_efficiency_mean": 0.0,
             "avg_turnover_mean": 0.0,
         }
     arr = lambda k: np.asarray([x.get(k, 0.0) for x in rows], dtype=np.float64)
@@ -107,6 +113,14 @@ def _aggregate(rows: list[dict[str, float]]) -> dict[str, float]:
         "trades_per_day_mean": float(np.nanmean(arr("trades_per_day"))),
         "trades_per_week_mean": float(np.nanmean(arr("trades_per_week"))),
         "avg_hold_bars_mean": float(np.nanmean(arr("avg_hold_bars"))),
+        "avg_hold_hours_mean": float(np.nanmean(arr("avg_hold_hours"))),
+        "avg_hold_long_hours_mean": float(np.nanmean(arr("avg_hold_long_hours"))),
+        "avg_hold_short_hours_mean": float(np.nanmean(arr("avg_hold_short_hours"))),
+        "trades_long_total": float(np.nansum(arr("trades_long"))),
+        "trades_short_total": float(np.nansum(arr("trades_short"))),
+        "avg_peak_ret_mean": float(np.nanmean(arr("avg_peak_ret"))),
+        "avg_giveback_mean": float(np.nanmean(arr("avg_giveback"))),
+        "trade_efficiency_mean": float(np.nanmean(arr("trade_efficiency_mean"))),
         "avg_turnover_mean": float(np.nanmean(arr("avg_turnover"))),
     }
 
@@ -141,7 +155,7 @@ def _heuristic_action(state: np.ndarray, t: int, env: HybridTradingEnv, edge_thr
         if strength < float(strength_thr) or edge < 0.0:
             return ACTION_CLOSE_LONG
         if edge > float(edge_thr):
-            return ACTION_OPEN_LONG_BIG
+            return ACTION_OPEN_LONG_SMALL
         if mu_l >= mu_s:
             return ACTION_OPEN_LONG_SMALL
         return ACTION_HOLD
@@ -149,16 +163,16 @@ def _heuristic_action(state: np.ndarray, t: int, env: HybridTradingEnv, edge_thr
         if strength < float(strength_thr) or edge > 0.0:
             return ACTION_CLOSE_SHORT
         if edge < -float(edge_thr):
-            return ACTION_OPEN_SHORT_BIG
+            return ACTION_OPEN_SHORT_SMALL
         if mu_s > mu_l:
             return ACTION_OPEN_SHORT_SMALL
         return ACTION_HOLD
     if strength < float(strength_thr):
         return ACTION_HOLD
     if edge > float(edge_thr):
-        return ACTION_OPEN_LONG_BIG
+        return ACTION_OPEN_LONG_SMALL
     if edge < -float(edge_thr):
-        return ACTION_OPEN_SHORT_BIG
+        return ACTION_OPEN_SHORT_SMALL
     return ACTION_OPEN_LONG_SMALL if mu_l >= mu_s else ACTION_OPEN_SHORT_SMALL
 
 
@@ -184,10 +198,37 @@ def evaluate_rl_run(cfg: EvaluateConfig) -> Path:
         use_signal_gate=bool(train_cfg.get("use_signal_gate", True)),
         edge_entry_threshold=float(train_cfg.get("edge_entry_threshold", 0.2)),
         strength_entry_threshold=float(train_cfg.get("strength_entry_threshold", 0.2)),
+        force_close_on_adverse=bool(train_cfg.get("force_close_on_adverse", True)),
+        edge_exit_threshold=float(train_cfg.get("edge_exit_threshold", 0.08)),
+        strength_exit_threshold=float(train_cfg.get("strength_exit_threshold", 0.25)),
+        allow_direct_flip=bool(train_cfg.get("allow_direct_flip", True)),
+        allow_scale_in=bool(train_cfg.get("allow_scale_in", False)),
         min_reentry_gap_bars=int(train_cfg.get("min_reentry_gap_bars", 0)),
         min_hold_bars=int(train_cfg.get("min_hold_bars", 0)),
+        max_hold_bars=int(train_cfg.get("max_hold_bars", 0)),
+        state_use_uncertainty=bool(train_cfg.get("state_use_uncertainty", True)),
+        state_use_vol_long=bool(train_cfg.get("state_use_vol_long", True)),
+        state_use_shock=bool(train_cfg.get("state_use_shock", True)),
+        state_use_window_context=bool(train_cfg.get("state_use_window_context", True)),
+        state_window_short_bars=int(train_cfg.get("state_window_short_bars", 30)),
+        state_window_long_bars=int(train_cfg.get("state_window_long_bars", 60)),
     )
     env_cfg.reward.dd_penalty = float(train_cfg.get("dd_penalty", 0.05))
+    env_cfg.reward.dd_level_penalty = float(train_cfg.get("dd_level_penalty", 0.0))
+    env_cfg.reward.dd_soft_limit = float(train_cfg.get("dd_soft_limit", 0.15))
+    env_cfg.reward.dd_excess_penalty = float(train_cfg.get("dd_excess_penalty", 0.0))
+    env_cfg.reward.dd_hard_limit = float(train_cfg.get("dd_hard_limit", 1.0))
+    env_cfg.reward.dd_hard_penalty = float(train_cfg.get("dd_hard_penalty", 0.0))
+    env_cfg.reward.hold_bar_penalty = float(train_cfg.get("hold_bar_penalty", 0.0))
+    env_cfg.reward.hold_soft_bars = int(train_cfg.get("hold_soft_bars", 180))
+    env_cfg.reward.hold_excess_penalty = float(train_cfg.get("hold_excess_penalty", 0.0))
+    env_cfg.reward.hold_regret_penalty = float(train_cfg.get("hold_regret_penalty", 0.0))
+    env_cfg.reward.stagnation_bars = int(train_cfg.get("stagnation_bars", 180))
+    env_cfg.reward.stagnation_ret_epsilon = float(train_cfg.get("stagnation_ret_epsilon", 0.00003))
+    env_cfg.reward.stagnation_penalty = float(train_cfg.get("stagnation_penalty", 0.0))
+    env_cfg.reward.reverse_penalty = float(train_cfg.get("reverse_penalty", 0.0))
+    env_cfg.reward.entry_penalty = float(train_cfg.get("entry_penalty", 0.0))
+    env_cfg.reward.weak_entry_penalty = float(train_cfg.get("weak_entry_penalty", 0.0))
     env_cfg.reward.turnover_penalty = float(train_cfg.get("turnover_penalty", 0.0002))
     env_cfg.reward.regret_penalty = float(train_cfg.get("regret_penalty", 0.02))
     env_cfg.reward.idle_penalty = float(train_cfg.get("idle_penalty", 0.0))
@@ -216,13 +257,21 @@ def evaluate_rl_run(cfg: EvaluateConfig) -> Path:
         q = QNet(int(ckpt["state_dim"]), int(ckpt["n_actions"]), int(ckpt["hidden_dim"])).to(device)
         q.load_state_dict(ckpt["state_dict"])
         q.eval()
+        state_buf = torch.empty((1, int(ckpt["state_dim"])), dtype=torch.float32, device=device)
+        idx_cache: dict[tuple[int, ...], torch.Tensor] = {}
 
         def _act_rl(state: np.ndarray, _t: int, _env: HybridTradingEnv) -> int:
-            with torch.no_grad():
-                qs = q(torch.from_numpy(state).to(device).unsqueeze(0))
+            with torch.inference_mode():
+                s_np = state.astype(np.float32, copy=False)
+                state_buf[0].copy_(torch.from_numpy(s_np), non_blocking=True)
+                qs = q(state_buf)
                 valid = _env.valid_actions()
                 if valid:
-                    idx = torch.as_tensor(valid, dtype=torch.long, device=device)
+                    key = tuple(int(a) for a in valid)
+                    idx = idx_cache.get(key)
+                    if idx is None:
+                        idx = torch.as_tensor(key, dtype=torch.long, device=device)
+                        idx_cache[key] = idx
                     qv = qs.index_select(1, idx)
                     j = int(torch.argmax(qv, dim=1).item())
                     return int(valid[j])
@@ -247,14 +296,30 @@ def evaluate_rl_run(cfg: EvaluateConfig) -> Path:
             "rl_max_dd_mean": float(rl_metrics["max_dd_mean"]),
             "rl_pf_median": float(rl_metrics["profit_factor_median"]),
             "rl_trades_total": float(rl_metrics["trades_total"]),
+            "rl_trades_long_total": float(rl_metrics["trades_long_total"]),
+            "rl_trades_short_total": float(rl_metrics["trades_short_total"]),
             "rl_trades_per_week_mean": float(rl_metrics["trades_per_week_mean"]),
             "rl_avg_hold_bars_mean": float(rl_metrics["avg_hold_bars_mean"]),
+            "rl_avg_hold_hours_mean": float(rl_metrics["avg_hold_hours_mean"]),
+            "rl_avg_hold_long_hours_mean": float(rl_metrics["avg_hold_long_hours_mean"]),
+            "rl_avg_hold_short_hours_mean": float(rl_metrics["avg_hold_short_hours_mean"]),
+            "rl_avg_peak_ret_mean": float(rl_metrics["avg_peak_ret_mean"]),
+            "rl_avg_giveback_mean": float(rl_metrics["avg_giveback_mean"]),
+            "rl_trade_efficiency_mean": float(rl_metrics["trade_efficiency_mean"]),
             "sup_ret_total_mean": float(sup_metrics["ret_total_mean"]),
             "sup_max_dd_mean": float(sup_metrics["max_dd_mean"]),
             "sup_pf_median": float(sup_metrics["profit_factor_median"]),
             "sup_trades_total": float(sup_metrics["trades_total"]),
+            "sup_trades_long_total": float(sup_metrics["trades_long_total"]),
+            "sup_trades_short_total": float(sup_metrics["trades_short_total"]),
             "sup_trades_per_week_mean": float(sup_metrics["trades_per_week_mean"]),
             "sup_avg_hold_bars_mean": float(sup_metrics["avg_hold_bars_mean"]),
+            "sup_avg_hold_hours_mean": float(sup_metrics["avg_hold_hours_mean"]),
+            "sup_avg_hold_long_hours_mean": float(sup_metrics["avg_hold_long_hours_mean"]),
+            "sup_avg_hold_short_hours_mean": float(sup_metrics["avg_hold_short_hours_mean"]),
+            "sup_avg_peak_ret_mean": float(sup_metrics["avg_peak_ret_mean"]),
+            "sup_avg_giveback_mean": float(sup_metrics["avg_giveback_mean"]),
+            "sup_trade_efficiency_mean": float(sup_metrics["trade_efficiency_mean"]),
             "time_rl_eval_s": float(dt_rl),
             "time_sup_eval_s": float(dt_sup),
             "time_fold_total_s": float(time.perf_counter() - t_fold),
@@ -262,9 +327,13 @@ def evaluate_rl_run(cfg: EvaluateConfig) -> Path:
         rows_eval.append(row)
         print(
             f"[eval][fold {row['fold_id']}] RL ret={row['rl_ret_total_mean']:+.3%} dd={row['rl_max_dd_mean']:.2%} pf={row['rl_pf_median']:.3f} | "
-            f"trades/wk={row['rl_trades_per_week_mean']:.3f} hold={row['rl_avg_hold_bars_mean']:.1f} | "
+            f"trades/wk={row['rl_trades_per_week_mean']:.3f} hold(h)={row['rl_avg_hold_hours_mean']:.2f} "
+            f"(L={row['rl_avg_hold_long_hours_mean']:.2f} S={row['rl_avg_hold_short_hours_mean']:.2f}) "
+            f"eff={row['rl_trade_efficiency_mean']:+.3f} giveback={row['rl_avg_giveback_mean']:.4f} | "
             f"SUP ret={row['sup_ret_total_mean']:+.3%} dd={row['sup_max_dd_mean']:.2%} pf={row['sup_pf_median']:.3f} "
-            f"trades/wk={row['sup_trades_per_week_mean']:.3f} hold={row['sup_avg_hold_bars_mean']:.1f} | "
+            f"trades/wk={row['sup_trades_per_week_mean']:.3f} hold(h)={row['sup_avg_hold_hours_mean']:.2f} "
+            f"(L={row['sup_avg_hold_long_hours_mean']:.2f} S={row['sup_avg_hold_short_hours_mean']:.2f}) "
+            f"eff={row['sup_trade_efficiency_mean']:+.3f} giveback={row['sup_avg_giveback_mean']:.4f} | "
             f"time(rl/sup/fold)={dt_rl:.2f}/{dt_sup:.2f}/{row['time_fold_total_s']:.2f}s",
             flush=True,
         )

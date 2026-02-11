@@ -9,6 +9,7 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
+import torch
 
 
 def _ensure_modules_on_sys_path() -> None:
@@ -73,6 +74,18 @@ def _resolve_ckpt(checkpoint: str | None, run_dir: str | None, fold_id: int | No
     return folds[-1] / "policy_dqn.pt"
 
 
+def _load_ckpt_env_cfg(checkpoint: Path) -> dict:
+    try:
+        try:
+            ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        except TypeError:
+            ckpt = torch.load(checkpoint, map_location="cpu")
+        env_cfg = ckpt.get("env_cfg", {}) if isinstance(ckpt, dict) else {}
+        return env_cfg if isinstance(env_cfg, dict) else {}
+    except Exception:
+        return {}
+
+
 def run(
     *,
     signals_path: str,
@@ -88,27 +101,74 @@ def run(
     cooldown_bars: int,
     min_reentry_gap_bars: int,
     min_hold_bars: int,
+    max_hold_bars: int,
     edge_entry_threshold: float,
     strength_entry_threshold: float,
-    device: str,
+    dd_penalty: float = 0.05,
+    dd_level_penalty: float = 0.0,
+    dd_soft_limit: float = 0.15,
+    dd_excess_penalty: float = 0.0,
+    dd_hard_limit: float = 1.0,
+    dd_hard_penalty: float = 0.0,
+    hold_bar_penalty: float = 0.0,
+    hold_soft_bars: int = 360,
+    hold_excess_penalty: float = 0.0,
+    hold_regret_penalty: float = 0.0,
+    turnover_penalty: float = 0.0002,
+    regret_penalty: float = 0.02,
+    idle_penalty: float = 0.0,
+    device: str = "cuda",
 ) -> Path:
     ckpt = _resolve_ckpt(checkpoint, run_dir, fold_id)
     policy = load_policy(ckpt, device=device)
+    ckpt_env = _load_ckpt_env_cfg(ckpt)
+    rew = ckpt_env.get("reward", {}) if isinstance(ckpt_env.get("reward", {}), dict) else {}
 
     df = pd.read_parquet(Path(signals_path).expanduser().resolve())
     df.index = pd.to_datetime(df.index)
     env_cfg = TradingEnvConfig(
-        fee_rate=float(fee_rate),
-        slippage_rate=float(slippage_rate),
-        small_size=float(small_size),
-        big_size=float(big_size),
-        cooldown_bars=int(cooldown_bars),
-        min_reentry_gap_bars=int(min_reentry_gap_bars),
-        min_hold_bars=int(min_hold_bars),
-        use_signal_gate=True,
-        edge_entry_threshold=float(edge_entry_threshold),
-        strength_entry_threshold=float(strength_entry_threshold),
+        fee_rate=float(ckpt_env.get("fee_rate", fee_rate)),
+        slippage_rate=float(ckpt_env.get("slippage_rate", slippage_rate)),
+        small_size=float(ckpt_env.get("small_size", small_size)),
+        big_size=float(ckpt_env.get("big_size", big_size)),
+        cooldown_bars=int(ckpt_env.get("cooldown_bars", cooldown_bars)),
+        min_reentry_gap_bars=int(ckpt_env.get("min_reentry_gap_bars", min_reentry_gap_bars)),
+        min_hold_bars=int(ckpt_env.get("min_hold_bars", min_hold_bars)),
+        max_hold_bars=int(ckpt_env.get("max_hold_bars", max_hold_bars)),
+        use_signal_gate=bool(ckpt_env.get("use_signal_gate", True)),
+        edge_entry_threshold=float(ckpt_env.get("edge_entry_threshold", edge_entry_threshold)),
+        strength_entry_threshold=float(ckpt_env.get("strength_entry_threshold", strength_entry_threshold)),
+        force_close_on_adverse=bool(ckpt_env.get("force_close_on_adverse", True)),
+        edge_exit_threshold=float(ckpt_env.get("edge_exit_threshold", 0.08)),
+        strength_exit_threshold=float(ckpt_env.get("strength_exit_threshold", 0.25)),
+        allow_direct_flip=bool(ckpt_env.get("allow_direct_flip", True)),
+        allow_scale_in=bool(ckpt_env.get("allow_scale_in", False)),
+        state_use_uncertainty=bool(ckpt_env.get("state_use_uncertainty", True)),
+        state_use_vol_long=bool(ckpt_env.get("state_use_vol_long", True)),
+        state_use_shock=bool(ckpt_env.get("state_use_shock", True)),
+        state_use_window_context=bool(ckpt_env.get("state_use_window_context", True)),
+        state_window_short_bars=int(ckpt_env.get("state_window_short_bars", 30)),
+        state_window_long_bars=int(ckpt_env.get("state_window_long_bars", 60)),
     )
+    env_cfg.reward.dd_penalty = float(rew.get("dd_penalty", dd_penalty))
+    env_cfg.reward.dd_level_penalty = float(rew.get("dd_level_penalty", dd_level_penalty))
+    env_cfg.reward.dd_soft_limit = float(rew.get("dd_soft_limit", dd_soft_limit))
+    env_cfg.reward.dd_excess_penalty = float(rew.get("dd_excess_penalty", dd_excess_penalty))
+    env_cfg.reward.dd_hard_limit = float(rew.get("dd_hard_limit", dd_hard_limit))
+    env_cfg.reward.dd_hard_penalty = float(rew.get("dd_hard_penalty", dd_hard_penalty))
+    env_cfg.reward.hold_bar_penalty = float(rew.get("hold_bar_penalty", hold_bar_penalty))
+    env_cfg.reward.hold_soft_bars = int(rew.get("hold_soft_bars", hold_soft_bars))
+    env_cfg.reward.hold_excess_penalty = float(rew.get("hold_excess_penalty", hold_excess_penalty))
+    env_cfg.reward.hold_regret_penalty = float(rew.get("hold_regret_penalty", hold_regret_penalty))
+    env_cfg.reward.stagnation_bars = int(rew.get("stagnation_bars", 180))
+    env_cfg.reward.stagnation_ret_epsilon = float(rew.get("stagnation_ret_epsilon", 0.00003))
+    env_cfg.reward.stagnation_penalty = float(rew.get("stagnation_penalty", 0.0))
+    env_cfg.reward.reverse_penalty = float(rew.get("reverse_penalty", 0.0))
+    env_cfg.reward.entry_penalty = float(rew.get("entry_penalty", 0.0))
+    env_cfg.reward.weak_entry_penalty = float(rew.get("weak_entry_penalty", 0.0))
+    env_cfg.reward.turnover_penalty = float(rew.get("turnover_penalty", turnover_penalty))
+    env_cfg.reward.regret_penalty = float(rew.get("regret_penalty", regret_penalty))
+    env_cfg.reward.idle_penalty = float(rew.get("idle_penalty", idle_penalty))
     rows: list[dict[str, float]] = []
     for _sym, sdf in df.groupby("symbol", sort=True):
         sdf2 = sdf.sort_index().copy()
@@ -146,8 +206,22 @@ def _parse_args(argv: Iterable[str] | None = None):
     ap.add_argument("--cooldown-bars", type=int, default=3)
     ap.add_argument("--min-reentry-gap-bars", type=int, default=0)
     ap.add_argument("--min-hold-bars", type=int, default=0)
+    ap.add_argument("--max-hold-bars", type=int, default=0)
     ap.add_argument("--edge-entry-threshold", type=float, default=0.2)
     ap.add_argument("--strength-entry-threshold", type=float, default=0.2)
+    ap.add_argument("--dd-penalty", type=float, default=0.05)
+    ap.add_argument("--dd-level-penalty", type=float, default=0.0)
+    ap.add_argument("--dd-soft-limit", type=float, default=0.15)
+    ap.add_argument("--dd-excess-penalty", type=float, default=0.0)
+    ap.add_argument("--dd-hard-limit", type=float, default=1.0)
+    ap.add_argument("--dd-hard-penalty", type=float, default=0.0)
+    ap.add_argument("--hold-bar-penalty", type=float, default=0.0)
+    ap.add_argument("--hold-soft-bars", type=int, default=360)
+    ap.add_argument("--hold-excess-penalty", type=float, default=0.0)
+    ap.add_argument("--hold-regret-penalty", type=float, default=0.0)
+    ap.add_argument("--turnover-penalty", type=float, default=0.0002)
+    ap.add_argument("--regret-penalty", type=float, default=0.02)
+    ap.add_argument("--idle-penalty", type=float, default=0.0)
     ap.add_argument("--device", default="cuda")
     return ap.parse_args(list(argv) if argv is not None else None)
 
@@ -168,8 +242,22 @@ def main(argv: Iterable[str] | None = None) -> None:
         cooldown_bars=int(ns.cooldown_bars),
         min_reentry_gap_bars=int(ns.min_reentry_gap_bars),
         min_hold_bars=int(ns.min_hold_bars),
+        max_hold_bars=int(ns.max_hold_bars),
         edge_entry_threshold=float(ns.edge_entry_threshold),
         strength_entry_threshold=float(ns.strength_entry_threshold),
+        dd_penalty=float(ns.dd_penalty),
+        dd_level_penalty=float(ns.dd_level_penalty),
+        dd_soft_limit=float(ns.dd_soft_limit),
+        dd_excess_penalty=float(ns.dd_excess_penalty),
+        dd_hard_limit=float(ns.dd_hard_limit),
+        dd_hard_penalty=float(ns.dd_hard_penalty),
+        hold_bar_penalty=float(ns.hold_bar_penalty),
+        hold_soft_bars=int(ns.hold_soft_bars),
+        hold_excess_penalty=float(ns.hold_excess_penalty),
+        hold_regret_penalty=float(ns.hold_regret_penalty),
+        turnover_penalty=float(ns.turnover_penalty),
+        regret_penalty=float(ns.regret_penalty),
+        idle_penalty=float(ns.idle_penalty),
         device=str(ns.device),
     )
     print(f"[backtest] salvo: {out}")

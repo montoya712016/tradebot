@@ -30,8 +30,6 @@ _ensure_modules_on_sys_path()
 from env_rl import HybridTradingEnv, TradingEnvConfig  # type: ignore
 from env_rl.action_space import (  # type: ignore
     ACTION_HOLD,
-    ACTION_OPEN_LONG_BIG,
-    ACTION_OPEN_SHORT_BIG,
     ACTION_OPEN_LONG_SMALL,
     ACTION_OPEN_SHORT_SMALL,
     ACTION_CLOSE_LONG,
@@ -55,7 +53,7 @@ def _heuristic_action(env: HybridTradingEnv, t: int, edge_thr: float, strength_t
         if strength < float(strength_thr) or edge < 0.0:
             return ACTION_CLOSE_LONG
         if edge > float(edge_thr):
-            return ACTION_OPEN_LONG_BIG
+            return ACTION_OPEN_LONG_SMALL
         if mu_l >= mu_s:
             return ACTION_OPEN_LONG_SMALL
         return ACTION_HOLD
@@ -63,16 +61,16 @@ def _heuristic_action(env: HybridTradingEnv, t: int, edge_thr: float, strength_t
         if strength < float(strength_thr) or edge > 0.0:
             return ACTION_CLOSE_SHORT
         if edge < -float(edge_thr):
-            return ACTION_OPEN_SHORT_BIG
+            return ACTION_OPEN_SHORT_SMALL
         if mu_s > mu_l:
             return ACTION_OPEN_SHORT_SMALL
         return ACTION_HOLD
     if strength < float(strength_thr):
         return ACTION_HOLD
     if edge > float(edge_thr):
-        return ACTION_OPEN_LONG_BIG
+        return ACTION_OPEN_LONG_SMALL
     if edge < -float(edge_thr):
-        return ACTION_OPEN_SHORT_BIG
+        return ACTION_OPEN_SHORT_SMALL
     return ACTION_OPEN_LONG_SMALL if mu_l >= mu_s else ACTION_OPEN_SHORT_SMALL
 
 
@@ -104,8 +102,22 @@ def run(
     cooldown_bars: int,
     min_reentry_gap_bars: int,
     min_hold_bars: int,
+    max_hold_bars: int,
     edge_entry_threshold: float,
     strength_entry_threshold: float,
+    dd_penalty: float = 0.05,
+    dd_level_penalty: float = 0.0,
+    dd_soft_limit: float = 0.15,
+    dd_excess_penalty: float = 0.0,
+    dd_hard_limit: float = 1.0,
+    dd_hard_penalty: float = 0.0,
+    hold_bar_penalty: float = 0.0,
+    hold_soft_bars: int = 360,
+    hold_excess_penalty: float = 0.0,
+    hold_regret_penalty: float = 0.0,
+    turnover_penalty: float = 0.0002,
+    regret_penalty: float = 0.02,
+    idle_penalty: float = 0.0,
 ) -> Path:
     df = pd.read_parquet(Path(signals_path).expanduser().resolve())
     df.index = pd.to_datetime(df.index)
@@ -117,10 +129,24 @@ def run(
         cooldown_bars=int(cooldown_bars),
         min_reentry_gap_bars=int(min_reentry_gap_bars),
         min_hold_bars=int(min_hold_bars),
+        max_hold_bars=int(max_hold_bars),
         use_signal_gate=True,
         edge_entry_threshold=float(edge_entry_threshold),
         strength_entry_threshold=float(strength_entry_threshold),
     )
+    env_cfg.reward.dd_penalty = float(dd_penalty)
+    env_cfg.reward.dd_level_penalty = float(dd_level_penalty)
+    env_cfg.reward.dd_soft_limit = float(dd_soft_limit)
+    env_cfg.reward.dd_excess_penalty = float(dd_excess_penalty)
+    env_cfg.reward.dd_hard_limit = float(dd_hard_limit)
+    env_cfg.reward.dd_hard_penalty = float(dd_hard_penalty)
+    env_cfg.reward.hold_bar_penalty = float(hold_bar_penalty)
+    env_cfg.reward.hold_soft_bars = int(hold_soft_bars)
+    env_cfg.reward.hold_excess_penalty = float(hold_excess_penalty)
+    env_cfg.reward.hold_regret_penalty = float(hold_regret_penalty)
+    env_cfg.reward.turnover_penalty = float(turnover_penalty)
+    env_cfg.reward.regret_penalty = float(regret_penalty)
+    env_cfg.reward.idle_penalty = float(idle_penalty)
     rows: list[dict[str, float]] = []
     for _sym, sdf in df.groupby("symbol", sort=True):
         sdf2 = sdf.sort_index().copy()
@@ -158,8 +184,22 @@ def _parse_args(argv: Iterable[str] | None = None):
     ap.add_argument("--cooldown-bars", type=int, default=3)
     ap.add_argument("--min-reentry-gap-bars", type=int, default=0)
     ap.add_argument("--min-hold-bars", type=int, default=0)
+    ap.add_argument("--max-hold-bars", type=int, default=0)
     ap.add_argument("--edge-entry-threshold", type=float, default=0.2)
     ap.add_argument("--strength-entry-threshold", type=float, default=0.2)
+    ap.add_argument("--dd-penalty", type=float, default=0.05)
+    ap.add_argument("--dd-level-penalty", type=float, default=0.0)
+    ap.add_argument("--dd-soft-limit", type=float, default=0.15)
+    ap.add_argument("--dd-excess-penalty", type=float, default=0.0)
+    ap.add_argument("--dd-hard-limit", type=float, default=1.0)
+    ap.add_argument("--dd-hard-penalty", type=float, default=0.0)
+    ap.add_argument("--hold-bar-penalty", type=float, default=0.0)
+    ap.add_argument("--hold-soft-bars", type=int, default=360)
+    ap.add_argument("--hold-excess-penalty", type=float, default=0.0)
+    ap.add_argument("--hold-regret-penalty", type=float, default=0.0)
+    ap.add_argument("--turnover-penalty", type=float, default=0.0002)
+    ap.add_argument("--regret-penalty", type=float, default=0.02)
+    ap.add_argument("--idle-penalty", type=float, default=0.0)
     return ap.parse_args(list(argv) if argv is not None else None)
 
 
@@ -178,8 +218,22 @@ def main(argv: Iterable[str] | None = None) -> None:
         cooldown_bars=int(ns.cooldown_bars),
         min_reentry_gap_bars=int(ns.min_reentry_gap_bars),
         min_hold_bars=int(ns.min_hold_bars),
+        max_hold_bars=int(ns.max_hold_bars),
         edge_entry_threshold=float(ns.edge_entry_threshold),
         strength_entry_threshold=float(ns.strength_entry_threshold),
+        dd_penalty=float(ns.dd_penalty),
+        dd_level_penalty=float(ns.dd_level_penalty),
+        dd_soft_limit=float(ns.dd_soft_limit),
+        dd_excess_penalty=float(ns.dd_excess_penalty),
+        dd_hard_limit=float(ns.dd_hard_limit),
+        dd_hard_penalty=float(ns.dd_hard_penalty),
+        hold_bar_penalty=float(ns.hold_bar_penalty),
+        hold_soft_bars=int(ns.hold_soft_bars),
+        hold_excess_penalty=float(ns.hold_excess_penalty),
+        hold_regret_penalty=float(ns.hold_regret_penalty),
+        turnover_penalty=float(ns.turnover_penalty),
+        regret_penalty=float(ns.regret_penalty),
+        idle_penalty=float(ns.idle_penalty),
     )
     print(f"[backtest] salvo: {out}")
 

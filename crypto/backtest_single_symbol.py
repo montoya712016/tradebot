@@ -65,15 +65,36 @@ def _latest_wf_run_dir() -> str | None:
 def main() -> None:
     os.environ.setdefault("SNIPER_APPLY_PRED_BIAS", "1")
     symbol = "STXUSDT"
-    days = 720
+    days = 360
     total_days_cache = 0
     run_dir = _latest_wf_run_dir()
     plot_out = "data/generated/plots/crypto_single_symbol.html"
     # True = velas, False = linha de close
-    plot_candles = _env_bool("BT_PLOT_CANDLES", default=False)
-    # BT_MODE=backtest (padrao) | BT_MODE=pred_only
-    bt_mode = _env_str("BT_MODE", "pred_only").strip().lower()
+    plot_candles = False
+    # BT_MODE=rl (padrao) | backtest | pred_only
+    bt_mode = "rl"
     run_backtest = bt_mode not in {"pred_only", "pred", "scores_only", "scores"}
+    print(f"[bt] mode={bt_mode} symbol={symbol} days={days}", flush=True)
+    if bt_mode in {"rl", "rl_backtest", "hybrid_rl"}:
+        from backtest.single_symbol_rl import SingleSymbolRLDemoSettings, run as run_rl  # type: ignore
+
+        rl_settings = SingleSymbolRLDemoSettings(
+            symbol=symbol,
+            days=days,
+            signals_path=None,
+            run_dir=None,
+            checkpoint=None,
+            fold_id=-1,
+            device="auto",
+            plot_out=None,
+            timeline_out=None,
+            show_plot=True,
+            save_plot=True,
+            save_timeline=True,
+            plot_candles=plot_candles,
+        )
+        run_rl(rl_settings)
+        return
 
     settings = SingleSymbolDemoSettings(
         asset_class="crypto",
@@ -105,7 +126,11 @@ def main() -> None:
                 end_ts = df.index.max()
                 start_ts = end_ts - pd.Timedelta(days=days)
                 df = df[df.index >= start_ts].copy()
-                p_entry_long_map, p_entry_short_map, _, _, _ = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+                pred_out = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+                if not isinstance(pred_out, tuple) or len(pred_out) < 2:
+                    raise RuntimeError("assinatura inesperada de predict_scores_walkforward")
+                p_entry_long_map = pred_out[0]
+                p_entry_short_map = pred_out[1]
                 arr = np.asarray(next(iter(p_entry_long_map.values())), dtype=np.float64)
                 arr = arr[np.isfinite(arr)]
                 if arr.size:

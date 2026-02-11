@@ -1645,6 +1645,13 @@ def plot_backtest_single_rl(
         shared_xaxes=True,
         vertical_spacing=0.02,
         row_heights=heights,
+        subplot_titles=(
+            "Preço + Trades",
+            "Q-values RL",
+            "Sinais Regressor",
+            "Ações / Exposição",
+            "Equity",
+        ),
     )
 
     # Price panel
@@ -1685,7 +1692,7 @@ def plot_backtest_single_rl(
         except Exception:
             continue
         side = str(getattr(t, "side", "long")).lower()
-        trade_color = "rgba(248,81,73,0.22)" if side == "short" else "rgba(63,185,80,0.22)"
+        trade_color = "rgba(248,81,73,0.14)" if side == "short" else "rgba(63,185,80,0.14)"
         shapes.append(
             dict(
                 type="rect",
@@ -1768,25 +1775,38 @@ def plot_backtest_single_rl(
     action_arr = np.asarray(action_id, dtype=float)
     m_action = np.isfinite(action_arr)
     if np.any(m_action):
-        x_a = idx[m_action]
-        y_a = action_arr[m_action]
+        changed = np.zeros_like(action_arr, dtype=bool)
+        changed[0] = True
+        changed[1:] = np.abs(action_arr[1:] - action_arr[:-1]) > 0.5
+        event_mask = m_action & changed & (action_arr != 0.0)
+        x_a = idx[event_mask]
+        y_a = action_arr[event_mask]
         action_colors = {
             0: "#8b949e",
             1: "#3fb950",
-            2: "#2ea043",
+            2: "#3fb950",
             3: "#ff7b72",
-            4: "#f85149",
+            4: "#ff7b72",
             5: "#d29922",
             6: "#d29922",
         }
+        action_symbols = {
+            1: "triangle-up",
+            2: "triangle-up",
+            3: "triangle-down",
+            4: "triangle-down",
+            5: "x",
+            6: "x",
+        }
         c = [action_colors.get(int(v), "#58a6ff") for v in y_a]
+        s = [action_symbols.get(int(v), "circle") for v in y_a]
         fig.add_trace(
             go.Scatter(
                 x=x_a,
                 y=y_a,
                 mode="markers",
-                marker=dict(size=5, color=c, symbol="circle"),
-                name="action_id",
+                marker=dict(size=7, color=c, symbol=s),
+                name="action_event",
             ),
             row=row_map["actions"],
             col=1,
@@ -1796,8 +1816,8 @@ def plot_backtest_single_rl(
             col=1,
             range=[-0.5, 6.5],
             tickmode="array",
-            tickvals=[0, 1, 2, 3, 4, 5, 6],
-            ticktext=["hold", "long_s", "long_b", "short_s", "short_b", "close_l", "close_s"],
+            tickvals=[0, 1, 3, 5, 6],
+            ticktext=["hold", "entry_long", "entry_short", "close_long", "close_short"],
         )
 
     # Equity panel

@@ -21,6 +21,7 @@ import argparse
 import re
 import os
 import sys
+import json
 from typing import Iterable
 
 import numpy as np
@@ -64,6 +65,9 @@ class SignalExportConfig:
     vol_long_bars: int = 720
     trend_bars: int = 360
     shock_k: float = 3.0
+    # Quando True, usa o sinal bruto previsto (0..100) para mu_*_norm no RL.
+    raw_mu_for_rl: bool = True
+    enforce_oof: bool = True
 
 
 def _set_default_supervised_inference_env() -> None:
@@ -203,8 +207,6 @@ def _regime_features(df: pd.DataFrame, cfg: SignalExportConfig) -> pd.DataFrame:
 def _normalize_signal_features(df: pd.DataFrame, cfg: SignalExportConfig) -> pd.DataFrame:
     out = df.copy()
     for col in (
-        "mu_long",
-        "mu_short",
         "edge",
         "strength",
         "uncertainty",
@@ -213,6 +215,13 @@ def _normalize_signal_features(df: pd.DataFrame, cfg: SignalExportConfig) -> pd.
         "trend_strength",
     ):
         out[f"{col}_norm"] = _rolling_z(out[col].astype(np.float64), cfg.norm_window).astype(np.float32)
+    if bool(cfg.raw_mu_for_rl):
+        # Requisito: alimentar o RL com a saida bruta do regressor (0..100).
+        out["mu_long_norm"] = out["mu_long"].astype(np.float32)
+        out["mu_short_norm"] = out["mu_short"].astype(np.float32)
+    else:
+        out["mu_long_norm"] = _rolling_z(out["mu_long"].astype(np.float64), cfg.norm_window).astype(np.float32)
+        out["mu_short_norm"] = _rolling_z(out["mu_short"].astype(np.float64), cfg.norm_window).astype(np.float32)
     return out
 
 
@@ -238,6 +247,18 @@ def _build_symbol_signals(
     df_out["best_win_long"] = np.asarray(best_win_long, dtype=np.float32)
     df_out["best_win_short"] = np.asarray(best_win_short, dtype=np.float32)
     df_out["period_id"] = np.asarray(period_id, dtype=np.int16)
+    train_end_arr = np.full(len(df_out), np.datetime64("NaT"), dtype="datetime64[ns]")
+    for pid, pm in enumerate(periods):
+        m = (df_out["period_id"].to_numpy(dtype=np.int16, copy=False) == int(pid))
+        if np.any(m):
+            train_end_arr[m] = np.datetime64(pd.to_datetime(pm.train_end_utc))
+    df_out["period_train_end_utc"] = pd.to_datetime(train_end_arr)
+    # OOF estrito: cada ponto deve usar modelo com train_end_utc < timestamp.
+    ts_idx = pd.to_datetime(df_out.index)
+    train_end = pd.to_datetime(df_out["period_train_end_utc"])
+    df_out["oof_ok"] = (ts_idx > train_end).astype(np.int8)
+    # remove pontos sem modelo WF valido (period_id < 0) para evitar in-sample/fallback acidental.
+    df_out = df_out.loc[df_out["period_id"].astype(np.int16) >= 0].copy()
 
     mats_long = np.column_stack([np.asarray(v, dtype=np.float32) for v in dict(p_entry_long_map).values()]) if p_entry_long_map else None
     mats_short = np.column_stack([np.asarray(v, dtype=np.float32) for v in dict(p_entry_short_map).values()]) if p_entry_short_map else None
@@ -294,9 +315,53 @@ def export_long_short_signals(cfg: SignalExportConfig) -> Path:
     if not frames:
         raise RuntimeError("Nenhum sinal gerado (frames vazio)")
     out = pd.concat(frames, axis=0).sort_index()
+    if bool(cfg.enforce_oof):
+        m_bad = (out["period_id"].astype(np.int16) >= 0) & (out["oof_ok"].astype(np.int8) <= 0)
+        n_bad = int(m_bad.sum())
+        if n_bad > 0:
+            first_bad = out.index[m_bad][0]
+            raise RuntimeError(
+                f"OOF violation detectada: rows_bad={n_bad} first_bad_ts={pd.to_datetime(first_bad)}"
+            )
     out_path = Path(cfg.out_path).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(out_path, index=True)
+    contract = {
+        "version": 1,
+        "asset_class": str(cfg.asset_class),
+        "source_wf_run_dir": str(run_dir),
+        "raw_mu_for_rl": bool(cfg.raw_mu_for_rl),
+        "enforce_oof": bool(cfg.enforce_oof),
+        "norm_window": int(cfg.norm_window),
+        "vol_short_bars": int(cfg.vol_short_bars),
+        "vol_long_bars": int(cfg.vol_long_bars),
+        "trend_bars": int(cfg.trend_bars),
+        "shock_k": float(cfg.shock_k),
+        "columns_required": [
+            "symbol",
+            "close",
+            "mu_long",
+            "mu_short",
+            "edge",
+            "strength",
+            "uncertainty",
+            "mu_long_norm",
+            "mu_short_norm",
+            "edge_norm",
+            "strength_norm",
+            "uncertainty_norm",
+            "vol_short_norm",
+            "vol_long_norm",
+            "trend_strength_norm",
+            "shock_flag",
+            "fwd_ret_1",
+            "period_id",
+            "period_train_end_utc",
+            "oof_ok",
+        ],
+    }
+    contract_path = out_path.with_suffix(out_path.suffix + ".contract.json")
+    contract_path.write_text(json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8")
     return out_path
 
 
@@ -315,6 +380,10 @@ def _parse_args(argv: Iterable[str] | None = None) -> SignalExportConfig:
     ap.add_argument("--vol-long-bars", type=int, default=720)
     ap.add_argument("--trend-bars", type=int, default=360)
     ap.add_argument("--shock-k", type=float, default=3.0)
+    ap.add_argument("--raw-mu-for-rl", dest="raw_mu_for_rl", action="store_true", default=True)
+    ap.add_argument("--no-raw-mu-for-rl", dest="raw_mu_for_rl", action="store_false")
+    ap.add_argument("--enforce-oof", dest="enforce_oof", action="store_true", default=True)
+    ap.add_argument("--no-enforce-oof", dest="enforce_oof", action="store_false")
     ns = ap.parse_args(list(argv) if argv is not None else None)
     return SignalExportConfig(
         asset_class=str(ns.asset_class),
@@ -330,6 +399,8 @@ def _parse_args(argv: Iterable[str] | None = None) -> SignalExportConfig:
         vol_long_bars=int(ns.vol_long_bars),
         trend_bars=int(ns.trend_bars),
         shock_k=float(ns.shock_k),
+        raw_mu_for_rl=bool(ns.raw_mu_for_rl),
+        enforce_oof=bool(ns.enforce_oof),
     )
 
 
