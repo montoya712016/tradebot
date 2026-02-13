@@ -318,11 +318,16 @@ def render_feature_studio(
           fig.layout[yName] || {{}},
           {{ domain: [start, end], anchor: xName, visible: true }}
         );
-        newLayout[xName] = Object.assign(
+        const xCfg = Object.assign(
           {{}},
           fig.layout[xName] || {{}},
           {{ domain: [0, 1], anchor: yName, visible: true, showticklabels: r === nRows }}
         );
+        // Keep zoom/pan synchronized across all subplot rows.
+        if (r > 1) {{
+          xCfg.matches = "x";
+        }}
+        newLayout[xName] = xCfg;
       }}
 
       Plotly.react(plotDiv, data, newLayout, {{responsive: true}});

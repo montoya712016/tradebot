@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import sys
+from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
@@ -24,9 +25,10 @@ def _add_repo_paths() -> None:
 _add_repo_paths()
 
 from backtest.single_symbol import SingleSymbolDemoSettings, run  # type: ignore
-from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward  # type: ignore
+from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward, select_entry_mid  # type: ignore
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL  # type: ignore
 from backtest.single_symbol import _default_contract_for_asset  # type: ignore
+from plotting.plotting import plot_backtest_single  # type: ignore
 
 
 def _env_int(name: str, default: int) -> int:
@@ -62,38 +64,261 @@ def _latest_wf_run_dir() -> str | None:
     return str(runs[0])
 
 
+def _simulate_threshold_heuristic(
+    close: np.ndarray,
+    p_long: np.ndarray,
+    p_short: np.ndarray,
+    *,
+    tau: float,
+    fee_side: float,
+    slippage: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    n = int(len(close))
+    if n <= 1:
+        return np.ones(n, dtype=np.float64), np.zeros(n, dtype=np.int8)
+    ret = np.zeros(n, dtype=np.float64)
+    ret[1:] = (close[1:] / np.maximum(close[:-1], 1e-12)) - 1.0
+    # Unifica os dois regressores em um score direcional:
+    # U = long - short_eff
+    # Se short vier negativo (escala assinada), usa módulo para não inflar U por subtração de negativo.
+    short_eff = np.where(p_short < 0.0, np.abs(p_short), p_short)
+    u_score = p_long - short_eff
+    desired = np.zeros(n, dtype=np.int8)
+    desired[u_score >= float(tau)] = 1
+    desired[u_score <= -float(tau)] = -1
+    exposure = desired.astype(np.int8, copy=False)
+    costs = np.zeros(n, dtype=np.float64)
+    turn = np.abs(exposure[1:].astype(np.int16) - exposure[:-1].astype(np.int16)).astype(np.float64, copy=False)
+    costs[1:] = turn * float(fee_side + slippage)
+    strat_ret = np.zeros(n, dtype=np.float64)
+    strat_ret[1:] = exposure[:-1].astype(np.float64, copy=False) * ret[1:] - costs[1:]
+    equity = np.cumprod(1.0 + strat_ret)
+    return equity.astype(np.float64, copy=False), exposure
+
+
+def _trades_from_exposure(index: pd.Index, exposure: np.ndarray):
+    trades = []
+    exp = np.asarray(exposure, dtype=np.int8)
+    if exp.size == 0:
+        return trades
+    cur = int(exp[0])
+    start = 0
+    for i in range(1, int(exp.size)):
+        v = int(exp[i])
+        if v == cur:
+            continue
+        if cur != 0:
+            side = "long" if cur > 0 else "short"
+            trades.append(SimpleNamespace(entry_ts=index[start], exit_ts=index[i], side=side))
+        cur = v
+        start = i
+    if cur != 0 and exp.size > 1:
+        side = "long" if cur > 0 else "short"
+        trades.append(SimpleNamespace(entry_ts=index[start], exit_ts=index[-1], side=side))
+    return trades
+
+
+def _run_heuristic_mode(symbol: str, days: int, total_days_cache: int, run_dir: str | None, plot_out: str, plot_candles: bool) -> None:
+    run_path = Path(run_dir) if run_dir else None
+    if run_path is None or (not run_path.exists()):
+        raise RuntimeError("run_dir WF nao encontrado para modo heuristic")
+    periods = load_period_models(run_path)
+    contract = _default_contract_for_asset("crypto")
+    flags = dict(GLOBAL_FLAGS_FULL)
+    flags["_quiet"] = True
+    cache = ensure_feature_cache(
+        [symbol],
+        total_days=int(total_days_cache),
+        contract=contract,
+        flags=flags,
+        asset_class="crypto",
+    )
+    df = pd.read_parquet(cache[symbol])
+    end_ts = df.index.max()
+    start_ts = end_ts - pd.Timedelta(days=int(days))
+    df = df[df.index >= start_ts].copy()
+    pred_out = predict_scores_walkforward(df, periods=periods, return_period_id=True, return_cls_maps=True)
+    if not isinstance(pred_out, tuple) or len(pred_out) < 2:
+        raise RuntimeError("assinatura inesperada de predict_scores_walkforward")
+    p_entry_long_map = pred_out[0]
+    p_entry_short_map = pred_out[1]
+    p_entry_cls_long_map = pred_out[6] if len(pred_out) >= 8 else {}
+    p_entry_cls_short_map = pred_out[7] if len(pred_out) >= 8 else {}
+    p_long = np.asarray(select_entry_mid(dict(p_entry_long_map)), dtype=np.float64)
+    p_short = np.asarray(select_entry_mid(dict(p_entry_short_map)) if p_entry_short_map else np.zeros_like(p_long), dtype=np.float64)
+    p_gate_long = np.asarray(select_entry_mid(dict(p_entry_cls_long_map)) if p_entry_cls_long_map else np.ones_like(p_long), dtype=np.float64)
+    p_gate_short = np.asarray(select_entry_mid(dict(p_entry_cls_short_map)) if p_entry_cls_short_map else np.ones_like(p_short), dtype=np.float64)
+    p_gate_long = np.clip(np.nan_to_num(p_gate_long, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    p_gate_short = np.clip(np.nan_to_num(p_gate_short, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    p_long_eff = p_long * p_gate_long
+    p_short_eff = p_short * p_gate_short
+    tau = 5.0
+    close = df["close"].to_numpy(dtype=np.float64, copy=False)
+    equity, exposure = _simulate_threshold_heuristic(
+        close,
+        p_long_eff,
+        p_short_eff,
+        tau=tau,
+        fee_side=float(getattr(contract, "fee_pct_per_side", 0.0005)),
+        slippage=float(getattr(contract, "slippage_pct", 0.0001)),
+    )
+    eq_end = float(equity[-1]) if equity.size else 1.0
+    ret_total = eq_end - 1.0
+    dd = 1.0 - (equity / np.maximum.accumulate(equity))
+    max_dd = float(np.nanmax(dd)) if dd.size else 0.0
+    flips = int(np.sum(np.abs(np.diff(exposure.astype(np.int16, copy=False))) > 0))
+    print(
+        f"SINGLE-HEUR sym={symbol} days={days} tau={tau:.1f} "
+        f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={max_dd:.2%} flips={flips}",
+        flush=True,
+    )
+    short_eff = np.where(p_short_eff < 0.0, np.abs(p_short_eff), p_short_eff)
+    u_score = p_long_eff - short_eff
+    entry_sig_long = u_score >= tau
+    entry_sig_short = u_score <= -tau
+    entry_ok = entry_sig_long | entry_sig_short
+    trades = _trades_from_exposure(df.index, exposure)
+    # Plot principal passa a ser o score combinado U (decisão real do heurístico).
+    # Mantemos long/short em mapas auxiliares para inspeção, sem usá-los como gatilho.
+    nan_short = np.full_like(u_score, np.nan, dtype=np.float64)
+    plot_backtest_single(
+        df,
+        trades=trades,
+        equity=equity,
+        p_entry=u_score,
+        p_entry_short=nan_short,
+        p_entry_map={
+            "u_score": np.asarray(u_score, dtype=np.float64),
+            "reg_long": np.asarray(p_long, dtype=np.float64),
+            "reg_short": np.asarray(p_short, dtype=np.float64),
+            "gate_long": np.asarray(p_gate_long, dtype=np.float64),
+            "gate_short": np.asarray(p_gate_short, dtype=np.float64),
+            "score_long": np.asarray(p_long_eff, dtype=np.float64),
+            "score_short": np.asarray(p_short_eff, dtype=np.float64),
+        },
+        p_entry_long_map=None,
+        p_entry_short_map=None,
+        p_danger=np.zeros(len(df), dtype=np.float64),
+        entry_sig=entry_ok,
+        entry_sig_long=entry_sig_long,
+        entry_sig_short=entry_sig_short,
+        danger_sig=np.zeros(len(df), dtype=bool),
+        tau_entry=tau,
+        tau_entry_long=tau,
+        tau_entry_short=tau,
+        tau_danger=1.0,
+        title=f"{symbol} | heuristic U=long-short tau=5 | ret={ret_total:+.2%} | flips={flips}",
+        save_path=plot_out,
+        show=True,
+        ema_exit=None,
+        plot_probs=True,
+        plot_signals=False,
+        plot_candles=bool(plot_candles),
+        probs_simple=False,
+    )
+
+def _run_prediction_only_mode(symbol: str, days: int, total_days_cache: int, run_dir: str | None, plot_out: str, plot_candles: bool) -> None:
+    run_path = Path(run_dir) if run_dir else None
+    if run_path is None or (not run_path.exists()):
+        raise RuntimeError("run_dir WF nao encontrado para modo prediction_only")
+    periods = load_period_models(run_path)
+    contract = _default_contract_for_asset("crypto")
+    flags = dict(GLOBAL_FLAGS_FULL)
+    flags["_quiet"] = True
+    cache = ensure_feature_cache(
+        [symbol],
+        total_days=int(total_days_cache),
+        contract=contract,
+        flags=flags,
+        asset_class="crypto",
+    )
+    df = pd.read_parquet(cache[symbol])
+    end_ts = df.index.max()
+    start_ts = end_ts - pd.Timedelta(days=int(days))
+    df = df[df.index >= start_ts].copy()
+
+    pred_out = predict_scores_walkforward(df, periods=periods, return_period_id=True, return_cls_maps=True)
+    if not isinstance(pred_out, tuple) or len(pred_out) < 2:
+        raise RuntimeError("assinatura inesperada de predict_scores_walkforward")
+    p_entry_long_map = pred_out[0]
+    p_entry_short_map = pred_out[1]
+    p_entry_cls_long_map = pred_out[6] if len(pred_out) >= 8 else {}
+    p_entry_cls_short_map = pred_out[7] if len(pred_out) >= 8 else {}
+
+    p_long = np.asarray(select_entry_mid(dict(p_entry_long_map)), dtype=np.float64)
+    p_short = np.asarray(select_entry_mid(dict(p_entry_short_map)) if p_entry_short_map else np.zeros_like(p_long), dtype=np.float64)
+    p_gate_long = np.asarray(select_entry_mid(dict(p_entry_cls_long_map)) if p_entry_cls_long_map else np.ones_like(p_long), dtype=np.float64)
+    p_gate_short = np.asarray(select_entry_mid(dict(p_entry_cls_short_map)) if p_entry_cls_short_map else np.ones_like(p_short), dtype=np.float64)
+    p_gate_long = np.clip(np.nan_to_num(p_gate_long, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    p_gate_short = np.clip(np.nan_to_num(p_gate_short, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    p_long_eff = p_long * p_gate_long
+    p_short_eff = p_short * p_gate_short
+    short_eff = np.where(p_short_eff < 0.0, np.abs(p_short_eff), p_short_eff)
+    u_score = p_long_eff - short_eff
+
+    n = len(df)
+    equity = np.ones(n, dtype=np.float64)
+    entry_sig_long = np.zeros(n, dtype=bool)
+    entry_sig_short = np.zeros(n, dtype=bool)
+    entry_ok = np.zeros(n, dtype=bool)
+    tau = 5.0
+    nan_short = np.full_like(u_score, np.nan, dtype=np.float64)
+    print(f"SINGLE-PRED sym={symbol} days={days} rows={n}", flush=True)
+    plot_backtest_single(
+        df,
+        trades=[],
+        equity=equity,
+        p_entry=u_score,
+        p_entry_short=nan_short,
+        p_entry_map={
+            "u_score": np.asarray(u_score, dtype=np.float64),
+            "reg_long": np.asarray(p_long, dtype=np.float64),
+            "reg_short": np.asarray(p_short, dtype=np.float64),
+            "gate_long": np.asarray(p_gate_long, dtype=np.float64),
+            "gate_short": np.asarray(p_gate_short, dtype=np.float64),
+            "score_long": np.asarray(p_long_eff, dtype=np.float64),
+            "score_short": np.asarray(p_short_eff, dtype=np.float64),
+        },
+        p_entry_long_map=None,
+        p_entry_short_map=None,
+        p_danger=np.zeros(n, dtype=np.float64),
+        entry_sig=entry_ok,
+        entry_sig_long=entry_sig_long,
+        entry_sig_short=entry_sig_short,
+        danger_sig=np.zeros(n, dtype=bool),
+        tau_entry=tau,
+        tau_entry_long=tau,
+        tau_entry_short=tau,
+        tau_danger=1.0,
+        title=f"{symbol} | prediction_only | rows={n}",
+        save_path=plot_out,
+        show=True,
+        ema_exit=None,
+        plot_probs=True,
+        plot_signals=False,
+        plot_candles=bool(plot_candles),
+        probs_simple=False,
+    )
+
+
 def main() -> None:
     os.environ.setdefault("SNIPER_APPLY_PRED_BIAS", "1")
-    symbol = "STXUSDT"
-    days = 360
+    symbol = "DOGEUSDT"
+    days = 300
     total_days_cache = 0
     run_dir = _latest_wf_run_dir()
     plot_out = "data/generated/plots/crypto_single_symbol.html"
     # True = velas, False = linha de close
     plot_candles = False
-    # BT_MODE=rl (padrao) | backtest | pred_only
-    bt_mode = "rl"
+    # BT_MODE=prediction_only (padrao) | heuristic | backtest | pred_only
+    bt_mode = "prediction_only"
     run_backtest = bt_mode not in {"pred_only", "pred", "scores_only", "scores"}
     print(f"[bt] mode={bt_mode} symbol={symbol} days={days}", flush=True)
-    if bt_mode in {"rl", "rl_backtest", "hybrid_rl"}:
-        from backtest.single_symbol_rl import SingleSymbolRLDemoSettings, run as run_rl  # type: ignore
-
-        rl_settings = SingleSymbolRLDemoSettings(
-            symbol=symbol,
-            days=days,
-            signals_path=None,
-            run_dir=None,
-            checkpoint=None,
-            fold_id=-1,
-            device="auto",
-            plot_out=None,
-            timeline_out=None,
-            show_plot=True,
-            save_plot=True,
-            save_timeline=True,
-            plot_candles=plot_candles,
-        )
-        run_rl(rl_settings)
+    if bt_mode in {"prediction_only", "prediction", "pred_only", "pred", "scores_only", "scores"}:
+        _run_prediction_only_mode(symbol, days, max(total_days_cache, days + 30), run_dir, plot_out, plot_candles)
+        return
+    if bt_mode in {"heuristic", "heur", "simple"}:
+        _run_heuristic_mode(symbol, days, max(total_days_cache, days + 30), run_dir, plot_out, plot_candles)
         return
 
     settings = SingleSymbolDemoSettings(

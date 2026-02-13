@@ -20,7 +20,6 @@ Supporting scripts
 - `train_sniper_wf.py` - walk‑forward training for crypto (uses `modules/train`).  
 - `refresh_sniper_labels.py` - recompute labels in cached features.  
 - `backtest_single_symbol.py` - quick single‑symbol backtest (uses `modules/backtest`).
-- `backtest_single_symbol_rl.py` - single-symbol RL backtest + plot (trades, Q-values, regressors, equity).
 
 Subfolder `binance/`
 --------------------

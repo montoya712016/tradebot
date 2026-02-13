@@ -34,8 +34,15 @@ def main() -> None:
         use_dominant=True,
         dominant_mix=0.50,
         side_mae_penalty=1.25,
-        side_time_penalty=0.35,
-        side_cross_penalty=0.85,
+        side_time_penalty=0.55,
+        side_giveback_penalty=0.65,
+        side_cross_penalty=0.35,
+        side_rev_lookback_min=90,
+        side_chase_penalty=0.90,
+        side_reversal_bonus=0.55,
+        side_confirm_min=20,
+        side_confirm_move=0.0025,
+        side_preconfirm_suppress=0.15,
     )
     refresh_run(settings)
 

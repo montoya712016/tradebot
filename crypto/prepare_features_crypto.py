@@ -139,6 +139,11 @@ def _print_label_stats(df: pd.DataFrame) -> None:
     # Labels usados no treino dos regressors long/short (escala 0..100)
     _print_stats_for("timing_label_long")
     _print_stats_for("timing_label_short")
+    # Novos labels (pipeline supervisionado)
+    _print_stats_for("edge_label_long")
+    _print_stats_for("edge_label_short")
+    _print_stats_for("entry_gate_long")
+    _print_stats_for("entry_gate_short")
 
 
 def _apply_crypto_windows() -> None:
@@ -151,11 +156,6 @@ def _apply_crypto_windows() -> None:
 
 def _build_panels_from_flags(flags: dict[str, bool]) -> list[str]:
     panels = ["candles"]
-    has_non_label_feature = any(
-        bool(v)
-        for k, v in (flags or {}).items()
-        if k not in {"label", "plot_candles"}
-    )
     if flags.get("shitidx"):
         panels.append("shitidx")
     if flags.get("keltner"):
@@ -209,13 +209,7 @@ def _build_panels_from_flags(flags: dict[str, bool]) -> list[str]:
     if flags.get("wick_stats"):
         panels.append("wick_stats")
     if flags.get("label"):
-        # Keep only one label subplot when label is the only enabled block.
-        if not has_non_label_feature:
-            panels.append("label")
-        else:
-            # manter o mesmo layout de `plot_all` (modules/plotting/plotting.py)
-            # para evitar desalinhamento de row -> panel no Feature Studio.
-            panels.extend(["weights", "label", "timing_label"])
+        panels.extend(["weights", "weights_side", "label", "timing_label"])
     return panels
 
 
@@ -274,9 +268,10 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         "breakout": "breakout",
         "mom_short": "mom_short",
         "wick_stats": "wick_stats",
-        "weights": "timing_weight",
-        "label": "timing_label_side",
-        "timing_label": "timing_label_raw",
+        "weights": "edge_weight",
+        "weights_side": "edge_weight",
+        "label": "edge_label",
+        "timing_label": "__hidden__",
     }
 
     trace_meta = []
@@ -293,20 +288,26 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         group = panel_to_group.get(panel, panel)
         tname = str(getattr(tr, "name", "") or "")
         if panel == "label":
-            if tname.endswith("_pct"):
-                group = "timing_label_pct"
+            if tname.startswith("edge_"):
+                group = "edge_label"
+            elif tname.startswith("entry_gate"):
+                group = "entry_gate"
             else:
-                group = "timing_label_side"
-        elif panel == "timing_label":
-            if tname.endswith("_pct"):
-                group = "timing_label_pct"
-            else:
-                group = "timing_label_raw"
+                group = "__hidden__"
         elif panel == "weights":
-            if tname.endswith("_long") or tname.endswith("_short"):
-                group = "timing_weight_side"
+            if tname in {"edge_weight_long", "edge_weight_short", "timing_weight_long", "timing_weight_short"}:
+                group = "edge_weight"
+            elif tname in {"entry_gate_weight", "entry_gate_weight_long", "entry_gate_weight_short", "timing_weight"}:
+                group = "entry_gate_weight"
             else:
-                group = "timing_weight"
+                group = "__hidden__"
+        elif panel == "weights_side":
+            if tname in {"edge_weight_long", "edge_weight_short", "timing_weight_long", "timing_weight_short"}:
+                group = "edge_weight"
+            else:
+                group = "__hidden__"
+        elif panel == "timing_label":
+            group = "__hidden__"
         trace_meta.append(
             {
                 "i": i,
@@ -320,7 +321,7 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
 
     groups = {}
     for tr in trace_meta:
-        if tr["group"] == "price":
+        if tr["group"] in {"price", "__hidden__"}:
             continue
         groups.setdefault(tr["group"], []).append(tr)
     # remove duplicatas por nome dentro de cada grupo (evita sobreplot por painÃ©is redundantes)
@@ -384,7 +385,7 @@ def main() -> None:
 
     # estatistica dos labels (assinado + long/short)
     try:
-        _print_label_stats(df)
+        _print_label_stats(df)  
     except Exception as e:
         print(f"[labels] falhou ao imprimir estatisticas: {type(e).__name__}: {e}", flush=True)
     # opcional: filtra colunas para ficar apenas com as features selecionadas
@@ -396,7 +397,7 @@ def main() -> None:
             if c in {"open", "high", "low", "close", "volume"}:
                 keep.append(c)
                 continue
-            if str(c).startswith(("timing_", "label_", "exit_")):
+            if str(c).startswith(("timing_", "label_", "exit_", "edge_", "entry_gate_")):
                 keep.append(c)
                 continue
             if c in allow_set:

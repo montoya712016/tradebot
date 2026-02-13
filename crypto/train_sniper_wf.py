@@ -29,7 +29,7 @@ from crypto.trade_contract import TradeContract  # type: ignore
 
 # Final run config (single source of truth)
 RUN_DIR_RESUME = ""
-REFRESH_LABELS_BEFORE_TRAIN = True
+REFRESH_LABELS_BEFORE_TRAIN = False
 ENTRY_MODEL_TYPE = "catboost"
 XGB_DEVICE = "cuda:0"
 MCAP_MIN_USD = 100_000_000.0
@@ -44,13 +44,97 @@ MAX_ROWS_ENTRY = 10_000_000
 MIN_SYMBOLS_USED_PER_PERIOD = 60
 
 # Best params from wf_009
-SIDE_MAE_PENALTY = 1.1745451810284482
-SIDE_TIME_PENALTY = 0.09718069303742632
-SIDE_CROSS_PENALTY = 0.7455489524741807
-ENTRY_REG_WEIGHT_ALPHA = 0.5656639957501756
-ENTRY_REG_WEIGHT_POWER = 0.9069364698623656
-ENTRY_REG_BALANCE_DISTANCE_POWER = 0.10547987991936614
-ENTRY_REG_BALANCE_MIN_FRAC = 0.261931245322158
+SIDE_MAE_PENALTY = 1.10
+SIDE_TIME_PENALTY = 0.55
+SIDE_GIVEBACK_PENALTY = 0.65
+SIDE_CROSS_PENALTY = 0.35
+SIDE_REV_LOOKBACK_MIN = 90
+SIDE_CHASE_PENALTY = 0.90
+SIDE_REVERSAL_BONUS = 0.55
+SIDE_CONFIRM_MIN = 20
+SIDE_CONFIRM_MOVE = 0.0025
+SIDE_PRECONFIRM_SUPPRESS = 0.15
+ENTRY_REG_WEIGHT_ALPHA = 0.60
+ENTRY_REG_WEIGHT_POWER = 0.90
+ENTRY_REG_BALANCE_DISTANCE_POWER = 0.10
+ENTRY_REG_BALANCE_MIN_FRAC = 0.25
+ENTRY_REG_LABEL_COL_TEMPLATE = "edge_label_{side}"
+ENTRY_REG_WEIGHT_COL_TEMPLATE = "edge_weight_{side}"
+ENTRY_CLS_ENABLED = True
+ENTRY_CLS_MODEL_TYPE = "catboost"
+ENTRY_CLS_LABEL_COL_TEMPLATE = "entry_gate_{side}"
+ENTRY_CLS_WEIGHT_COL_TEMPLATE = "entry_gate_weight_{side}"
+ENTRY_CLS_POSITIVE_THRESHOLD = 75.0
+ENTRY_CLS_BALANCE_BINS = ()
+ENTRY_CLS_TARGET_POS_RATIO = 0.20
+# Gate: aumentar peso da classe negativa reduz fake positives.
+# Se ficar "duro" demais, aproxime NEG de POS (ex.: 1.8 -> 1.4).
+ENTRY_CLS_POS_WEIGHT = 1.0
+ENTRY_CLS_NEG_WEIGHT = 1.8
+ENTRY_CLS_PARAMS = {
+    "iterations": 1200,
+    "learning_rate": 0.04,
+    "depth": 6,
+    "bootstrap_type": "Bernoulli",
+    "subsample": 0.8,
+    "od_type": "Iter",
+    "od_wait": 200,
+    "verbose": 50,
+}
+ENTRY_CLS_PARAMS_BY_SIDE = {
+    "short": {
+        "iterations": 1400,
+        "learning_rate": 0.035,
+        "depth": 6,
+        "bootstrap_type": "Bernoulli",
+        "subsample": 0.75,
+        "od_wait": 220,
+    },
+    "long": {
+        "iterations": 1200,
+        "learning_rate": 0.04,
+        "depth": 6,
+        "bootstrap_type": "Bernoulli",
+        "subsample": 0.8,
+        "od_wait": 200,
+    },
+}
+
+# Hiperparâmetros base (catboost)
+ENTRY_PARAMS = {
+    "iterations": 1800,
+    "learning_rate": 0.04,
+    "depth": 7,
+    "subsample": 0.8,
+    "l2_leaf_reg": 6.0,
+    "eval_metric": "RMSE",
+    "od_type": "Iter",
+    "od_wait": 250,
+    "verbose": 50,
+}
+
+# Short tende a overfitar mais: configuração mais conservadora
+ENTRY_PARAMS_BY_SIDE = {
+    "short": {
+        "iterations": 2400,
+        "learning_rate": 0.025,
+        "depth": 6,
+        "subsample": 0.7,
+        "l2_leaf_reg": 12.0,
+        "bagging_temperature": 1.0,
+        "od_type": "Iter",
+        "od_wait": 300,
+    },
+    "long": {
+        "iterations": 1800,
+        "learning_rate": 0.04,
+        "depth": 7,
+        "subsample": 0.8,
+        "l2_leaf_reg": 6.0,
+        "od_type": "Iter",
+        "od_wait": 250,
+    },
+}
 
 
 def _set_default_env() -> None:
@@ -63,8 +147,10 @@ def _set_default_env() -> None:
     # tuned for ~40GB RAM
     os.environ.setdefault("SNIPER_CACHE_WORKERS", "8")
     os.environ.setdefault("SNIPER_DATASET_WORKERS", "4")
+    os.environ.setdefault("SNIPER_LABELS_REFRESH_WORKERS", "16")
     os.environ.setdefault("SNIPER_POOL_READERS", "4")
     os.environ.setdefault("SNIPER_POOL_CHUNK_ROWS", "150000")
+    os.environ.setdefault("SNIPER_POOL_BUILD_WORKERS", "4")
     os.environ.setdefault("SNIPER_DS_DEBUG", "0")
     os.environ.setdefault("SNIPER_LABEL_CENTER", "1")
     os.environ.setdefault("SNIPER_TIMING_USE_DOMINANT", "1")
@@ -81,6 +167,25 @@ def _set_default_env() -> None:
     os.environ.setdefault("SNIPER_TAIL_WEIGHT_MULT", "2")
     os.environ.setdefault("SNIPER_WEIGHT_MAX_MULT", "4")
     os.environ.setdefault("SNIPER_ENABLE_REG_SHAPE_WEIGHT", "1")
+    # Classificador de gate: evitar forcar probs para ~0.5
+    os.environ.setdefault("SNIPER_ENTRY_CLS_AUTO_CLASS_WEIGHTS", "")
+    os.environ.setdefault("SNIPER_ENTRY_CLS_AUTO_POS_WEIGHT", "0")
+    os.environ.setdefault("SNIPER_ENABLE_CLS_CALIB", "1")
+    # nao rebalancear por peso para 50/50 (queremos classe 0 dominante)
+    os.environ.setdefault("SNIPER_CLS_BALANCE_CLASS_WEIGHT", "0")
+    # Labels de gate mais seletivos (maior raridade/precisao):
+    # - horizonte menor
+    # - TP mais alto
+    # - SL mais apertado
+    os.environ.setdefault("SNIPER_ENTRY_GATE_TMAX_MIN", "240")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_TP_PCT", "0.03")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_SL_PCT", "0.006")
+    # Thermal guard (pausa treino se CPU/GPU aquecer demais)
+    os.environ.setdefault("SNIPER_THERMAL_GUARD", "1")
+    os.environ.setdefault("SNIPER_THERMAL_MAX_TEMP_C", "80")
+    os.environ.setdefault("SNIPER_THERMAL_RESUME_BELOW_C", "70")
+    os.environ.setdefault("SNIPER_THERMAL_CHECK_EVERY_S", "10")
+    os.environ.setdefault("SNIPER_THERMAL_COOLDOWN_S", "15")
 
 
 def _build_offsets() -> tuple[int, ...]:
@@ -123,7 +228,14 @@ def _refresh_labels() -> None:
         dominant_mix=0.50,
         side_mae_penalty=float(SIDE_MAE_PENALTY),
         side_time_penalty=float(SIDE_TIME_PENALTY),
+        side_giveback_penalty=float(SIDE_GIVEBACK_PENALTY),
         side_cross_penalty=float(SIDE_CROSS_PENALTY),
+        side_rev_lookback_min=int(SIDE_REV_LOOKBACK_MIN),
+        side_chase_penalty=float(SIDE_CHASE_PENALTY),
+        side_reversal_bonus=float(SIDE_REVERSAL_BONUS),
+        side_confirm_min=int(SIDE_CONFIRM_MIN),
+        side_confirm_move=float(SIDE_CONFIRM_MOVE),
+        side_preconfirm_suppress=float(SIDE_PRECONFIRM_SUPPRESS),
         verbose=True,
     )
     out = refresh_labels(settings)
@@ -175,6 +287,8 @@ def main() -> None:
         offsets_step_days=int(OFFSET_STEP_DAYS),
         offsets_days=offsets,
         entry_model_type=str(ENTRY_MODEL_TYPE),
+        entry_params=dict(ENTRY_PARAMS),
+        entry_params_by_side=dict(ENTRY_PARAMS_BY_SIDE),
         xgb_device=str(XGB_DEVICE),
         entry_reg_window_min=60,
         entry_reg_weight_alpha=float(ENTRY_REG_WEIGHT_ALPHA),
@@ -185,6 +299,19 @@ def main() -> None:
         entry_label_mode="split_0_100",
         entry_label_scale=100.0,
         entry_sides=("long", "short"),
+        entry_reg_label_col_template=str(ENTRY_REG_LABEL_COL_TEMPLATE),
+        entry_reg_weight_col_template=str(ENTRY_REG_WEIGHT_COL_TEMPLATE),
+        entry_cls_enabled=bool(ENTRY_CLS_ENABLED),
+        entry_cls_model_type=str(ENTRY_CLS_MODEL_TYPE),
+        entry_cls_label_col_template=str(ENTRY_CLS_LABEL_COL_TEMPLATE),
+        entry_cls_weight_col_template=str(ENTRY_CLS_WEIGHT_COL_TEMPLATE),
+        entry_cls_positive_threshold=float(ENTRY_CLS_POSITIVE_THRESHOLD),
+        entry_cls_balance_bins=tuple(float(x) for x in ENTRY_CLS_BALANCE_BINS),
+        entry_cls_target_pos_ratio=float(ENTRY_CLS_TARGET_POS_RATIO),
+        entry_cls_pos_weight=float(ENTRY_CLS_POS_WEIGHT),
+        entry_cls_neg_weight=float(ENTRY_CLS_NEG_WEIGHT),
+        entry_cls_params=dict(ENTRY_CLS_PARAMS),
+        entry_cls_params_by_side=dict(ENTRY_CLS_PARAMS_BY_SIDE),
         max_rows_entry=int(MAX_ROWS_ENTRY),
         abort_ram_pct=85.0,
         entry_pool_full=True,

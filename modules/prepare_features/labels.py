@@ -22,7 +22,7 @@ if "NUMBA_CACHE_DIR" not in os.environ:
 # ===== TIMING-ADJUSTED REGRESSION LABEL =====
 # Label de regressão que penaliza entradas antecipadas
 # Janela maior para capturar swings mais amplos (ex.: 360m = 6h)
-TIMING_HORIZON_PROFIT = 360   # minutos à frente para lucro médio realizável
+TIMING_HORIZON_PROFIT = 360   # minutos à frente para qualidade da entrada
 TIMING_K_LOOKAHEAD = 10       # minutos à frente para procurar pontos melhores
 TIMING_TOP_N = 3              # quantidade de melhores pontos futuros
 TIMING_ALPHA = 0.0            # peso da penalização por ponto melhor à frente (0 = sem penalização)
@@ -37,9 +37,29 @@ TIMING_LABEL_SCALE = 100.0    # escala dos labels long/short (0..100)
 TIMING_WEIGHT_VOL_MULT = 1.0  # multiplicador de peso por volatilidade
 TIMING_WEIGHT_MIN = 0.1       # peso mínimo para evitar zeros
 TIMING_WEIGHT_MAX = 10.0      # peso máximo para evitar dominância
-TIMING_SIDE_MAE_PENALTY = 1.25  # penaliza excursão adversa antes do melhor ponto
-TIMING_SIDE_TIME_PENALTY = 0.35  # penaliza demora para atingir o melhor ponto
-TIMING_SIDE_CROSS_PENALTY = 0.85  # penaliza um lado quando o retorno medio do lado oposto domina
+TIMING_SIDE_MAE_PENALTY = 1.10
+TIMING_SIDE_TIME_PENALTY = 0.55
+TIMING_SIDE_GIVEBACK_PENALTY = 0.65
+TIMING_SIDE_CROSS_PENALTY = 0.35
+TIMING_SIDE_REV_LOOKBACK_MIN = 90
+TIMING_SIDE_CHASE_PENALTY = 0.90
+TIMING_SIDE_REVERSAL_BONUS = 0.55
+TIMING_SIDE_CONFIRM_MIN = 20
+TIMING_SIDE_CONFIRM_MOVE = 0.0025
+TIMING_SIDE_PRECONF_SUPPRESS = 0.15
+
+# ===== EDGE + GATES (SUPERVISED PIPELINE) =====
+# Edge labels: potencial de lucro (MFE) menos risco (MAE) dentro de um horizonte.
+EDGE_HORIZON_MIN = 720
+EDGE_DD_LAMBDA = 1.0
+EDGE_LABEL_CLIP = 0.20
+EDGE_LABEL_SCALE = 100.0
+
+# Entry gates: 1 quando existe TP antes de "estourar" SL (aprox. por MFE/MAE dentro do horizonte).
+ENTRY_GATE_TMAX_MIN = 720
+ENTRY_GATE_TP_PCT = 0.02
+ENTRY_GATE_SL_PCT = 0.01
+ENTRY_GATE_SCALE = 100.0
 
 
 @njit(cache=True)
@@ -65,6 +85,216 @@ def _compute_profit_now(close: np.ndarray, idx: int, horizon: int) -> float:
     if count == 0:
         return 0.0
     return total_ret / float(count)
+
+
+@njit(cache=True)
+def _future_window_max_min_numba(close: np.ndarray, horizon_bars: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Para cada i, retorna:
+      - fmax[i] = max(close[i+1 : i+1+horizon])
+      - fmin[i] = min(close[i+1 : i+1+horizon])
+
+    Implementação O(n) com filas monotônicas no domínio reverso (evita cópia do array).
+    """
+    n = close.size
+    fmax_rev = np.empty(n, np.float32)
+    fmin_rev = np.empty(n, np.float32)
+    for j in range(n):
+        fmax_rev[j] = np.nan
+        fmin_rev[j] = np.nan
+    if n == 0 or horizon_bars <= 0:
+        out_max = np.empty(n, np.float32)
+        out_min = np.empty(n, np.float32)
+        for i in range(n):
+            out_max[i] = np.nan
+            out_min[i] = np.nan
+        return out_max, out_min
+
+    dq_max = np.empty(n, np.int64)
+    dq_min = np.empty(n, np.int64)
+    hmax = 0
+    tmax = 0
+    hmin = 0
+    tmin = 0
+
+    for j in range(n):
+        lim = j - horizon_bars
+        while hmax < tmax and dq_max[hmax] < lim:
+            hmax += 1
+        while hmin < tmin and dq_min[hmin] < lim:
+            hmin += 1
+
+        if hmax < tmax:
+            fmax_rev[j] = np.float32(close[n - 1 - dq_max[hmax]])
+        else:
+            fmax_rev[j] = np.nan
+        if hmin < tmin:
+            fmin_rev[j] = np.float32(close[n - 1 - dq_min[hmin]])
+        else:
+            fmin_rev[j] = np.nan
+
+        vj = close[n - 1 - j]
+        while hmax < tmax:
+            idx = dq_max[tmax - 1]
+            if close[n - 1 - idx] <= vj:
+                tmax -= 1
+            else:
+                break
+        dq_max[tmax] = j
+        tmax += 1
+
+        while hmin < tmin:
+            idx = dq_min[tmin - 1]
+            if close[n - 1 - idx] >= vj:
+                tmin -= 1
+            else:
+                break
+        dq_min[tmin] = j
+        tmin += 1
+
+    out_max = np.empty(n, np.float32)
+    out_min = np.empty(n, np.float32)
+    for i in range(n):
+        out_max[i] = fmax_rev[n - 1 - i]
+        out_min[i] = fmin_rev[n - 1 - i]
+    return out_max, out_min
+
+
+@njit(cache=True)
+def _compute_edge_labels_numba(
+    close: np.ndarray,
+    horizon_bars: int,
+    dd_lambda: float,
+    clip_pct: float,
+    scale: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    fmax, fmin = _future_window_max_min_numba(close, horizon_bars)
+    n = close.size
+    out_long = np.zeros(n, np.float32)
+    out_short = np.zeros(n, np.float32)
+    for i in range(n):
+        px0 = close[i]
+        if not np.isfinite(px0) or px0 <= 0.0:
+            continue
+        mx = float(fmax[i])
+        mn = float(fmin[i])
+        if (not np.isfinite(mx)) or mx <= 0.0:
+            mx = px0
+        if (not np.isfinite(mn)) or mn <= 0.0:
+            mn = px0
+
+        # long: MFE - lambda*MAE
+        mfe_l = (mx / px0) - 1.0
+        mae_l = 1.0 - (mn / px0)
+        if mae_l < 0.0:
+            mae_l = 0.0
+        score_l = mfe_l - dd_lambda * mae_l
+        if score_l < 0.0:
+            score_l = 0.0
+
+        # short: MFE(short) - lambda*MAE(short)
+        mfe_s = (px0 / mn) - 1.0
+        mae_s = (mx / px0) - 1.0
+        if mae_s < 0.0:
+            mae_s = 0.0
+        score_s = mfe_s - dd_lambda * mae_s
+        if score_s < 0.0:
+            score_s = 0.0
+
+        if clip_pct > 0.0:
+            if score_l > clip_pct:
+                score_l = clip_pct
+            if score_s > clip_pct:
+                score_s = clip_pct
+            out_long[i] = np.float32((score_l / clip_pct) * scale)
+            out_short[i] = np.float32((score_s / clip_pct) * scale)
+        else:
+            out_long[i] = np.float32(score_l * scale)
+            out_short[i] = np.float32(score_s * scale)
+    return out_long, out_short
+
+
+@njit(cache=True)
+def _future_window_mean_numba(close: np.ndarray, horizon_bars: int) -> np.ndarray:
+    """
+    Media de close na janela futura [i+1 .. i+horizon_bars], ignorando nao-finitos.
+    """
+    n = close.size
+    out = np.zeros(n, np.float32)
+    csum = np.zeros(n + 1, np.float64)
+    ccnt = np.zeros(n + 1, np.int64)
+    for i in range(n):
+        v = close[i]
+        csum[i + 1] = csum[i]
+        ccnt[i + 1] = ccnt[i]
+        if np.isfinite(v):
+            csum[i + 1] += float(v)
+            ccnt[i + 1] += 1
+    for i in range(n):
+        s = i + 1
+        e = i + 1 + horizon_bars
+        if e > n:
+            e = n
+        if s >= e:
+            out[i] = np.float32(close[i]) if np.isfinite(close[i]) else np.float32(0.0)
+            continue
+        tot = csum[e] - csum[s]
+        cnt = ccnt[e] - ccnt[s]
+        if cnt <= 0:
+            out[i] = np.float32(close[i]) if np.isfinite(close[i]) else np.float32(0.0)
+        else:
+            out[i] = np.float32(tot / float(cnt))
+    return out
+
+
+@njit(cache=True)
+def _compute_entry_gate_labels_numba(
+    close: np.ndarray,
+    horizon_bars: int,
+    tp_pct: float,
+    sl_pct: float,
+    scale: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    fmax, fmin = _future_window_max_min_numba(close, horizon_bars)
+    fmean = _future_window_mean_numba(close, horizon_bars)
+    n = close.size
+    out_long = np.zeros(n, np.float32)
+    out_short = np.zeros(n, np.float32)
+    for i in range(n):
+        px0 = close[i]
+        if not np.isfinite(px0) or px0 <= 0.0:
+            continue
+        mx = float(fmax[i])
+        mn = float(fmin[i])
+        if (not np.isfinite(mx)) or mx <= 0.0:
+            mx = px0
+        if (not np.isfinite(mn)) or mn <= 0.0:
+            mn = px0
+
+        # long gate:
+        # - TP via media futura (evita positivo por pico isolado)
+        # - SL via minimo futuro (adversidade real)
+        mean_px = float(fmean[i])
+        if (not np.isfinite(mean_px)) or mean_px <= 0.0:
+            mean_px = px0
+        tp_l = (mean_px / px0) - 1.0
+        mae_l = 1.0 - (mn / px0)
+        if mae_l < 0.0:
+            mae_l = 0.0
+        if tp_l >= tp_pct and mae_l <= sl_pct:
+            out_long[i] = np.float32(scale)
+
+        # short gate:
+        # - TP via media futura (evita positivo por fundo isolado)
+        # - SL via maximo futuro (adversidade real)
+        tp_s = (px0 / mean_px) - 1.0 if mean_px > 0.0 else 0.0
+        mae_s = (mx / px0) - 1.0
+        if mae_s < 0.0:
+            mae_s = 0.0
+        if tp_s >= tp_pct and mae_s <= sl_pct:
+            out_short[i] = np.float32(scale)
+
+    return out_long, out_short
 
 
 @njit(cache=True)
@@ -281,16 +511,26 @@ def _compute_timing_weights_numba(
 def _compute_side_labels_from_future_excursion_numba(
     close: np.ndarray,
     horizon_bars: int,
+    rev_lookback_bars: int,
     label_clip: float,
     side_mae_penalty: float,
     side_time_penalty: float,
+    side_giveback_penalty: float,
     side_cross_penalty: float,
+    side_chase_penalty: float,
+    side_reversal_bonus: float,
+    confirm_bars: int,
+    confirm_move: float,
+    preconfirm_suppress: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Calcula labels por lado com foco em retorno medio esperado (nao melhor caso).
-    - long_base: media de PnL long futuro no horizonte, truncada em >= 0
-    - short_base: media de PnL short futuro no horizonte, truncada em >= 0
-    Depois aplica penalidade de arrependimento por excursao adversa antes do melhor ponto.
+    Calcula labels por lado com foco em qualidade da entrada no horizonte.
+    Score por lado:
+      quality = MFE
+                - mae_penalty * MAE_ate_pico
+                - time_penalty * (MFE * frac_tempo_ate_pico)
+                - giveback_penalty * giveback_ate_fim
+                - cross_penalty * MFE_lado_oposto
     """
     n = close.size
     long_raw = np.zeros(n, np.float32)
@@ -310,83 +550,150 @@ def _compute_side_labels_from_future_excursion_numba(
         hlen = end_idx - i
         long_pnls = np.zeros(hlen, np.float64)
         short_pnls = np.zeros(hlen, np.float64)
-        best_long = -1e18
-        best_long_idx = -1
-        best_short = -1e18
-        best_short_idx = -1
-        sum_long = 0.0
-        sum_short = 0.0
         valid = 0
-
-        k = 0
         for j in range(i + 1, end_idx + 1):
             pxj = close[j]
             if not np.isfinite(pxj) or pxj <= 0.0:
-                long_pnls[k] = 0.0
-                short_pnls[k] = 0.0
-                k += 1
+                long_pnls[valid] = 0.0
+                short_pnls[valid] = 0.0
+                valid += 1
                 continue
             long_pnl = (pxj / px0) - 1.0
             short_pnl = (px0 / pxj) - 1.0
-            long_pnls[k] = long_pnl
-            short_pnls[k] = short_pnl
-            sum_long += long_pnl
-            sum_short += short_pnl
+            long_pnls[valid] = long_pnl
+            short_pnls[valid] = short_pnl
             valid += 1
-            if long_pnl > best_long:
-                best_long = long_pnl
-                best_long_idx = k + 1
-            if short_pnl > best_short:
-                best_short = short_pnl
-                best_short_idx = k + 1
-            k += 1
 
         if valid <= 0:
             continue
 
-        long_base = sum_long / float(valid)
-        if long_base < 0.0:
-            long_base = 0.0
-        short_base = sum_short / float(valid)
-        if short_base < 0.0:
-            short_base = 0.0
+        # contexto recente para favorecer reversão e punir "chasing"
+        prev_min = 1e18
+        prev_max = -1e18
+        lb = max(0, i - max(1, int(rev_lookback_bars)))
+        has_prev = False
+        for j in range(lb, i):
+            pxp = close[j]
+            if not np.isfinite(pxp) or pxp <= 0.0:
+                continue
+            has_prev = True
+            if pxp < prev_min:
+                prev_min = pxp
+            if pxp > prev_max:
+                prev_max = pxp
+        # move de alta já ocorrido até o candle de entrada (chasing long)
+        prev_rise_into_entry = 0.0
+        # move de baixa já ocorrido até o candle de entrada (chasing short)
+        prev_drop_into_entry = 0.0
+        if has_prev:
+            if prev_min > 0.0:
+                prev_rise_into_entry = (px0 / prev_min) - 1.0
+                if prev_rise_into_entry < 0.0:
+                    prev_rise_into_entry = 0.0
+            if px0 > 0.0 and prev_max > 0.0:
+                prev_drop_into_entry = (prev_max / px0) - 1.0
+                if prev_drop_into_entry < 0.0:
+                    prev_drop_into_entry = 0.0
 
-        long_val = 0.0
-        if long_base > 0.0 and best_long_idx > 0:
-            mae_before = 0.0
-            for t in range(best_long_idx):
+        # confirmação curta de reversão logo após a entrada.
+        # evita label alto "cedo demais" durante movimento contrário ainda vivo.
+        conf_n = min(valid, max(1, int(confirm_bars)))
+        max_up_early = 0.0
+        max_dn_early = 0.0
+        for t in range(conf_n):
+            lp = long_pnls[t]
+            sp = short_pnls[t]
+            if lp > max_up_early:
+                max_up_early = lp
+            if sp > max_dn_early:
+                max_dn_early = sp
+        long_confirm = 0.0
+        short_confirm = 0.0
+        if max_up_early >= confirm_move and max_up_early >= (0.6 * max_dn_early):
+            long_confirm = 1.0
+        if max_dn_early >= confirm_move and max_dn_early >= (0.6 * max_up_early):
+            short_confirm = 1.0
+
+        # --- long quality ---
+        best_long = -1e18
+        best_long_idx = -1
+        for t in range(valid):
+            pnl_t = long_pnls[t]
+            if pnl_t > best_long:
+                best_long = pnl_t
+                best_long_idx = t
+        long_mfe = best_long if best_long > 0.0 else 0.0
+        long_mae = 0.0
+        long_giveback = 0.0
+        if long_mfe > 0.0 and best_long_idx >= 0:
+            for t in range(best_long_idx + 1):
                 pnl_t = long_pnls[t]
                 if pnl_t < 0.0:
                     dd = -pnl_t
-                    if dd > mae_before:
-                        mae_before = dd
-            time_frac = float(best_long_idx) / float(hlen if hlen > 0 else 1)
-            penalty = side_mae_penalty * mae_before + side_time_penalty * (long_base * time_frac)
-            long_val = long_base - penalty
+                    if dd > long_mae:
+                        long_mae = dd
+            pnl_end = long_pnls[valid - 1]
+            gb = long_mfe - pnl_end
+            if gb > 0.0:
+                long_giveback = gb
+        long_time_frac = float(best_long_idx + 1) / float(valid if valid > 0 else 1)
+        long_val = (
+            long_mfe
+            - side_mae_penalty * long_mae
+            - side_time_penalty * (long_mfe * long_time_frac)
+            - side_giveback_penalty * long_giveback
+        )
+        # reversão long: bônus após queda recente; penalidade por entrar atrasado em alta esticada
+        long_val = long_val + side_reversal_bonus * prev_drop_into_entry - side_chase_penalty * prev_rise_into_entry
 
-        short_val = 0.0
-        if short_base > 0.0 and best_short_idx > 0:
-            mae_before_short = 0.0
-            for t in range(best_short_idx):
+        # --- short quality ---
+        best_short = -1e18
+        best_short_idx = -1
+        for t in range(valid):
+            pnl_t = short_pnls[t]
+            if pnl_t > best_short:
+                best_short = pnl_t
+                best_short_idx = t
+        short_mfe = best_short if best_short > 0.0 else 0.0
+        short_mae = 0.0
+        short_giveback = 0.0
+        if short_mfe > 0.0 and best_short_idx >= 0:
+            for t in range(best_short_idx + 1):
                 pnl_t = short_pnls[t]
                 if pnl_t < 0.0:
                     dd = -pnl_t
-                    if dd > mae_before_short:
-                        mae_before_short = dd
-            time_frac = float(best_short_idx) / float(hlen if hlen > 0 else 1)
-            penalty = side_mae_penalty * mae_before_short + side_time_penalty * (short_base * time_frac)
-            short_val = short_base - penalty
+                    if dd > short_mae:
+                        short_mae = dd
+            pnl_end = short_pnls[valid - 1]
+            gb = short_mfe - pnl_end
+            if gb > 0.0:
+                short_giveback = gb
+        short_time_frac = float(best_short_idx + 1) / float(valid if valid > 0 else 1)
+        short_val = (
+            short_mfe
+            - side_mae_penalty * short_mae
+            - side_time_penalty * (short_mfe * short_time_frac)
+            - side_giveback_penalty * short_giveback
+        )
+        # reversão short: bônus após alta recente; penalidade por entrar atrasado em queda esticada
+        short_val = short_val + side_reversal_bonus * prev_rise_into_entry - side_chase_penalty * prev_drop_into_entry
 
         if long_val < 0.0:
             long_val = 0.0
         if short_val < 0.0:
             short_val = 0.0
 
-        # Penalizacao cruzada: evita manter label alto no lado "perdedor"
-        # quando o retorno medio do lado oposto ja domina (reversao).
+        # sem confirmação precoce, comprime fortemente o label (não zera total para manter sinal fraco)
+        if long_confirm < 0.5:
+            long_val = long_val * preconfirm_suppress
+        if short_confirm < 0.5:
+            short_val = short_val * preconfirm_suppress
+
+        # Penalizacao cruzada: reduz score do lado quando o lado oposto
+        # tambem teve oportunidade forte no mesmo horizonte.
         if side_cross_penalty > 0.0:
-            long_val = long_val - side_cross_penalty * short_base
-            short_val = short_val - side_cross_penalty * long_base
+            long_val = long_val - side_cross_penalty * short_mfe
+            short_val = short_val - side_cross_penalty * long_mfe
             if long_val < 0.0:
                 long_val = 0.0
             if short_val < 0.0:
@@ -424,7 +731,25 @@ def apply_timing_regression_labels(
     dominant_mix: float | None = None,
     side_mae_penalty: float | None = None,
     side_time_penalty: float | None = None,
+    side_giveback_penalty: float | None = None,
     side_cross_penalty: float | None = None,
+    side_rev_lookback_min: int | None = None,
+    side_chase_penalty: float | None = None,
+    side_reversal_bonus: float | None = None,
+    side_confirm_min: int | None = None,
+    side_confirm_move: float | None = None,
+    side_preconfirm_suppress: float | None = None,
+    # edge + gates (pipeline supervisionado)
+    compute_edge_labels: bool | None = None,
+    edge_horizon_min: int | None = None,
+    edge_dd_lambda: float | None = None,
+    edge_clip: float | None = None,
+    edge_scale: float | None = None,
+    compute_entry_gates: bool | None = None,
+    entry_gate_tmax_min: int | None = None,
+    entry_gate_tp_pct: float | None = None,
+    entry_gate_sl_pct: float | None = None,
+    entry_gate_scale: float | None = None,
 ) -> pd.DataFrame:
     """
     Aplica labels de regressão ajustados a timing.
@@ -443,7 +768,14 @@ def apply_timing_regression_labels(
     sm_temp = softmax_temp if softmax_temp is not None else TIMING_SOFTMAX_TEMP
     side_mae = float(side_mae_penalty) if side_mae_penalty is not None else float(TIMING_SIDE_MAE_PENALTY)
     side_time = float(side_time_penalty) if side_time_penalty is not None else float(TIMING_SIDE_TIME_PENALTY)
+    side_giveback = float(side_giveback_penalty) if side_giveback_penalty is not None else float(TIMING_SIDE_GIVEBACK_PENALTY)
     side_cross = float(side_cross_penalty) if side_cross_penalty is not None else float(TIMING_SIDE_CROSS_PENALTY)
+    side_rev_lb_min = int(side_rev_lookback_min) if side_rev_lookback_min is not None else int(TIMING_SIDE_REV_LOOKBACK_MIN)
+    side_chase = float(side_chase_penalty) if side_chase_penalty is not None else float(TIMING_SIDE_CHASE_PENALTY)
+    side_rev_bonus = float(side_reversal_bonus) if side_reversal_bonus is not None else float(TIMING_SIDE_REVERSAL_BONUS)
+    side_confirm_min_v = int(side_confirm_min) if side_confirm_min is not None else int(TIMING_SIDE_CONFIRM_MIN)
+    side_confirm_move_v = float(side_confirm_move) if side_confirm_move is not None else float(TIMING_SIDE_CONFIRM_MOVE)
+    side_preconfirm_sup = float(side_preconfirm_suppress) if side_preconfirm_suppress is not None else float(TIMING_SIDE_PRECONF_SUPPRESS)
     if use_dominant is None:
         env_dom = os.getenv("SNIPER_TIMING_USE_DOMINANT", "").strip().lower()
         if env_dom:
@@ -468,6 +800,8 @@ def apply_timing_regression_labels(
     horizon_bars = max(1, int(round(float(horizon) * bars_per_min)))
     k_bars = max(1, int(round(float(k_look) * bars_per_min)))
     vol_bars = max(1, int(round(float(vol_win) * bars_per_min)))
+    side_rev_lb_bars = max(1, int(round(float(side_rev_lb_min) * bars_per_min)))
+    side_confirm_bars = max(1, int(round(float(side_confirm_min_v) * bars_per_min)))
 
     close = df["close"].to_numpy(np.float64, copy=False)
     labels, profit_now = _compute_timing_adjusted_label_numba(
@@ -517,10 +851,17 @@ def apply_timing_regression_labels(
     label_long_raw, label_short_raw = _compute_side_labels_from_future_excursion_numba(
         close,
         horizon_bars,
+        side_rev_lb_bars,
         clip_f,
         float(side_mae),
         float(side_time),
+        float(side_giveback),
         float(side_cross),
+        float(side_chase),
+        float(side_rev_bonus),
+        int(side_confirm_bars),
+        float(side_confirm_move_v),
+        float(side_preconfirm_sup),
     )
     label_long = (label_long_raw / clip_f * scale).astype(np.float32, copy=False)
     label_short = (label_short_raw / clip_f * scale).astype(np.float32, copy=False)
@@ -551,6 +892,57 @@ def apply_timing_regression_labels(
     df["timing_label_short"] = pd.Series(label_short, index=df.index)
     df["timing_weight_long"] = pd.Series(weights_long.astype(np.float32), index=df.index)
     df["timing_weight_short"] = pd.Series(weights_short.astype(np.float32), index=df.index)
+    # Aliases explicitos por tarefa para evitar ambiguidade no treino.
+    # Regressor (edge) e classificador (entry gate) podem evoluir depois
+    # para pesos diferentes sem quebrar contrato de colunas.
+    df["edge_weight_long"] = pd.Series(weights_long.astype(np.float32), index=df.index)
+    df["edge_weight_short"] = pd.Series(weights_short.astype(np.float32), index=df.index)
+    df["entry_gate_weight_long"] = pd.Series(weights_long.astype(np.float32), index=df.index)
+    df["entry_gate_weight_short"] = pd.Series(weights_short.astype(np.float32), index=df.index)
+    df["entry_gate_weight"] = pd.Series(weights.astype(np.float32), index=df.index)
+
+    # ===== Edge labels (regressor) + Entry gates (classificador) =====
+    if compute_edge_labels is None:
+        v = os.getenv("SNIPER_COMPUTE_EDGE_LABELS", "").strip().lower()
+        compute_edge_labels = not bool(v) or v not in {"0", "false", "no", "off"}
+    if compute_entry_gates is None:
+        v = os.getenv("SNIPER_COMPUTE_ENTRY_GATES", "").strip().lower()
+        compute_entry_gates = not bool(v) or v not in {"0", "false", "no", "off"}
+
+    if bool(compute_edge_labels) or bool(compute_entry_gates):
+        edge_h_min = int(edge_horizon_min) if edge_horizon_min is not None else int(os.getenv("SNIPER_EDGE_HORIZON_MIN", str(int(EDGE_HORIZON_MIN))) or EDGE_HORIZON_MIN)
+        edge_clip_use = float(edge_clip) if edge_clip is not None else float(os.getenv("SNIPER_EDGE_CLIP", str(float(EDGE_LABEL_CLIP))) or EDGE_LABEL_CLIP)
+        edge_scale_use = float(edge_scale) if edge_scale is not None else float(os.getenv("SNIPER_EDGE_SCALE", str(float(EDGE_LABEL_SCALE))) or EDGE_LABEL_SCALE)
+        dd_lam = float(edge_dd_lambda) if edge_dd_lambda is not None else float(os.getenv("SNIPER_EDGE_LAMBDA_DD", str(float(EDGE_DD_LAMBDA))) or EDGE_DD_LAMBDA)
+        gate_tmax = int(entry_gate_tmax_min) if entry_gate_tmax_min is not None else int(os.getenv("SNIPER_ENTRY_GATE_TMAX_MIN", str(int(ENTRY_GATE_TMAX_MIN))) or ENTRY_GATE_TMAX_MIN)
+        gate_tp = float(entry_gate_tp_pct) if entry_gate_tp_pct is not None else float(os.getenv("SNIPER_ENTRY_GATE_TP_PCT", str(float(ENTRY_GATE_TP_PCT))) or ENTRY_GATE_TP_PCT)
+        gate_sl = float(entry_gate_sl_pct) if entry_gate_sl_pct is not None else float(os.getenv("SNIPER_ENTRY_GATE_SL_PCT", str(float(ENTRY_GATE_SL_PCT))) or ENTRY_GATE_SL_PCT)
+        gate_scale_use = float(entry_gate_scale) if entry_gate_scale is not None else float(os.getenv("SNIPER_ENTRY_GATE_SCALE", str(float(ENTRY_GATE_SCALE))) or ENTRY_GATE_SCALE)
+
+        edge_h_bars = int(max(1, round(float(edge_h_min) * 60.0 / float(candle_sec))))
+        gate_h_bars = int(max(1, round(float(gate_tmax) * 60.0 / float(candle_sec))))
+
+        if bool(compute_edge_labels):
+            edge_long, edge_short = _compute_edge_labels_numba(
+                close,
+                int(edge_h_bars),
+                float(dd_lam),
+                float(edge_clip_use),
+                float(edge_scale_use),
+            )
+            df["edge_label_long"] = pd.Series(edge_long, index=df.index)
+            df["edge_label_short"] = pd.Series(edge_short, index=df.index)
+
+        if bool(compute_entry_gates):
+            gate_long, gate_short = _compute_entry_gate_labels_numba(
+                close,
+                int(gate_h_bars),
+                float(gate_tp),
+                float(gate_sl),
+                float(gate_scale_use),
+            )
+            df["entry_gate_long"] = pd.Series(gate_long, index=df.index)
+            df["entry_gate_short"] = pd.Series(gate_short, index=df.index)
     return df
 
 
@@ -569,4 +961,12 @@ __all__ = [
     "TIMING_WEIGHT_VOL_MULT",
     "TIMING_WEIGHT_MIN",
     "TIMING_WEIGHT_MAX",
+    "EDGE_HORIZON_MIN",
+    "EDGE_DD_LAMBDA",
+    "EDGE_LABEL_CLIP",
+    "EDGE_LABEL_SCALE",
+    "ENTRY_GATE_TMAX_MIN",
+    "ENTRY_GATE_TP_PCT",
+    "ENTRY_GATE_SL_PCT",
+    "ENTRY_GATE_SCALE",
 ]

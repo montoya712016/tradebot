@@ -91,6 +91,25 @@ class TrainSniperWFSettings:
     entry_label_mode: str = "split_0_100"
     entry_label_scale: float = 100.0
     entry_sides: tuple[str, ...] = ("long", "short")
+    # templates de label/weight para regressao
+    entry_reg_label_col_template: str = "edge_label_{side}"
+    entry_reg_weight_col_template: str = ""
+    # classificador de gate (entry)
+    entry_cls_enabled: bool = True
+    entry_cls_model_type: str = "catboost"
+    entry_cls_label_col_template: str = "entry_gate_{side}"
+    entry_cls_weight_col_template: str = "timing_weight_{side}"
+    entry_cls_positive_threshold: float = 50.0
+    entry_cls_balance_bins: tuple[float, ...] = (0.5,)
+    # alvo de proporcao de positivos no dataset do classificador (0<r<1)
+    # ex.: 0.20 => ~1 positivo para 4 negativos
+    entry_cls_target_pos_ratio: float = 0.5
+    # Pesos de classe do gate (classificador):
+    # - aumentar neg_weight penaliza mais falsos positivos (pred=1 quando y=0)
+    entry_cls_pos_weight: float = 1.0
+    entry_cls_neg_weight: float = 1.0
+    entry_cls_params: dict | None = None
+    entry_cls_params_by_side: dict | None = None
     # regressao: balanceamento por distancia do zero (0 = uniforme)
     entry_reg_balance_distance_power: float = 1.0
     # regressao: fração mínima por bin (relativo ao bin mais pesado)
@@ -105,6 +124,8 @@ class TrainSniperWFSettings:
     # thresholds são definidos manualmente em config/thresholds.py
     # params xgb
     entry_params: dict = field(default_factory=dict)
+    # params por lado (long/short), opcional; sobrescreve entry_params
+    entry_params_by_side: dict = field(default_factory=dict)
     # opcional: flags de features custom (senão usa o default por asset)
     feature_flags: dict | None = None
     # opcional: diretório para cache de features
@@ -160,6 +181,7 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         max_symbols=int(settings.max_symbols),
         min_symbols_used_per_period=int(settings.min_symbols_used_per_period),
         entry_params=entry_params,
+        entry_params_by_side=dict(settings.entry_params_by_side or {}),
         max_rows_entry=int(settings.max_rows_entry),
         entry_pool_full=bool(settings.entry_pool_full),
         entry_pool_dir=Path(settings.entry_pool_dir) if settings.entry_pool_dir else None,
@@ -174,6 +196,19 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         entry_label_mode=str(settings.entry_label_mode or "split_0_100"),
         entry_label_scale=float(settings.entry_label_scale),
         entry_sides=tuple(str(s) for s in (settings.entry_sides or ())),
+        entry_reg_label_col_template=str(settings.entry_reg_label_col_template or "edge_label_{side}"),
+        entry_reg_weight_col_template=str(settings.entry_reg_weight_col_template or ""),
+        entry_cls_enabled=bool(settings.entry_cls_enabled),
+        entry_cls_model_type=str(settings.entry_cls_model_type or "catboost"),
+        entry_cls_label_col_template=str(settings.entry_cls_label_col_template or "entry_gate_{side}"),
+        entry_cls_weight_col_template=str(settings.entry_cls_weight_col_template or ""),
+        entry_cls_positive_threshold=float(settings.entry_cls_positive_threshold),
+        entry_cls_balance_bins=tuple(float(x) for x in (settings.entry_cls_balance_bins or (0.5,))),
+        entry_cls_target_pos_ratio=float(settings.entry_cls_target_pos_ratio),
+        entry_cls_pos_weight=float(settings.entry_cls_pos_weight),
+        entry_cls_neg_weight=float(settings.entry_cls_neg_weight),
+        entry_cls_params=(None if settings.entry_cls_params is None else dict(settings.entry_cls_params)),
+        entry_cls_params_by_side=(None if settings.entry_cls_params_by_side is None else dict(settings.entry_cls_params_by_side)),
         use_feature_cache=bool(settings.use_feature_cache),
         asset_class=str(settings.asset_class or "crypto"),
         symbols=tuple(settings.symbols),

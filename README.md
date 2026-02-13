@@ -1,13 +1,13 @@
 Sniper Tradebot - Repository Map
 ================================
 
-This repo contains a full walk-forward trading stack: data ingestion, feature engineering, model training, backtesting, threshold tuning, realtime execution, and a hybrid supervised+RL pipeline.
+This repo contains a full walk-forward trading stack: data ingestion, feature engineering, model training, backtesting, threshold tuning, and realtime execution.
 
 Top-level folders
 -----------------
 - `crypto/` - crypto entrypoints and Binance helpers.
 - `stocks/` - equities/Tiingo pipeline.
-- `modules/` - shared libraries (`prepare_features`, `train`, `backtest`, `thresholds`, `realtime`, `supervised`, `env_rl`, `rl`, `utils`).
+- `modules/` - shared libraries (`prepare_features`, `train`, `backtest`, `thresholds`, `realtime`, `supervised`, `utils`).
 - `realtime/` - realtime bot runtime (`realtime.bot.sniper`) and market-data adapters.
 - `data/` - runtime artifacts (equity history, sysmon, live state, reports).
 
@@ -24,9 +24,7 @@ End-to-end flow
    - `modules/backtest/single_symbol.py`, `modules/backtest/wf_portfolio.py`, `modules/backtest/wf_backtest_sweep.py`
 5) Threshold tuning
    - `modules/thresholds/optimize_thresholds_wf_ga.py`
-6) Hybrid pipeline (supervised + RL)
-   - `crypto/train_hybrid_wf.py` (or `modules/rl/run_hybrid_wf_pipeline.py`)
-7) Realtime run
+6) Realtime run
    - `python crypto/realtime_sniper_live.py`
 
 Where to read next

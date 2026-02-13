@@ -27,6 +27,10 @@ try:
     from catboost import CatBoostRegressor
 except Exception:  # pragma: no cover
     CatBoostRegressor = None
+try:
+    from catboost import CatBoostClassifier
+except Exception:  # pragma: no cover
+    CatBoostClassifier = None
 
 from .sniper_simulator import (
     SniperBacktestResult,
@@ -72,6 +76,14 @@ class PeriodModel:
     entry_calibration_map_long: dict[str, dict[str, float]] = field(default_factory=dict)
     entry_calibration_map_short: dict[str, dict[str, float]] = field(default_factory=dict)
     entry_calibration_map: dict[str, dict[str, float]] | None = None
+    entry_cls_model_long: Any | None = None
+    entry_cls_model_short: Any | None = None
+    entry_cls_models_long: dict[str, Any] = field(default_factory=dict)
+    entry_cls_models_short: dict[str, Any] = field(default_factory=dict)
+    entry_cls_cols_map_long: dict[str, List[str]] = field(default_factory=dict)
+    entry_cls_cols_map_short: dict[str, List[str]] = field(default_factory=dict)
+    entry_cls_calibration_map_long: dict[str, dict[str, float]] = field(default_factory=dict)
+    entry_cls_calibration_map_short: dict[str, dict[str, float]] = field(default_factory=dict)
     danger_cols: List[str] = field(default_factory=list)
     exit_cols: List[str] = field(default_factory=list)
     tau_entry_long: float = 0.0
@@ -107,6 +119,22 @@ def _load_booster(path_json: Path) -> Any:
         return model
     if xgb is None:
         raise RuntimeError("xgboost nao instalado para carregar modelo")
+    bst = xgb.Booster()
+    bst.load_model(str(use_path))
+    return bst
+
+
+def _load_classifier_model(path_json: Path) -> Any:
+    ubj = path_json.with_suffix(".ubj")
+    use_path = ubj if ubj.exists() and ubj.stat().st_size > 0 else path_json
+    if _is_catboost_model_file(use_path):
+        if CatBoostClassifier is None:
+            raise RuntimeError("catboost nao instalado para carregar classificador")
+        model = CatBoostClassifier()
+        model.load_model(str(use_path))
+        return model
+    if xgb is None:
+        raise RuntimeError("xgboost nao instalado para carregar classificador")
     bst = xgb.Booster()
     bst.load_model(str(use_path))
     return bst
@@ -153,6 +181,12 @@ def load_period_models(
         entry_pred_bias_map_short: dict[str, float] = {}
         entry_calibration_map_long: dict[str, dict[str, float]] = {}
         entry_calibration_map_short: dict[str, dict[str, float]] = {}
+        entry_cls_models_long: dict[str, Any] = {}
+        entry_cls_models_short: dict[str, Any] = {}
+        entry_cls_cols_map_long: dict[str, list[str]] = {}
+        entry_cls_cols_map_short: dict[str, list[str]] = {}
+        entry_cls_calibration_map_long: dict[str, dict[str, float]] = {}
+        entry_cls_calibration_map_short: dict[str, dict[str, float]] = {}
 
         # tenta carregar modelos multi-janela a partir das pastas (long/short)
         for d in pd_dir.iterdir():
@@ -208,6 +242,50 @@ def load_period_models(
                         }
                     except Exception:
                         pass
+            elif d.name.startswith("entry_cls_model_long_") and d.name.endswith("m"):
+                w_str = d.name.replace("entry_cls_model_long_", "").replace("m", "")
+                if not w_str.isdigit():
+                    continue
+                w = int(w_str)
+                mdir = d / "model_entry_gate.json"
+                if not mdir.exists():
+                    continue
+                name = f"ret_exp_{w}m"
+                entry_cls_models_long[name] = _load_classifier_model(mdir)
+                mk = meta.get(f"entry_cls_long_{int(w)}m") or {}
+                entry_cls_cols_map_long[name] = list(mk.get("feature_cols") or (meta.get("entry_cls") or {}).get("feature_cols") or meta["entry"]["feature_cols"])
+                cal = mk.get("calibration") if isinstance(mk, dict) else None
+                if isinstance(cal, dict):
+                    try:
+                        entry_cls_calibration_map_long[name] = {
+                            "kind": str(cal.get("kind", "platt")),
+                            "a": float(cal.get("a", 1.0)),
+                            "b": float(cal.get("b", 0.0)),
+                        }
+                    except Exception:
+                        pass
+            elif d.name.startswith("entry_cls_model_short_") and d.name.endswith("m"):
+                w_str = d.name.replace("entry_cls_model_short_", "").replace("m", "")
+                if not w_str.isdigit():
+                    continue
+                w = int(w_str)
+                mdir = d / "model_entry_gate.json"
+                if not mdir.exists():
+                    continue
+                name = f"ret_exp_{w}m"
+                entry_cls_models_short[name] = _load_classifier_model(mdir)
+                mk = meta.get(f"entry_cls_short_{int(w)}m") or {}
+                entry_cls_cols_map_short[name] = list(mk.get("feature_cols") or (meta.get("entry_cls") or {}).get("feature_cols") or meta["entry"]["feature_cols"])
+                cal = mk.get("calibration") if isinstance(mk, dict) else None
+                if isinstance(cal, dict):
+                    try:
+                        entry_cls_calibration_map_short[name] = {
+                            "kind": str(cal.get("kind", "platt")),
+                            "a": float(cal.get("a", 1.0)),
+                            "b": float(cal.get("b", 0.0)),
+                        }
+                    except Exception:
+                        pass
 
         # fallback legado (single)
         if not entry_models_long and not entry_models_short:
@@ -224,6 +302,8 @@ def load_period_models(
 
         entry_model_long = list(entry_models_long.values())[0]
         entry_model_short = list(entry_models_short.values())[0]
+        entry_cls_model_long = list(entry_cls_models_long.values())[0] if entry_cls_models_long else None
+        entry_cls_model_short = list(entry_cls_models_short.values())[0] if entry_cls_models_short else None
         # modelos de danger/exit removidos (pipeline entry-only)
         danger_model = None
         exit_model = None
@@ -264,6 +344,14 @@ def load_period_models(
                 entry_calibration_map_long=entry_calibration_map_long,
                 entry_calibration_map_short=entry_calibration_map_short,
                 entry_calibration_map=entry_calibration_map_long,
+                entry_cls_model_long=entry_cls_model_long,
+                entry_cls_model_short=entry_cls_model_short,
+                entry_cls_models_long=entry_cls_models_long,
+                entry_cls_models_short=entry_cls_models_short,
+                entry_cls_cols_map_long=entry_cls_cols_map_long,
+                entry_cls_cols_map_short=entry_cls_cols_map_short,
+                entry_cls_calibration_map_long=entry_cls_calibration_map_long,
+                entry_cls_calibration_map_short=entry_cls_calibration_map_short,
                 danger_cols=danger_cols,
                 exit_cols=exit_cols,
                 tau_entry_long=float(tau_entry_scaled),
@@ -341,6 +429,36 @@ def _predict_entry_model(model: Any, X: np.ndarray) -> np.ndarray:
     return model.predict(X)
 
 
+def _predict_classifier_model(model: Any, X: np.ndarray) -> np.ndarray:
+    if xgb is not None and isinstance(model, xgb.Booster):
+        return model.predict(xgb.DMatrix(X), validate_features=False)
+    if hasattr(model, "predict_proba"):
+        proba = model.predict_proba(X)
+        proba = np.asarray(proba)
+        if proba.ndim == 2 and proba.shape[1] >= 2:
+            return proba[:, 1].astype(np.float32, copy=False)
+        if proba.ndim == 2 and proba.shape[1] == 1:
+            return proba[:, 0].astype(np.float32, copy=False)
+    pred = np.asarray(model.predict(X), dtype=np.float32)
+    if pred.ndim > 1:
+        pred = pred.reshape(-1)
+    return np.clip(pred, 0.0, 1.0).astype(np.float32, copy=False)
+
+
+def _apply_cls_calibration(prob: np.ndarray, cal: dict[str, float] | None) -> np.ndarray:
+    if not isinstance(cal, dict):
+        return prob.astype(np.float32, copy=False)
+    if str(cal.get("kind", "platt")).lower() != "platt":
+        return prob.astype(np.float32, copy=False)
+    a = float(cal.get("a", 1.0))
+    b = float(cal.get("b", 0.0))
+    p = np.clip(np.asarray(prob, dtype=np.float64), 1e-6, 1.0 - 1e-6)
+    z = np.log(p / (1.0 - p))
+    t = np.clip((a * z) + b, -40.0, 40.0)
+    out = 1.0 / (1.0 + np.exp(-t))
+    return np.clip(out, 0.0, 1.0).astype(np.float32, copy=False)
+
+
 def _clip_entry_pred(arr: np.ndarray, scale: float) -> np.ndarray:
     """
     Mantem previsoes na mesma faixa do label quando configurado.
@@ -373,7 +491,8 @@ def predict_scores_walkforward(
     *,
     periods: List[PeriodModel],
     return_period_id: bool = False,
-) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel] | tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel, np.ndarray]:
+    return_cls_maps: bool = False,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel] | tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel, np.ndarray] | tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel, dict[str, np.ndarray], dict[str, np.ndarray]] | tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray, PeriodModel, np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray]]:
     """
     Prediz p_entry/p_danger para cada timestamp, escolhendo o modelo mais recente com train_end_utc < t.
     Retorna p_entry por janela, p_danger e o primeiro período efetivamente usado.
@@ -385,6 +504,8 @@ def predict_scores_walkforward(
         entry_names = [name for name, _w in _entry_specs()]
     p_entry_long_map = {name: np.full(n, np.nan, dtype=np.float32) for name in entry_names}
     p_entry_short_map = {name: np.full(n, np.nan, dtype=np.float32) for name in entry_names}
+    p_entry_cls_long_map = {name: np.full(n, np.nan, dtype=np.float32) for name in entry_names}
+    p_entry_cls_short_map = {name: np.full(n, np.nan, dtype=np.float32) for name in entry_names}
     p_danger = np.zeros(n, dtype=np.float32)  # danger removido
     # p_exit removido (mantido nulo para compatibilidade)
     p_exit = np.zeros(n, dtype=np.float32)
@@ -454,6 +575,21 @@ def predict_scores_walkforward(
             pe_short = _clip_entry_pred(pe_short, pm.entry_label_scale)
             p_entry_long_map[name][rows] = pe_long
             p_entry_short_map[name][rows] = pe_short
+            if return_cls_maps:
+                cls_long = pm.entry_cls_models_long.get(name)
+                cls_short = pm.entry_cls_models_short.get(name)
+                if cls_long is not None:
+                    cols_cls_long = pm.entry_cls_cols_map_long.get(name, cols_long)
+                    X_cl = _build_matrix_rows(df, cols_cls_long, rows)
+                    p_cl = _predict_classifier_model(cls_long, X_cl).astype(np.float32, copy=False)
+                    p_cl = _apply_cls_calibration(p_cl, pm.entry_cls_calibration_map_long.get(name))
+                    p_entry_cls_long_map[name][rows] = np.clip(p_cl, 0.0, 1.0)
+                if cls_short is not None:
+                    cols_cls_short = pm.entry_cls_cols_map_short.get(name, cols_short)
+                    X_cs = _build_matrix_rows(df, cols_cls_short, rows)
+                    p_cs = _predict_classifier_model(cls_short, X_cs).astype(np.float32, copy=False)
+                    p_cs = _apply_cls_calibration(p_cs, pm.entry_cls_calibration_map_short.get(name))
+                    p_entry_cls_short_map[name][rows] = np.clip(p_cs, 0.0, 1.0)
         p_danger[rows] = pdg
         period_id[rows] = np.int16(pid)
         if used_any is None:
@@ -470,6 +606,10 @@ def predict_scores_walkforward(
             "Nenhum período do run_dir é válido para o range de timestamps fornecido. "
             f"df=[{t0}..{t1}] train_end_range=[{te_min}..{te_max}]"
         )
+    if return_cls_maps and return_period_id:
+        return p_entry_long_map, p_entry_short_map, p_danger, p_exit, used_any, period_id, p_entry_cls_long_map, p_entry_cls_short_map
+    if return_cls_maps:
+        return p_entry_long_map, p_entry_short_map, p_danger, p_exit, used_any, p_entry_cls_long_map, p_entry_cls_short_map
     if return_period_id:
         return p_entry_long_map, p_entry_short_map, p_danger, p_exit, used_any, period_id
     return p_entry_long_map, p_entry_short_map, p_danger, p_exit, used_any

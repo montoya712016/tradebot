@@ -84,6 +84,14 @@ def _color_for_name(name: str) -> str:
             return "#3fb950"
         if s == "timing_label_short":
             return "#ff7b72"
+        if s == "edge_label_long":
+            return "#3fb950"
+        if s == "edge_label_short":
+            return "#ff7b72"
+        if s == "entry_gate_long":
+            return "#56d364"
+        if s == "entry_gate_short":
+            return "#f85149"
         if s == "timing_weight_long":
             return "#56d364"
         if s == "timing_weight_short":
@@ -263,11 +271,12 @@ def _build_panels(flags: dict[str, Any]) -> list[str]:
     if flags.get("wick_stats"):
         panels.append("wick_stats")
     if flags.get("label"):
-        # If only label is enabled, keep a single label subplot.
-        if not has_non_label_feature:
-            panels.append("label")
-        else:
-            panels.extend(["weights", "label", "timing_label"])
+        # Sempre manter paineis de labels+pesos:
+        # - edge/entry labels
+        # - pesos por lado
+        # - peso agregado
+        # - label bruto (diagnostico)
+        panels.extend(["weights", "weights_side", "label", "timing_label"])
     return panels
 
 
@@ -963,7 +972,14 @@ def plot_all(
         # labels de regressao: prioriza labels por lado (0..100).
         if "label" in row_map:
             added_side_labels = False
-            for col in ("timing_label_long", "timing_label_short"):
+            for col in (
+                "timing_label_long",
+                "timing_label_short",
+                "edge_label_long",
+                "edge_label_short",
+                "entry_gate_long",
+                "entry_gate_short",
+            ):
                 if col in df.columns:
                     _add_line(
                         fig,
@@ -985,19 +1001,16 @@ def plot_all(
                 )
         # weights da regressao (timing)
         if "weights" in row_map:
-            added_side_weights = False
-            for col in ("timing_weight_long", "timing_weight_short"):
-                if col in df.columns:
-                    _add_line(
-                        fig,
-                        row=row_map["weights"],
-                        x=x,
-                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
-                        name=col,
-                        gap_threshold=gap_threshold,
-                    )
-                    added_side_weights = True
-            if not added_side_weights and "timing_weight" in df.columns:
+            if "entry_gate_weight" in df.columns:
+                _add_line(
+                    fig,
+                    row=row_map["weights"],
+                    x=x,
+                    y=_apply_gap_nan(_safe_series(line_df, "entry_gate_weight"), gap_mask),
+                    name="entry_gate_weight",
+                    gap_threshold=gap_threshold,
+                )
+            elif "timing_weight" in df.columns:
                 _add_line(
                     fig,
                     row=row_map["weights"],
@@ -1006,6 +1019,30 @@ def plot_all(
                     name="timing_weight",
                     gap_threshold=gap_threshold,
                 )
+            else:
+                # fallback: se nao houver agregado, mostra o long
+                for col in ("entry_gate_weight_long", "entry_gate_weight_short", "edge_weight_long", "edge_weight_short", "timing_weight_long", "timing_weight_short"):
+                    if col in df.columns:
+                        _add_line(
+                            fig,
+                            row=row_map["weights"],
+                            x=x,
+                            y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                            name=col,
+                            gap_threshold=gap_threshold,
+                        )
+                        break
+        if "weights_side" in row_map:
+            for col in ("edge_weight_long", "edge_weight_short", "entry_gate_weight_long", "entry_gate_weight_short", "timing_weight_long", "timing_weight_short"):
+                if col in df.columns:
+                    _add_line(
+                        fig,
+                        row=row_map["weights_side"],
+                        x=x,
+                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                        name=col,
+                        gap_threshold=gap_threshold,
+                    )
         # timing regression labels (signed/raw context)
         if "timing_label" in row_map:
             added_raw_labels = False
@@ -1078,7 +1115,14 @@ def plot_all(
         _plot_prefix("wick_stats", ("wick_lower_", "wick_upper_", "wick_"))
         if "label" in row_map:
             side_added = False
-            for col in ("timing_label_long", "timing_label_short"):
+            for col in (
+                "timing_label_long",
+                "timing_label_short",
+                "edge_label_long",
+                "edge_label_short",
+                "entry_gate_long",
+                "entry_gate_short",
+            ):
                 if col in df.columns:
                     _add_line(
                         fig,
@@ -1093,20 +1137,51 @@ def plot_all(
                 _plot_prefix("label", ("timing_label", "timing_profit_now"))
 
         if "weights" in row_map:
-            weight_added = False
-            for col in ("timing_weight_long", "timing_weight_short", "timing_weight"):
+            if "entry_gate_weight" in df.columns:
+                _add_line(
+                    fig,
+                    row=row_map["weights"],
+                    x=x,
+                    y=_safe_series(df, "entry_gate_weight"),
+                    name="entry_gate_weight",
+                    gap_threshold=gap_threshold,
+                )
+            elif "timing_weight" in df.columns:
+                _add_line(
+                    fig,
+                    row=row_map["weights"],
+                    x=x,
+                    y=_safe_series(df, "timing_weight"),
+                    name="timing_weight",
+                    gap_threshold=gap_threshold,
+                )
+            else:
+                for col in ("entry_gate_weight_long", "entry_gate_weight_short", "edge_weight_long", "edge_weight_short", "timing_weight_long", "timing_weight_short"):
+                    if col in df.columns:
+                        _add_line(
+                            fig,
+                            row=row_map["weights"],
+                            x=x,
+                            y=_safe_series(df, col),
+                            name=col,
+                            gap_threshold=gap_threshold,
+                        )
+                        break
+        if "weights_side" in row_map:
+            side_added = False
+            for col in ("edge_weight_long", "edge_weight_short", "entry_gate_weight_long", "entry_gate_weight_short", "timing_weight_long", "timing_weight_short"):
                 if col in df.columns:
                     _add_line(
                         fig,
-                        row=row_map["weights"],
+                        row=row_map["weights_side"],
                         x=x,
                         y=_safe_series(df, col),
                         name=col,
                         gap_threshold=gap_threshold,
                     )
-                    weight_added = True
-            if not weight_added:
-                _plot_prefix("weights", ("timing_weight",))
+                    side_added = True
+            if not side_added:
+                _plot_prefix("weights_side", ("edge_weight", "entry_gate_weight", "timing_weight"))
 
         if "timing_label" in row_map:
             raw_added = False
@@ -1216,9 +1291,32 @@ def plot_backtest_single(
         for i in range(1, len(idx)):
             if (idx[i] - idx[i - 1]) >= gth64:
                 gap_mask[i] = True
+    grouped_prob_layout = False
+    reg_keys: list[str] = []
+    gate_keys: list[str] = []
+    score_keys: list[str] = []
+    u_keys: list[str] = []
+    if plot_probs and (not probs_simple) and p_entry_map:
+        keys = [str(k) for k in p_entry_map.keys()]
+        reg_keys = [k for k in keys if k.startswith("reg_")]
+        gate_keys = [k for k in keys if k.startswith("gate_")]
+        score_keys = [k for k in keys if k.startswith("score_")]
+        u_keys = [k for k in keys if ("u_score" in k or k == "u")]
+        grouped_prob_layout = bool(reg_keys or gate_keys or score_keys or u_keys)
+
     panels = ["candles"]
     if plot_probs:
-        panels.append("probs")
+        if grouped_prob_layout:
+            if reg_keys:
+                panels.append("probs_reg")
+            if gate_keys:
+                panels.append("probs_gate")
+            if score_keys:
+                panels.append("probs_score")
+            if u_keys:
+                panels.append("probs_u")
+        else:
+            panels.append("probs")
     if plot_signals:
         panels.append("signals")
     panels.append("equity")
@@ -1226,7 +1324,7 @@ def plot_backtest_single(
     for p in panels:
         if p == "candles":
             ratios.append(3.0 if (plot_probs or plot_signals) else 2.5)
-        elif p == "probs":
+        elif p in {"probs", "probs_reg", "probs_gate", "probs_score", "probs_u"}:
             ratios.append(1.2)
         elif p == "signals":
             ratios.append(0.8)
@@ -1338,7 +1436,66 @@ def plot_backtest_single(
 
     # Probabilidades
     if plot_probs:
-        if probs_simple:
+        if grouped_prob_layout:
+            group_colors = {
+                "reg_long": "#56d364",
+                "reg_short": "#f85149",
+                "gate_long": "#2f81f7",
+                "gate_short": "#a371f7",
+                "score_long": "#7ee787",
+                "score_short": "#ff7b72",
+                "u_score": "#f2cc60",
+                "u": "#f2cc60",
+            }
+
+            def _plot_group(row_key: str, keys_group: list[str], title_prefix: str) -> None:
+                if row_key not in row_map:
+                    return
+                for name in keys_group:
+                    arr = p_entry_map.get(name) if p_entry_map else None
+                    if arr is None:
+                        continue
+                    fig.add_trace(
+                        go.Scatter(
+                            x=idx,
+                            y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                            name=f"{title_prefix}:{name}",
+                            mode="lines",
+                            line=dict(color=group_colors.get(name, _color_for_name(name)), width=1.2),
+                        ),
+                        row=row_map[row_key],
+                        col=1,
+                    )
+
+            _plot_group("probs_reg", reg_keys, "reg")
+            _plot_group("probs_gate", gate_keys, "gate")
+            _plot_group("probs_score", score_keys, "score")
+            _plot_group("probs_u", u_keys, "u")
+            if "probs_u" in row_map:
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx,
+                        y=[float(tau_entry_long if tau_entry_long is not None else tau_entry)] * len(idx),
+                        name="tau_entry_long",
+                        mode="lines",
+                        line=dict(color="#3fb950", dash="dash", width=1),
+                    ),
+                    row=row_map["probs_u"],
+                    col=1,
+                )
+                if tau_entry_short is not None:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=idx,
+                            y=[-float(tau_entry_short)] * len(idx),
+                            name="tau_entry_short",
+                            mode="lines",
+                            line=dict(color="#ff7b72", dash="dash", width=1),
+                        ),
+                        row=row_map["probs_u"],
+                        col=1,
+                    )
+        elif probs_simple:
             fig.add_trace(
                 go.Scatter(
                     x=idx,
@@ -1376,18 +1533,20 @@ def plot_backtest_single(
                         row=row_map["probs"],
                         col=1,
                     )
-                for name, arr in (p_entry_short_map or {}).items():
-                    fig.add_trace(
-                        go.Scatter(
-                            x=idx,
-                            y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
-                            name=f"p_entry_short_{name}",
-                            mode="lines",
-                            line=dict(color="#ff7b72", width=1),
-                        ),
-                        row=row_map["probs"],
-                        col=1,
-                    )
+                # Evita duplicar visualmente o short quando já há série agregada p_entry_short
+                if p_entry_short is None:
+                    for name, arr in (p_entry_short_map or {}).items():
+                        fig.add_trace(
+                            go.Scatter(
+                                x=idx,
+                                y=_apply_gap_nan(np.asarray(arr, dtype=float), gap_mask),
+                                name=f"p_entry_short_{name}",
+                                mode="lines",
+                                line=dict(color="#ff7b72", width=1),
+                            ),
+                            row=row_map["probs"],
+                            col=1,
+                        )
             elif p_entry_map:
                 for name, arr in p_entry_map.items():
                     fig.add_trace(
@@ -1444,7 +1603,7 @@ def plot_backtest_single(
                     go.Scatter(
                         x=idx,
                         y=_apply_gap_nan(-np.asarray(p_entry_short, dtype=float), gap_mask),
-                        name="p_entry_short",
+                        name="-p_entry_short",
                         mode="lines",
                         line=dict(color="#ff7b72", width=1),
                     ),

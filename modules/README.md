@@ -1,6 +1,6 @@
 # modules/
 
-Shared building blocks across training, backtesting, realtime execution, and the hybrid RL pipeline.
+Shared building blocks across training, backtesting, and realtime execution.
 
 Subpackages
 -----------
@@ -9,8 +9,6 @@ Subpackages
 - `backtest/` - single-symbol and portfolio backtesting.
 - `thresholds/` - threshold search and scoring utilities.
 - `realtime/` - realtime dashboard server and assets.
-- `supervised/` - long/short signal export for RL.
-- `env_rl/` - RL trading environment, action space, reward/cost components.
-- `rl/` - RL walk-forward training, evaluation, and orchestration.
+- `supervised/` - long/short signal export and utilities.
 - `utils/` - shared helpers (paths, notifications, progress, etc.).
 - `config/` - symbols/threshold defaults and local secrets loader.

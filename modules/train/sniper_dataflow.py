@@ -18,10 +18,17 @@ import sys
 import time
 import uuid
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import numpy as np
 import pandas as pd
+try:
+    from utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # type: ignore
+except Exception:
+    from modules.utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # type: ignore[import]
+try:
+    from utils.thermal_guard import ThermalGuard  # type: ignore
+except Exception:
+    from modules.utils.thermal_guard import ThermalGuard  # type: ignore[import]
 
 try:
     import psutil  # type: ignore
@@ -31,6 +38,15 @@ except Exception:
 njit = None  # type: ignore
 _HAS_NUMBA = False
 _NUMBA_READY = False
+_THERMAL_GUARD = ThermalGuard.from_env()
+
+
+def _thermal_wait(where: str) -> None:
+    _THERMAL_GUARD.wait_until_safe(
+        where=where,
+        force_sample=False,
+        logger=lambda msg: print(f"[sniper-data] {msg}", flush=True),
+    )
 
 
 def _ensure_numba() -> bool:
@@ -272,6 +288,93 @@ def _sample_indices_regression(
         keep_idx = rng.choice(np.array(keep_idx), size=max_rows, replace=False).tolist()
     keep = np.array(sorted(set(keep_idx)), dtype=np.int64)
     return keep
+
+
+def _sample_indices_binary(
+    y: np.ndarray,
+    valid_mask: np.ndarray,
+    max_rows: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if valid_mask.size == 0 or (not bool(np.any(valid_mask))):
+        return np.empty((0,), dtype=np.int64)
+    base_idx = np.flatnonzero(valid_mask)
+    if max_rows <= 0 or base_idx.size <= max_rows:
+        return base_idx
+    yb = y[base_idx] > 0.5
+    pos_idx = base_idx[yb]
+    neg_idx = base_idx[~yb]
+    if pos_idx.size == 0 or neg_idx.size == 0:
+        return rng.choice(base_idx, size=max_rows, replace=False).astype(np.int64, copy=False)
+    tgt_pos = int(max_rows // 2)
+    tgt_neg = int(max_rows - tgt_pos)
+    if pos_idx.size < tgt_pos:
+        tgt_pos = int(pos_idx.size)
+        tgt_neg = int(min(neg_idx.size, max_rows - tgt_pos))
+    if neg_idx.size < tgt_neg:
+        tgt_neg = int(neg_idx.size)
+        tgt_pos = int(min(pos_idx.size, max_rows - tgt_neg))
+    keep_parts: list[np.ndarray] = []
+    if tgt_pos > 0:
+        keep_parts.append(rng.choice(pos_idx, size=tgt_pos, replace=False))
+    if tgt_neg > 0:
+        keep_parts.append(rng.choice(neg_idx, size=tgt_neg, replace=False))
+    if not keep_parts:
+        return np.empty((0,), dtype=np.int64)
+    keep = np.concatenate(keep_parts, axis=0)
+    if keep.size > max_rows:
+        keep = rng.choice(keep, size=max_rows, replace=False)
+    return np.array(sorted(set(keep.tolist())), dtype=np.int64)
+
+
+def _resolve_entry_targets(
+    df: pd.DataFrame,
+    *,
+    side: str,
+    contract: "TradeContract",
+    window_min: int,
+    entry_label_col: str | None = None,
+    entry_label_binary: bool = False,
+    entry_label_positive_threshold: float = 50.0,
+    entry_weight_col: str | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    use_timing_weight = _env_bool("SNIPER_USE_TIMING_WEIGHT", default=True)
+    timing_weight_arr: np.ndarray | None = None
+    if entry_label_col:
+        col = str(entry_label_col).strip()
+        if col not in df.columns:
+            raise KeyError(f"coluna de label ausente: {col}")
+        y_raw = df[col].to_numpy(copy=False).astype(np.float32)
+        if bool(entry_label_binary):
+            thr = float(entry_label_positive_threshold)
+            y = (y_raw >= thr).astype(np.float32, copy=False)
+        else:
+            y = y_raw
+        if use_timing_weight and entry_weight_col:
+            wc = str(entry_weight_col).strip()
+            if wc in df.columns:
+                timing_weight_arr = df[wc].to_numpy(copy=False).astype(np.float32)
+        return y, timing_weight_arr
+
+    if side == "long" and "timing_label_long" in df.columns:
+        y = df["timing_label_long"].to_numpy(copy=False).astype(np.float32)
+        if use_timing_weight and "timing_weight_long" in df.columns:
+            timing_weight_arr = df["timing_weight_long"].to_numpy(copy=False).astype(np.float32)
+        return y, timing_weight_arr
+    if side == "short" and "timing_label_short" in df.columns:
+        y = df["timing_label_short"].to_numpy(copy=False).astype(np.float32)
+        if use_timing_weight and "timing_weight_short" in df.columns:
+            timing_weight_arr = df["timing_weight_short"].to_numpy(copy=False).astype(np.float32)
+        return y, timing_weight_arr
+    if "timing_label" in df.columns:
+        y = df["timing_label"].to_numpy(copy=False).astype(np.float32)
+        if use_timing_weight and "timing_weight" in df.columns:
+            timing_weight_arr = df["timing_weight"].to_numpy(copy=False).astype(np.float32)
+        return y, timing_weight_arr
+    candle_sec = int(getattr(contract, "timeframe_sec", 60) or 60)
+    window_bars = int(max(1, round((window_min * 60) / candle_sec)))
+    y = _regression_target_from_close(df["close"].to_numpy(copy=False), window_bars)
+    return y, timing_weight_arr
 
 
 @dataclass
@@ -679,6 +782,7 @@ def ensure_feature_cache(
 
     def _build_one(sym: str) -> tuple[str, Path | None, str | None]:
         # retorna (sym, path|None, err|None)
+        _thermal_wait(f"feature_cache_build:{sym}")
         # Check RAM antes de processar
         if abort_ram_pct > 0 and psutil is not None:
             try:
@@ -798,23 +902,39 @@ def ensure_feature_cache(
                     mw = min(8, int(os.cpu_count() or 8))
         mw = max(1, int(mw))
         # Nota: o gargalo aqui é misto (I/O MySQL + CPU features). Threads ajudam porque há muito I/O/espera.
-        with ThreadPoolExecutor(max_workers=mw) as ex:
-            futs = {ex.submit(_build_one, sym): sym for sym in to_build}
-            for fut in as_completed(futs):
-                sym = futs[fut]
-                _print_progress(sym)
-                sym, path, err = fut.result()
-                if err:
-                    skipped.append(sym)
-                    sys.stderr.write("\n")
-                    sys.stderr.flush()
-                    print(f"[cache] SKIP {sym}: {err}", flush=True)
-                elif path is not None:
-                    out[sym] = path
-                done += 1
-                _print_progress(sym)
+        cache_policy = AdaptiveParallelPolicy(
+            max_ram_pct=float(os.getenv("SNIPER_CACHE_RAM_PCT", str(float(abort_ram_pct) if abort_ram_pct > 0 else 85.0)) or "85"),
+            min_free_mb=float(os.getenv("SNIPER_CACHE_MIN_FREE_MB", "1536") or "1536"),
+            per_worker_mem_mb=float(os.getenv("SNIPER_CACHE_PER_WORKER_MB", "768") or "768"),
+            min_workers=1,
+            poll_interval_s=0.3,
+            log_every_s=20.0,
+        )
+        print(
+            f"[cache] workers={mw} ram_cap={cache_policy.max_ram_pct:.1f}% min_free_mb={cache_policy.min_free_mb:.0f} per_worker_mb={cache_policy.per_worker_mem_mb:.0f}",
+            flush=True,
+        )
+        for sym_submitted, fut in run_adaptive_thread_map(
+            to_build,
+            _build_one,
+            max_workers=mw,
+            policy=cache_policy,
+            task_name="feature-cache-build",
+        ):
+            _print_progress(sym_submitted)
+            sym, path, err = fut.result()
+            if err:
+                skipped.append(sym)
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+                print(f"[cache] SKIP {sym}: {err}", flush=True)
+            elif path is not None:
+                out[sym] = path
+            done += 1
+            _print_progress(sym)
     else:
         for sym in to_build:
+            _thermal_wait(f"feature_cache_seq:{sym}")
             _print_progress(sym)
             sym, path, err = _build_one(sym)
             if err:
@@ -936,6 +1056,10 @@ def prepare_sniper_dataset(
     entry_reg_weight_alpha: float = 4.0,
     entry_reg_weight_power: float = 1.2,
     entry_reg_balance_bins: Sequence[float] | None = None,
+    entry_label_col: str | None = None,
+    entry_label_binary: bool = False,
+    entry_label_positive_threshold: float = 50.0,
+    entry_weight_col: str | None = None,
     max_rows_entry: int = 600_000,
     full_entry_pool: bool = False,
     seed: int = 42,
@@ -971,6 +1095,7 @@ def prepare_sniper_dataset(
     batch_flush_n = 8
 
     for sym_idx, symbol in enumerate(symbols):
+        _thermal_wait(f"dataset_build:{symbol}")
         try:
             df_pf, _ = _build_features_for_symbol(
                 symbol,
@@ -980,24 +1105,16 @@ def prepare_sniper_dataset(
                 flags=flags,
                 asset_class=asset_class,
             )
-            use_timing_weight = _env_bool("SNIPER_USE_TIMING_WEIGHT", default=True)
-            timing_weight = None
-            if side == "long" and "timing_label_long" in df_pf.columns:
-                y = df_pf["timing_label_long"].to_numpy(copy=False).astype(np.float32)
-                if use_timing_weight and "timing_weight_long" in df_pf.columns:
-                    timing_weight = df_pf["timing_weight_long"].to_numpy(copy=False).astype(np.float32)
-            elif side == "short" and "timing_label_short" in df_pf.columns:
-                y = df_pf["timing_label_short"].to_numpy(copy=False).astype(np.float32)
-                if use_timing_weight and "timing_weight_short" in df_pf.columns:
-                    timing_weight = df_pf["timing_weight_short"].to_numpy(copy=False).astype(np.float32)
-            elif "timing_label" in df_pf.columns:
-                y = df_pf["timing_label"].to_numpy(copy=False).astype(np.float32)
-                if use_timing_weight and "timing_weight" in df_pf.columns:
-                    timing_weight = df_pf["timing_weight"].to_numpy(copy=False).astype(np.float32)
-            else:
-                candle_sec = int(getattr(contract, "timeframe_sec", 60) or 60)
-                window_bars = int(max(1, round((window_min * 60) / candle_sec)))
-                y = _regression_target_from_close(df_pf["close"].to_numpy(copy=False), window_bars)
+            y, timing_weight = _resolve_entry_targets(
+                df_pf,
+                side=side,
+                contract=contract,
+                window_min=window_min,
+                entry_label_col=entry_label_col,
+                entry_label_binary=bool(entry_label_binary),
+                entry_label_positive_threshold=float(entry_label_positive_threshold),
+                entry_weight_col=entry_weight_col,
+            )
 
             valid_mask = np.isfinite(y)
             if valid_mask.size == 0 or (not bool(np.any(valid_mask))):
@@ -1009,20 +1126,23 @@ def prepare_sniper_dataset(
             if bool(full_entry_pool) and int(max_rows_entry) <= 0:
                 keep_idx = np.flatnonzero(valid_mask)
             else:
-                keep_idx = _sample_indices_regression(
-                    y,
-                    valid_mask,
-                    entry_reg_balance_bins,
-                    int(symbol_cap),
-                    rng,
-                )
+                if bool(entry_label_binary):
+                    keep_idx = _sample_indices_binary(y, valid_mask, int(symbol_cap), rng)
+                else:
+                    keep_idx = _sample_indices_regression(
+                        y,
+                        valid_mask,
+                        entry_reg_balance_bins,
+                        int(symbol_cap),
+                        rng,
+                    )
             if keep_idx.size == 0:
                 symbols_skipped.append(symbol)
                 continue
 
             entry_df = df_pf.iloc[keep_idx][feat_cols].copy()
             entry_df["label_entry"] = y[keep_idx]
-            if use_timing_weight and timing_weight is not None:
+            if timing_weight is not None:
                 entry_df["weight"] = timing_weight[keep_idx]
             else:
                 entry_df["weight"] = (
@@ -1030,7 +1150,7 @@ def prepare_sniper_dataset(
                 ).astype(np.float32)
             label_scale = 100.0 if (side in {"long", "short"} and np.nanmax(y) > 1.0) else 1.0
             tail_abs_use = float(tail_abs) * float(label_scale)
-            if tail_mult > 1.0:
+            if (not bool(entry_label_binary)) and tail_mult > 1.0:
                 tail_mask = np.abs(entry_df["label_entry"].to_numpy(copy=False)) >= float(tail_abs_use)
                 if np.any(tail_mask):
                     entry_df.loc[tail_mask, "weight"] = (
@@ -1053,7 +1173,10 @@ def prepare_sniper_dataset(
                     else:
                         y_all = combined["label_entry"].to_numpy(dtype=np.float32, copy=False)
                         vm = np.isfinite(y_all)
-                        keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
+                        if bool(entry_label_binary):
+                            keep = _sample_indices_binary(y_all, vm, int(max_rows_entry), rng)
+                        else:
+                            keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
                         pool_df = combined.iloc[keep] if keep.size > 0 else combined.iloc[:0]
                     entry_pool_map[preferred_name] = pool_df
                     buf.clear()
@@ -1074,7 +1197,10 @@ def prepare_sniper_dataset(
         else:
             y_all = combined["label_entry"].to_numpy(dtype=np.float32, copy=False)
             vm = np.isfinite(y_all)
-            keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
+            if bool(entry_label_binary):
+                keep = _sample_indices_binary(y_all, vm, int(max_rows_entry), rng)
+            else:
+                keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
             pool_df = combined.iloc[keep] if keep.size > 0 else combined.iloc[:0]
         entry_pool_map[name] = pool_df
         buf.clear()
@@ -1112,6 +1238,10 @@ def prepare_sniper_dataset_from_cache(
     entry_reg_weight_alpha: float = 4.0,
     entry_reg_weight_power: float = 1.2,
     entry_reg_balance_bins: Sequence[float] | None = None,
+    entry_label_col: str | None = None,
+    entry_label_binary: bool = False,
+    entry_label_positive_threshold: float = 50.0,
+    entry_weight_col: str | None = None,
     max_rows_entry: int = 2_000_000,
     full_entry_pool: bool = False,
     seed: int = 42,
@@ -1166,6 +1296,7 @@ def prepare_sniper_dataset_from_cache(
     symbols_skipped: list[str] = []
 
     def _process_symbol(sym: str, sym_idx: int) -> tuple[str, pd.DataFrame | None, list[str] | None]:
+        _thermal_wait(f"dataset_from_cache:{sym}")
         try:
             data_path = cache_map.get(sym)
             if data_path is None or (not Path(data_path).exists()):
@@ -1181,24 +1312,16 @@ def prepare_sniper_dataset_from_cache(
             df = _try_downcast_df(df, copy=False)
             frozen_mask = _frozen_ohlc_mask(df) if str(asset_class or "crypto").lower() == "stocks" else None
 
-            use_timing_weight = _env_bool("SNIPER_USE_TIMING_WEIGHT", default=True)
-            timing_weight_arr = None
-            if side == "long" and "timing_label_long" in df.columns:
-                y = df["timing_label_long"].to_numpy(copy=False).astype(np.float32)
-                if use_timing_weight and "timing_weight_long" in df.columns:
-                    timing_weight_arr = df["timing_weight_long"].to_numpy(copy=False).astype(np.float32)
-            elif side == "short" and "timing_label_short" in df.columns:
-                y = df["timing_label_short"].to_numpy(copy=False).astype(np.float32)
-                if use_timing_weight and "timing_weight_short" in df.columns:
-                    timing_weight_arr = df["timing_weight_short"].to_numpy(copy=False).astype(np.float32)
-            elif "timing_label" in df.columns:
-                y = df["timing_label"].to_numpy(copy=False).astype(np.float32)
-                if use_timing_weight and "timing_weight" in df.columns:
-                    timing_weight_arr = df["timing_weight"].to_numpy(copy=False).astype(np.float32)
-            else:
-                candle_sec = int(getattr(contract, "timeframe_sec", 60) or 60)
-                window_bars = int(max(1, round((window_min * 60) / candle_sec)))
-                y = _regression_target_from_close(df["close"].to_numpy(copy=False), window_bars)
+            y, timing_weight_arr = _resolve_entry_targets(
+                df,
+                side=side,
+                contract=contract,
+                window_min=window_min,
+                entry_label_col=entry_label_col,
+                entry_label_binary=bool(entry_label_binary),
+                entry_label_positive_threshold=float(entry_label_positive_threshold),
+                entry_weight_col=entry_weight_col,
+            )
 
             entry_mask = np.isfinite(y)
             if frozen_mask is not None:
@@ -1216,19 +1339,22 @@ def prepare_sniper_dataset_from_cache(
                 keep_idx = np.flatnonzero(entry_mask)
             else:
                 rng_sym = np.random.default_rng(int(seed) + int(remove_tail_days) + (sym_idx + 1) * 17)
-                keep_idx = _sample_indices_regression(
-                    y,
-                    entry_mask,
-                    entry_reg_balance_bins,
-                    int(symbol_cap),
-                    rng_sym,
-                )
+                if bool(entry_label_binary):
+                    keep_idx = _sample_indices_binary(y, entry_mask, int(symbol_cap), rng_sym)
+                else:
+                    keep_idx = _sample_indices_regression(
+                        y,
+                        entry_mask,
+                        entry_reg_balance_bins,
+                        int(symbol_cap),
+                        rng_sym,
+                    )
             if keep_idx.size == 0:
                 return sym, None, None
 
             entry_df = df.iloc[keep_idx][feat_cols].copy()
             entry_df["label_entry"] = y[keep_idx]
-            if use_timing_weight and timing_weight_arr is not None:
+            if timing_weight_arr is not None:
                 entry_df["weight"] = timing_weight_arr[keep_idx]
             else:
                 entry_df["weight"] = (
@@ -1236,7 +1362,7 @@ def prepare_sniper_dataset_from_cache(
                 ).astype(np.float32)
             label_scale = 100.0 if (side in {"long", "short"} and np.nanmax(y) > 1.0) else 1.0
             tail_abs_use = float(tail_abs) * float(label_scale)
-            if tail_mult > 1.0:
+            if (not bool(entry_label_binary)) and tail_mult > 1.0:
                 tail_mask = np.abs(entry_df["label_entry"].to_numpy(copy=False)) >= float(tail_abs_use)
                 if np.any(tail_mask):
                     entry_df.loc[tail_mask, "weight"] = (
@@ -1254,36 +1380,55 @@ def prepare_sniper_dataset_from_cache(
             env_mw = os.getenv("SNIPER_DATASET_WORKERS", "").strip()
             mw = int(env_mw) if env_mw else min(8, int(os.cpu_count() or 4))
         mw = max(1, mw)
-        with ThreadPoolExecutor(max_workers=mw) as ex:
-            futures = {ex.submit(_process_symbol, sym, i): sym for i, sym in enumerate(symbols)}
-            for fut in as_completed(futures):
-                sym, entry_df, feat_cols = fut.result()
-                if entry_df is None or entry_df.empty:
-                    symbols_skipped.append(sym)
-                    continue
-                symbols_used.append(sym)
-                if feat_cols:
-                    feat_cols_entry_map[preferred_name] = list(feat_cols)
-                buf = entry_buf_map.get(preferred_name)
-                if buf is not None:
-                    buf.append(entry_df)
-                    if len(buf) >= 8:
-                        pool_df = entry_pool_map.get(preferred_name)
-                        combined = pd.concat(
-                            ([pool_df] if pool_df is not None and not pool_df.empty else []) + buf,
-                            axis=0,
-                            ignore_index=False,
-                        )
-                        if bool(full_entry_pool) and int(max_rows_entry) <= 0:
-                            pool_df = combined
+        dataset_policy = AdaptiveParallelPolicy(
+            max_ram_pct=float(os.getenv("SNIPER_DATASET_RAM_PCT", "85") or "85"),
+            min_free_mb=float(os.getenv("SNIPER_DATASET_MIN_FREE_MB", "2048") or "2048"),
+            per_worker_mem_mb=float(os.getenv("SNIPER_DATASET_PER_WORKER_MB", "1024") or "1024"),
+            min_workers=1,
+            poll_interval_s=0.3,
+            log_every_s=20.0,
+        )
+        print(
+            f"[sniper-data] dataset_workers={mw} ram_cap={dataset_policy.max_ram_pct:.1f}% min_free_mb={dataset_policy.min_free_mb:.0f} per_worker_mb={dataset_policy.per_worker_mem_mb:.0f}",
+            flush=True,
+        )
+        for _sym_pack, fut in run_adaptive_thread_map(
+            list(enumerate(symbols)),
+            lambda pair: _process_symbol(pair[1], pair[0]),
+            max_workers=mw,
+            policy=dataset_policy,
+            task_name="dataset-build",
+        ):
+            sym, entry_df, feat_cols = fut.result()
+            if entry_df is None or entry_df.empty:
+                symbols_skipped.append(sym)
+                continue
+            symbols_used.append(sym)
+            if feat_cols:
+                feat_cols_entry_map[preferred_name] = list(feat_cols)
+            buf = entry_buf_map.get(preferred_name)
+            if buf is not None:
+                buf.append(entry_df)
+                if len(buf) >= 8:
+                    pool_df = entry_pool_map.get(preferred_name)
+                    combined = pd.concat(
+                        ([pool_df] if pool_df is not None and not pool_df.empty else []) + buf,
+                        axis=0,
+                        ignore_index=False,
+                    )
+                    if bool(full_entry_pool) and int(max_rows_entry) <= 0:
+                        pool_df = combined
+                    else:
+                        y_all = combined["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                        vm = np.isfinite(y_all)
+                        if bool(entry_label_binary):
+                            keep = _sample_indices_binary(y_all, vm, int(max_rows_entry), rng)
                         else:
-                            y_all = combined["label_entry"].to_numpy(dtype=np.float32, copy=False)
-                            vm = np.isfinite(y_all)
                             keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
-                            pool_df = combined.iloc[keep] if keep.size > 0 else combined.iloc[:0]
-                        entry_pool_map[preferred_name] = pool_df
-                        buf.clear()
-                        del combined
+                        pool_df = combined.iloc[keep] if keep.size > 0 else combined.iloc[:0]
+                    entry_pool_map[preferred_name] = pool_df
+                    buf.clear()
+                    del combined
     else:
         for sym_idx, sym in enumerate(symbols):
             sym, entry_df, feat_cols = _process_symbol(sym, sym_idx)
@@ -1308,7 +1453,10 @@ def prepare_sniper_dataset_from_cache(
                     else:
                         y_all = combined["label_entry"].to_numpy(dtype=np.float32, copy=False)
                         vm = np.isfinite(y_all)
-                        keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
+                        if bool(entry_label_binary):
+                            keep = _sample_indices_binary(y_all, vm, int(max_rows_entry), rng)
+                        else:
+                            keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
                         pool_df = combined.iloc[keep] if keep.size > 0 else combined.iloc[:0]
                     entry_pool_map[preferred_name] = pool_df
                     buf.clear()
@@ -1325,7 +1473,10 @@ def prepare_sniper_dataset_from_cache(
         else:
             y_all = combined["label_entry"].to_numpy(dtype=np.float32, copy=False)
             vm = np.isfinite(y_all)
-            keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
+            if bool(entry_label_binary):
+                keep = _sample_indices_binary(y_all, vm, int(max_rows_entry), rng)
+            else:
+                keep = _sample_indices_regression(y_all, vm, entry_reg_balance_bins, int(max_rows_entry), rng)
             pool_df = combined.iloc[keep] if keep.size > 0 else combined.iloc[:0]
         entry_pool_map[name] = pool_df
         buf.clear()
