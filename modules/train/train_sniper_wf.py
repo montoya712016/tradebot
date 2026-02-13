@@ -78,6 +78,8 @@ class TrainSniperWFSettings:
     entry_pool_full: bool = False
     entry_pool_dir: str | None = None
     entry_pool_prefiltered: bool = True
+    # se False, pula completamente o treino/salvamento de regressao entry_model_*
+    entry_reg_enabled: bool = True
     # modelo para regressao
     entry_model_type: str = "xgb"
     # regressao: janela de target (min). Se 0, usa contrato
@@ -187,6 +189,7 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         entry_pool_dir=Path(settings.entry_pool_dir) if settings.entry_pool_dir else None,
         entry_pool_prefiltered=bool(settings.entry_pool_prefiltered),
         entry_model_type=str(settings.entry_model_type or "xgb"),
+        entry_reg_enabled=bool(settings.entry_reg_enabled),
         entry_reg_window_min=int(settings.entry_reg_window_min),
         entry_reg_weight_alpha=float(settings.entry_reg_weight_alpha),
         entry_reg_weight_power=float(settings.entry_reg_weight_power),

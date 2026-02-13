@@ -51,6 +51,14 @@ def _env_str(name: str, default: str) -> str:
     return v if v else str(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name, "").strip()
+    try:
+        return float(v) if v else float(default)
+    except Exception:
+        return float(default)
+
+
 def _latest_wf_run_dir() -> str | None:
     env_root = os.getenv("MODELS_SNIPER_ROOT", "").strip()
     root = Path(env_root) if env_root else Path("D:/astra/models_sniper")
@@ -118,6 +126,20 @@ def _trades_from_exposure(index: pd.Index, exposure: np.ndarray):
     return trades
 
 
+def _auto_tau(u_score: np.ndarray) -> float:
+    arr = np.asarray(u_score, dtype=np.float64)
+    if arr.size == 0:
+        return 5.0
+    try:
+        p99 = float(np.nanquantile(np.abs(arr), 0.99))
+    except Exception:
+        p99 = 0.0
+    if not np.isfinite(p99):
+        p99 = 0.0
+    # regressor antigo costuma operar em escala mais alta; classificador puro tende a 0..1.
+    return 5.0 if p99 > 5.0 else 0.35
+
+
 def _run_heuristic_mode(symbol: str, days: int, total_days_cache: int, run_dir: str | None, plot_out: str, plot_candles: bool) -> None:
     run_path = Path(run_dir) if run_dir else None
     if run_path is None or (not run_path.exists()):
@@ -152,7 +174,9 @@ def _run_heuristic_mode(symbol: str, days: int, total_days_cache: int, run_dir: 
     p_gate_short = np.clip(np.nan_to_num(p_gate_short, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
     p_long_eff = p_long * p_gate_long
     p_short_eff = p_short * p_gate_short
-    tau = 5.0
+    short_eff = np.where(p_short_eff < 0.0, np.abs(p_short_eff), p_short_eff)
+    u_score = p_long_eff - short_eff
+    tau = _auto_tau(u_score)
     close = df["close"].to_numpy(dtype=np.float64, copy=False)
     equity, exposure = _simulate_threshold_heuristic(
         close,
@@ -168,12 +192,10 @@ def _run_heuristic_mode(symbol: str, days: int, total_days_cache: int, run_dir: 
     max_dd = float(np.nanmax(dd)) if dd.size else 0.0
     flips = int(np.sum(np.abs(np.diff(exposure.astype(np.int16, copy=False))) > 0))
     print(
-        f"SINGLE-HEUR sym={symbol} days={days} tau={tau:.1f} "
+        f"SINGLE-HEUR sym={symbol} days={days} tau={tau:.3f} "
         f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={max_dd:.2%} flips={flips}",
         flush=True,
     )
-    short_eff = np.where(p_short_eff < 0.0, np.abs(p_short_eff), p_short_eff)
-    u_score = p_long_eff - short_eff
     entry_sig_long = u_score >= tau
     entry_sig_short = u_score <= -tau
     entry_ok = entry_sig_long | entry_sig_short
@@ -207,7 +229,7 @@ def _run_heuristic_mode(symbol: str, days: int, total_days_cache: int, run_dir: 
         tau_entry_long=tau,
         tau_entry_short=tau,
         tau_danger=1.0,
-        title=f"{symbol} | heuristic U=long-short tau=5 | ret={ret_total:+.2%} | flips={flips}",
+        title=f"{symbol} | heuristic U=long-short tau={tau:.3f} | ret={ret_total:+.2%} | flips={flips}",
         save_path=plot_out,
         show=True,
         ema_exit=None,
@@ -261,7 +283,7 @@ def _run_prediction_only_mode(symbol: str, days: int, total_days_cache: int, run
     entry_sig_long = np.zeros(n, dtype=bool)
     entry_sig_short = np.zeros(n, dtype=bool)
     entry_ok = np.zeros(n, dtype=bool)
-    tau = 5.0
+    tau = _auto_tau(u_score)
     nan_short = np.full_like(u_score, np.nan, dtype=np.float64)
     print(f"SINGLE-PRED sym={symbol} days={days} rows={n}", flush=True)
     plot_backtest_single(
@@ -303,15 +325,16 @@ def _run_prediction_only_mode(symbol: str, days: int, total_days_cache: int, run
 
 def main() -> None:
     os.environ.setdefault("SNIPER_APPLY_PRED_BIAS", "1")
-    symbol = "DOGEUSDT"
-    days = 300
+    symbol = _env_str("BT_SYMBOL", "DOGEUSDT")
+    days = _env_int("BT_DAYS", 180)
     total_days_cache = 0
-    run_dir = _latest_wf_run_dir()
-    plot_out = "data/generated/plots/crypto_single_symbol.html"
+    run_dir = _env_str("BT_RUN_DIR", "") or _latest_wf_run_dir()
+    plot_out = _env_str("BT_PLOT_OUT", "data/generated/plots/crypto_single_symbol.html")
     # True = velas, False = linha de close
-    plot_candles = False
+    plot_candles = _env_bool("BT_PLOT_CANDLES", default=False)
     # BT_MODE=prediction_only (padrao) | heuristic | backtest | pred_only
-    bt_mode = "prediction_only"
+    bt_mode = _env_str("BT_MODE", "backtest").strip().lower()
+    tau_entry = _env_float("BT_TAU_ENTRY", 0.70)
     run_backtest = bt_mode not in {"pred_only", "pred", "scores_only", "scores"}
     print(f"[bt] mode={bt_mode} symbol={symbol} days={days}", flush=True)
     if bt_mode in {"prediction_only", "prediction", "pred_only", "pred", "scores_only", "scores"}:
@@ -330,7 +353,7 @@ def main() -> None:
         plot_out=plot_out,
         plot_candles=plot_candles,
         run_backtest=run_backtest,
-        override_tau_entry=0.05,
+        override_tau_entry=float(tau_entry),
     )
     # Diagnóstico rápido de distribuição das previsões (percentis 5%..95%)
     if _env_bool("BT_PRINT_PCT", default=True):

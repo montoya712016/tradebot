@@ -76,6 +76,9 @@ class PeriodModel:
     entry_calibration_map_long: dict[str, dict[str, float]] = field(default_factory=dict)
     entry_calibration_map_short: dict[str, dict[str, float]] = field(default_factory=dict)
     entry_calibration_map: dict[str, dict[str, float]] | None = None
+    # marca quando o "entry_model" veio de classificador (fallback cls-only)
+    entry_from_cls_map_long: dict[str, bool] = field(default_factory=dict)
+    entry_from_cls_map_short: dict[str, bool] = field(default_factory=dict)
     entry_cls_model_long: Any | None = None
     entry_cls_model_short: Any | None = None
     entry_cls_models_long: dict[str, Any] = field(default_factory=dict)
@@ -181,6 +184,8 @@ def load_period_models(
         entry_pred_bias_map_short: dict[str, float] = {}
         entry_calibration_map_long: dict[str, dict[str, float]] = {}
         entry_calibration_map_short: dict[str, dict[str, float]] = {}
+        entry_from_cls_map_long: dict[str, bool] = {}
+        entry_from_cls_map_short: dict[str, bool] = {}
         entry_cls_models_long: dict[str, Any] = {}
         entry_cls_models_short: dict[str, Any] = {}
         entry_cls_cols_map_long: dict[str, list[str]] = {}
@@ -202,6 +207,7 @@ def load_period_models(
                     continue
                 name = f"ret_exp_{w}m"
                 entry_models_long[name] = _load_booster(mdir)
+                entry_from_cls_map_long[name] = False
                 meta_key = f"entry_long_{int(w)}m"
                 mk = meta.get(meta_key) or {}
                 entry_cols_map_long[name] = list(mk.get("feature_cols") or meta["entry"]["feature_cols"])
@@ -227,6 +233,7 @@ def load_period_models(
                     continue
                 name = f"ret_exp_{w}m"
                 entry_models_short[name] = _load_booster(mdir)
+                entry_from_cls_map_short[name] = False
                 meta_key = f"entry_short_{int(w)}m"
                 mk = meta.get(meta_key) or {}
                 entry_cols_map_short[name] = list(mk.get("feature_cols") or meta["entry"]["feature_cols"])
@@ -287,6 +294,20 @@ def load_period_models(
                     except Exception:
                         pass
 
+        # fallback cls-only: quando nao houver entry_model_*, usa entry_cls_* como score principal
+        if (not entry_models_long) and entry_cls_models_long:
+            for name, model in entry_cls_models_long.items():
+                entry_models_long[name] = model
+                entry_cols_map_long[name] = list(entry_cls_cols_map_long.get(name) or meta["entry"]["feature_cols"])
+                entry_pred_bias_map_long[name] = 0.0
+                entry_from_cls_map_long[name] = True
+        if (not entry_models_short) and entry_cls_models_short:
+            for name, model in entry_cls_models_short.items():
+                entry_models_short[name] = model
+                entry_cols_map_short[name] = list(entry_cls_cols_map_short.get(name) or meta["entry"]["feature_cols"])
+                entry_pred_bias_map_short[name] = 0.0
+                entry_from_cls_map_short[name] = True
+
         # fallback legado (single)
         if not entry_models_long and not entry_models_short:
             specs = _entry_specs()
@@ -299,6 +320,21 @@ def load_period_models(
             entry_cols_map_short[name] = list(meta["entry"]["feature_cols"])
             entry_pred_bias_map_long[name] = 0.0
             entry_pred_bias_map_short[name] = 0.0
+            entry_from_cls_map_long[name] = False
+            entry_from_cls_map_short[name] = False
+
+        if not entry_models_long and entry_models_short:
+            first_name = next(iter(entry_models_short.keys()))
+            entry_models_long[first_name] = entry_models_short[first_name]
+            entry_cols_map_long[first_name] = list(entry_cols_map_short.get(first_name) or meta["entry"]["feature_cols"])
+            entry_pred_bias_map_long[first_name] = float(entry_pred_bias_map_short.get(first_name, 0.0) or 0.0)
+            entry_from_cls_map_long[first_name] = bool(entry_from_cls_map_short.get(first_name, False))
+        if not entry_models_short and entry_models_long:
+            first_name = next(iter(entry_models_long.keys()))
+            entry_models_short[first_name] = entry_models_long[first_name]
+            entry_cols_map_short[first_name] = list(entry_cols_map_long.get(first_name) or meta["entry"]["feature_cols"])
+            entry_pred_bias_map_short[first_name] = float(entry_pred_bias_map_long.get(first_name, 0.0) or 0.0)
+            entry_from_cls_map_short[first_name] = bool(entry_from_cls_map_long.get(first_name, False))
 
         entry_model_long = list(entry_models_long.values())[0]
         entry_model_short = list(entry_models_short.values())[0]
@@ -313,6 +349,12 @@ def load_period_models(
         tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
         tau_danger = 1.0
         tau_exit = 1.0
+        cls_as_entry = bool(
+            any(entry_from_cls_map_long.values()) or any(entry_from_cls_map_short.values())
+        )
+        cls_default_thr = float((meta.get("entry_cls") or {}).get("positive_threshold", 50.0) or 50.0) / 100.0
+        if cls_as_entry and tau_entry is not None and float(tau_entry) < 0.05:
+            tau_entry = float(cls_default_thr)
         if tau_entry is None:
             tau_entry = float(meta["entry"].get("threshold", 0.5))
         scale_mult = float(entry_label_scale) if float(entry_label_scale) > 1.0 else 1.0
@@ -344,6 +386,8 @@ def load_period_models(
                 entry_calibration_map_long=entry_calibration_map_long,
                 entry_calibration_map_short=entry_calibration_map_short,
                 entry_calibration_map=entry_calibration_map_long,
+                entry_from_cls_map_long=entry_from_cls_map_long,
+                entry_from_cls_map_short=entry_from_cls_map_short,
                 entry_cls_model_long=entry_cls_model_long,
                 entry_cls_model_short=entry_cls_model_short,
                 entry_cls_models_long=entry_cls_models_long,
@@ -426,6 +470,15 @@ def _build_matrix_rows(df: pd.DataFrame, cols: List[str], rows: np.ndarray) -> n
 def _predict_entry_model(model: Any, X: np.ndarray) -> np.ndarray:
     if xgb is not None and isinstance(model, xgb.Booster):
         return model.predict(xgb.DMatrix(X), validate_features=False)
+    if hasattr(model, "predict_proba"):
+        try:
+            proba = np.asarray(model.predict_proba(X))
+            if proba.ndim == 2 and proba.shape[1] >= 2:
+                return proba[:, 1].astype(np.float32, copy=False)
+            if proba.ndim == 2 and proba.shape[1] == 1:
+                return proba[:, 0].astype(np.float32, copy=False)
+        except Exception:
+            pass
     return model.predict(X)
 
 
@@ -530,8 +583,13 @@ def predict_scores_walkforward(
             model_short = pm.entry_models_short.get(name, pm.entry_model_short)
             cols_long = pm.entry_cols_map_long.get(name, pm.entry_cols)
             cols_short = pm.entry_cols_map_short.get(name, pm.entry_cols)
+            src_cls_long = bool((pm.entry_from_cls_map_long or {}).get(name, False))
+            src_cls_short = bool((pm.entry_from_cls_map_short or {}).get(name, False))
             X_e = _build_matrix_rows(df, cols_long, rows)
             pe_long = _predict_entry_model(model_long, X_e).astype(np.float32, copy=False)
+            if src_cls_long:
+                cls_scale = float(pm.entry_label_scale) if float(pm.entry_label_scale) > 1.0 else 1.0
+                pe_long = np.clip(pe_long, 0.0, 1.0).astype(np.float32, copy=False) * np.float32(cls_scale)
             cal_l = pm.entry_calibration_map_long.get(name)
             if cal_l is not None:
                 a = np.float32(float(cal_l.get("a", 1.0)))
@@ -554,6 +612,9 @@ def predict_scores_walkforward(
 
             X_s = _build_matrix_rows(df, cols_short, rows)
             pe_short = _predict_entry_model(model_short, X_s).astype(np.float32, copy=False)
+            if src_cls_short:
+                cls_scale = float(pm.entry_label_scale) if float(pm.entry_label_scale) > 1.0 else 1.0
+                pe_short = np.clip(pe_short, 0.0, 1.0).astype(np.float32, copy=False) * np.float32(cls_scale)
             cal_s = pm.entry_calibration_map_short.get(name)
             if cal_s is not None:
                 a = np.float32(float(cal_s.get("a", 1.0)))

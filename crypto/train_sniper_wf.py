@@ -29,6 +29,7 @@ from crypto.trade_contract import TradeContract  # type: ignore
 
 # Final run config (single source of truth)
 RUN_DIR_RESUME = ""
+# Refresh já pode ser pulado quando labels já foram atualizados recentemente.
 REFRESH_LABELS_BEFORE_TRAIN = False
 ENTRY_MODEL_TYPE = "catboost"
 XGB_DEVICE = "cuda:0"
@@ -42,6 +43,7 @@ INCLUDE_T0 = True
 OFFSETS_OVERRIDE: tuple[int, ...] = ()  # ex: (0, 90, 180, ..., 2160)
 MAX_ROWS_ENTRY = 10_000_000
 MIN_SYMBOLS_USED_PER_PERIOD = 60
+ENTRY_REG_ENABLED = False
 
 # Best params from wf_009
 SIDE_MAE_PENALTY = 1.10
@@ -54,19 +56,20 @@ SIDE_REVERSAL_BONUS = 0.55
 SIDE_CONFIRM_MIN = 20
 SIDE_CONFIRM_MOVE = 0.0025
 SIDE_PRECONFIRM_SUPPRESS = 0.15
+# Mantidos por compatibilidade; nao sao usados quando ENTRY_REG_ENABLED=False.
 ENTRY_REG_WEIGHT_ALPHA = 0.60
 ENTRY_REG_WEIGHT_POWER = 0.90
 ENTRY_REG_BALANCE_DISTANCE_POWER = 0.10
 ENTRY_REG_BALANCE_MIN_FRAC = 0.25
-ENTRY_REG_LABEL_COL_TEMPLATE = "edge_label_{side}"
-ENTRY_REG_WEIGHT_COL_TEMPLATE = "edge_weight_{side}"
+ENTRY_REG_LABEL_COL_TEMPLATE = "entry_gate_{side}"
+ENTRY_REG_WEIGHT_COL_TEMPLATE = "entry_gate_weight_{side}"
 ENTRY_CLS_ENABLED = True
 ENTRY_CLS_MODEL_TYPE = "catboost"
 ENTRY_CLS_LABEL_COL_TEMPLATE = "entry_gate_{side}"
 ENTRY_CLS_WEIGHT_COL_TEMPLATE = "entry_gate_weight_{side}"
-ENTRY_CLS_POSITIVE_THRESHOLD = 75.0
+ENTRY_CLS_POSITIVE_THRESHOLD = 50.0
 ENTRY_CLS_BALANCE_BINS = ()
-ENTRY_CLS_TARGET_POS_RATIO = 0.20
+ENTRY_CLS_TARGET_POS_RATIO = 0.25
 # Gate: aumentar peso da classe negativa reduz fake positives.
 # Se ficar "duro" demais, aproxime NEG de POS (ex.: 1.8 -> 1.4).
 ENTRY_CLS_POS_WEIGHT = 1.0
@@ -167,6 +170,9 @@ def _set_default_env() -> None:
     os.environ.setdefault("SNIPER_TAIL_WEIGHT_MULT", "2")
     os.environ.setdefault("SNIPER_WEIGHT_MAX_MULT", "4")
     os.environ.setdefault("SNIPER_ENABLE_REG_SHAPE_WEIGHT", "1")
+    os.environ.setdefault("SNIPER_COMPUTE_EDGE_LABELS", "0")
+    os.environ.setdefault("SNIPER_COMPUTE_ENTRY_GATES", "1")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_REVERSAL_ONLY", "1")
     # Classificador de gate: evitar forcar probs para ~0.5
     os.environ.setdefault("SNIPER_ENTRY_CLS_AUTO_CLASS_WEIGHTS", "")
     os.environ.setdefault("SNIPER_ENTRY_CLS_AUTO_POS_WEIGHT", "0")
@@ -174,12 +180,15 @@ def _set_default_env() -> None:
     # nao rebalancear por peso para 50/50 (queremos classe 0 dominante)
     os.environ.setdefault("SNIPER_CLS_BALANCE_CLASS_WEIGHT", "0")
     # Labels de gate mais seletivos (maior raridade/precisao):
-    # - horizonte menor
-    # - TP mais alto
-    # - SL mais apertado
+    # - classe focada em reversao com multiplos eventos por trecho
     os.environ.setdefault("SNIPER_ENTRY_GATE_TMAX_MIN", "240")
-    os.environ.setdefault("SNIPER_ENTRY_GATE_TP_PCT", "0.03")
-    os.environ.setdefault("SNIPER_ENTRY_GATE_SL_PCT", "0.006")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_PRELOOKBACK_MIN", "120")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_PREMOVE_ATR_SOFT", "0.80")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_PREMOVE_ATR_HARD", "2.00")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_NEAR_EXTREMA_ATR", "0.35")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_TIMEOUT_RET_ATR_MIN", "0.25")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_TP_ATR", "1.80")
+    os.environ.setdefault("SNIPER_ENTRY_GATE_SL_ATR", "1.20")
     # Thermal guard (pausa treino se CPU/GPU aquecer demais)
     os.environ.setdefault("SNIPER_THERMAL_GUARD", "1")
     os.environ.setdefault("SNIPER_THERMAL_MAX_TEMP_C", "80")
@@ -287,6 +296,7 @@ def main() -> None:
         offsets_step_days=int(OFFSET_STEP_DAYS),
         offsets_days=offsets,
         entry_model_type=str(ENTRY_MODEL_TYPE),
+        entry_reg_enabled=bool(ENTRY_REG_ENABLED),
         entry_params=dict(ENTRY_PARAMS),
         entry_params_by_side=dict(ENTRY_PARAMS_BY_SIDE),
         xgb_device=str(XGB_DEVICE),
@@ -297,7 +307,7 @@ def main() -> None:
         entry_reg_balance_distance_power=float(ENTRY_REG_BALANCE_DISTANCE_POWER),
         entry_reg_balance_min_frac=float(ENTRY_REG_BALANCE_MIN_FRAC),
         entry_label_mode="split_0_100",
-        entry_label_scale=100.0,
+        entry_label_scale=1.0,
         entry_sides=("long", "short"),
         entry_reg_label_col_template=str(ENTRY_REG_LABEL_COL_TEMPLATE),
         entry_reg_weight_col_template=str(ENTRY_REG_WEIGHT_COL_TEMPLATE),
@@ -314,7 +324,7 @@ def main() -> None:
         entry_cls_params_by_side=dict(ENTRY_CLS_PARAMS_BY_SIDE),
         max_rows_entry=int(MAX_ROWS_ENTRY),
         abort_ram_pct=85.0,
-        entry_pool_full=True,
+        entry_pool_full=False,
         entry_pool_prefiltered=True,
         use_feature_cache=True,
         min_symbols_used_per_period=int(min_symbols_per_period),

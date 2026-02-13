@@ -403,17 +403,36 @@ class _CatBoostThermalCallback:
 
 
 def _fit_catboost_with_optional_thermal(model: Any, *, where: str, **fit_kwargs) -> None:
-    if _env_bool("SNIPER_THERMAL_GUARD", default=False):
-        fit_kwargs["callbacks"] = [_CatBoostThermalCallback(where)]
-        try:
-            model.fit(**fit_kwargs)
-            return
-        except TypeError as e:
-            if "callbacks" not in str(e).lower():
-                raise
-            print("[sniper-train] aviso: CatBoost sem suporte a callbacks; thermal_guard só no pré-fit", flush=True)
-            fit_kwargs.pop("callbacks", None)
-    model.fit(**fit_kwargs)
+    if not _env_bool("SNIPER_THERMAL_GUARD", default=False):
+        model.fit(**fit_kwargs)
+        return
+
+    # CatBoost em GPU não suporta callbacks de usuário.
+    # Mantemos thermal guard no pré-fit e tentamos callback apenas em CPU.
+    task_type = ""
+    try:
+        params = model.get_params() if hasattr(model, "get_params") else {}
+        task_type = str((params or {}).get("task_type", "")).strip().upper()
+    except Exception:
+        task_type = ""
+
+    if task_type == "GPU":
+        model.fit(**fit_kwargs)
+        return
+
+    fit_kwargs["callbacks"] = [_CatBoostThermalCallback(where)]
+    try:
+        model.fit(**fit_kwargs)
+        return
+    except Exception as e:
+        msg = str(e).lower()
+        # versões/paths diferentes podem lançar TypeError ou CatBoostError
+        # para callback não suportado.
+        if ("callback" not in msg) and ("user defined callbacks are not supported for gpu" not in msg):
+            raise
+        print("[sniper-train] aviso: CatBoost sem suporte a callbacks; thermal_guard só no pré-fit", flush=True)
+        fit_kwargs.pop("callbacks", None)
+        model.fit(**fit_kwargs)
 
 try:
     from .sniper_dataflow import (
@@ -485,6 +504,8 @@ class TrainConfig:
     entry_pool_full: bool = False
     entry_pool_dir: Path | None = None
     entry_pool_prefiltered: bool = True
+    # se False, roda apenas o classificador (entry_cls_*), sem regressor entry_model_*
+    entry_reg_enabled: bool = True
     # modelo para regressao (ex.: "catboost" ou "xgb")
     entry_model_type: str = "xgb"
     # regressao: janela usada para target (minutos). Se 0, usa contrato.
@@ -1496,6 +1517,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         run_dir = _next_run_dir(save_root)
     entry_params = dict(DEFAULT_ENTRY_PARAMS if cfg.entry_params is None else cfg.entry_params)
     entry_params_by_side = dict(getattr(cfg, "entry_params_by_side", None) or {})
+    reg_enabled = bool(getattr(cfg, "entry_reg_enabled", True))
     cls_enabled = bool(getattr(cfg, "entry_cls_enabled", True))
     cls_model_type = str(getattr(cfg, "entry_cls_model_type", "catboost") or "catboost").strip().lower()
     cls_params = dict(DEFAULT_ENTRY_CLS_PARAMS if getattr(cfg, "entry_cls_params", None) is None else getattr(cfg, "entry_cls_params"))
@@ -1521,7 +1543,8 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             flush=True,
         )
     print(
-        f"[sniper-train] entry_reg config: label_tpl={reg_label_tpl} weight_tpl={(reg_weight_tpl if reg_weight_tpl else '<auto>')}",
+        f"[sniper-train] entry_reg config: enabled={int(reg_enabled)} "
+        f"label_tpl={reg_label_tpl} weight_tpl={(reg_weight_tpl if reg_weight_tpl else '<auto>')}",
         flush=True,
     )
     label_mode = str(getattr(cfg, "entry_label_mode", "signed") or "signed").strip().lower()
@@ -1587,7 +1610,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
     pool_df_map: dict[str, dict[str, list[Path]]] | None = None
     pool_max_ts: dict[str, pd.Timestamp | None] | None = None
     pool_layout: dict[str, str] | None = None
-    if bool(getattr(cfg, "entry_pool_full", False)):
+    if bool(getattr(cfg, "entry_pool_full", False)) and bool(reg_enabled):
         pool_dir = Path(cfg.entry_pool_dir) if getattr(cfg, "entry_pool_dir", None) else (run_dir / "entry_pool_full")
         sides = list(entry_sides)
         pool_df_map = {}
@@ -1737,7 +1760,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             pool_layout[side_key] = layout
     for tail in cfg.offsets_days:
         period_dir = run_dir / f"period_{int(tail)}d"
-        reg_done = all((period_dir / f"entry_model_{side}" / "model_entry.json").exists() for side in entry_sides)
+        reg_done = (not reg_enabled) or all((period_dir / f"entry_model_{side}" / "model_entry.json").exists() for side in entry_sides)
         cls_done = (not cls_enabled) or all((period_dir / f"entry_cls_model_{side}" / "model_entry_gate.json").exists() for side in entry_sides)
         if reg_done and cls_done:
             print(f"[sniper-train] {tail}d: ja existe ({period_dir}), pulando", flush=True)
@@ -1749,7 +1772,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         )
         _thermal_guard_wait_if_needed(where=f"period_start:{int(tail)}d", force_sample=True)
         pack_by_side: dict[str, SniperDataPack | None] = {}
-        if pool_df_map is None and bool(getattr(cfg, "use_feature_cache", True)):
+        if reg_enabled and pool_df_map is None and bool(getattr(cfg, "use_feature_cache", True)):
             t_pack = time.perf_counter()
             for side in entry_sides:
                 side_key = str(side).strip().lower()
@@ -1781,7 +1804,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 )
             if timing_on:
                 print(f"[sniper-train][timing] pack_from_cache_s={time.perf_counter() - t_pack:.2f}", flush=True)
-        elif pool_df_map is None:
+        elif reg_enabled and pool_df_map is None:
             t_pack = time.perf_counter()
             for side in entry_sides:
                 side_key = str(side).strip().lower()
@@ -1843,7 +1866,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         spec_by_name = {str(s.get("name")): s for s in entry_specs_full}
         entry_batches_by_side: dict[str, dict[str, SniperBatch]] = {}
         base_batch_by_side: dict[str, SniperBatch] = {}
-        if pool_df_map is None:
+        if reg_enabled and pool_df_map is None:
             for side in entry_sides:
                 pack = pack_by_side.get(side)
                 if pack is None:
@@ -1852,7 +1875,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 base_batch = entry_batches.get(base_name) or pack.entry
                 entry_batches_by_side[side] = entry_batches
                 base_batch_by_side[side] = base_batch
-        else:
+        elif reg_enabled:
             def _pool_for_side_name(side: str, name: str) -> tuple[dict[str, list[Path]] | None, pd.Timestamp | None, str | None]:
                 df_map = pool_df_map.get(side) if pool_df_map else None
                 max_ts = pool_max_ts.get(side) if pool_max_ts else None
@@ -2092,7 +2115,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 if base_batch is not None and base_batch.X.size > 0:
                     base_batch_by_side[side] = base_batch
                     entry_batches_by_side[side] = {}
-        if not base_batch_by_side:
+        if reg_enabled and (not base_batch_by_side):
             print(f"[sniper-train] {tail}d: dataset vazio, pulando", flush=True)
             continue
         entry_cls_batches_by_side: dict[str, SniperBatch] = {}
@@ -2204,7 +2227,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 print(f"[sniper-train][timing] pack_cls_s={time.perf_counter() - t_cls_pack:.2f}", flush=True)
         entry_models_by_side: dict[str, dict[str, tuple[Any, dict]]] = {s: {} for s in entry_sides}
         entry_cls_models_by_side: dict[str, dict[str, tuple[Any, dict]]] = {s: {} for s in entry_sides}
-        for side in entry_sides:
+        for side in (entry_sides if reg_enabled else []):
             base_batch = base_batch_by_side.get(side)
             entry_batches = entry_batches_by_side.get(side, {})
             if base_batch is None or base_batch.X.size == 0:
@@ -2523,7 +2546,9 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 entry_cls_models_by_side[side][name] = (m_cls, m_cls_meta)
                 print(f"[sniper-train] EntryGate {side} {name}: best_iter={m_cls_meta['best_iteration']}", flush=True)
 
-        if not any(entry_models_by_side[s] for s in entry_sides):
+        has_reg_models = any(entry_models_by_side[s] for s in entry_sides)
+        has_cls_models = (bool(cls_enabled) and any(entry_cls_models_by_side[s] for s in entry_sides))
+        if (not has_reg_models) and (not has_cls_models):
             print(f"[sniper-train] {tail}d: nenhum modelo treinado, pulando", flush=True)
             continue
 
@@ -2540,21 +2565,22 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         except Exception:
             period_train_end = None
 
-        # salva modelos entry por janela + alias entry_model (base)
-        for side in entry_sides:
-            entry_models = entry_models_by_side.get(side, {})
-            for name, w in entry_specs:
-                if name not in entry_models:
-                    continue
-                model, _m_meta = entry_models[name]
-                spec = spec_by_name.get(name, {})
-                w_int = int(spec.get("window") or w)
-                d = period_dir / f"entry_model_{side}_{w_int}m"
-                d.mkdir(parents=True, exist_ok=True)
-                _save_model(model, d / "model_entry.json")
-            if base_name in entry_models:
-                (period_dir / f"entry_model_{side}").mkdir(parents=True, exist_ok=True)
-                _save_model(entry_models[base_name][0], period_dir / f"entry_model_{side}" / "model_entry.json")
+        # salva modelos de regressao (opcional)
+        if reg_enabled:
+            for side in entry_sides:
+                entry_models = entry_models_by_side.get(side, {})
+                for name, w in entry_specs:
+                    if name not in entry_models:
+                        continue
+                    model, _m_meta = entry_models[name]
+                    spec = spec_by_name.get(name, {})
+                    w_int = int(spec.get("window") or w)
+                    d = period_dir / f"entry_model_{side}_{w_int}m"
+                    d.mkdir(parents=True, exist_ok=True)
+                    _save_model(model, d / "model_entry.json")
+                if base_name in entry_models:
+                    (period_dir / f"entry_model_{side}").mkdir(parents=True, exist_ok=True)
+                    _save_model(entry_models[base_name][0], period_dir / f"entry_model_{side}" / "model_entry.json")
 
         if cls_enabled:
             for side in entry_sides:
@@ -2574,11 +2600,17 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
 
         sample_batch = base_batch_by_side.get(entry_sides[0]) if base_batch_by_side else None
         sample_cls_batch = entry_cls_batches_by_side.get(entry_sides[0]) if entry_cls_batches_by_side else None
+        entry_feat_cols = (
+            sample_batch.feature_cols
+            if sample_batch is not None
+            else (sample_cls_batch.feature_cols if sample_cls_batch is not None else [])
+        )
         meta = {
             "entry": {
-                "feature_cols": (sample_batch.feature_cols if sample_batch is not None else []),
+                "feature_cols": entry_feat_cols,
                 "label_mode": str(label_mode),
                 "label_scale": float(label_scale),
+                "reg_enabled": bool(reg_enabled),
                 "sides": list(entry_sides),
             },
             "entry_cls": {
@@ -2594,7 +2626,15 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             "train_end_utc": (
                 str(pd.to_datetime(period_train_end))
                 if period_train_end is not None
-                else (np.datetime_as_string(np.max(sample_batch.ts), unit="s") if sample_batch is not None and sample_batch.ts.size else None)
+                else (
+                    np.datetime_as_string(np.max(sample_batch.ts), unit="s")
+                    if sample_batch is not None and sample_batch.ts.size
+                    else (
+                        np.datetime_as_string(np.max(sample_cls_batch.ts), unit="s")
+                        if sample_cls_batch is not None and sample_cls_batch.ts.size
+                        else None
+                    )
+                )
             ),
             "symbols": (
                 sample_pack.symbols_used if (sample_pack is not None and getattr(sample_pack, "symbols_used", None)) else (sample_pack.symbols if sample_pack is not None else list(symbols))
@@ -2603,30 +2643,31 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             "symbols_used": (sample_pack.symbols_used or None) if sample_pack is not None else None,
             "symbols_skipped": (sample_pack.symbols_skipped or None) if sample_pack is not None else None,
         }
-        # meta extra por janela e lado
-        for side in entry_sides:
-            entry_models = entry_models_by_side.get(side, {})
-            entry_batches = entry_batches_by_side.get(side, {})
-            base_batch = base_batch_by_side.get(side)
-            for name, w in entry_specs:
-                if name not in entry_models:
-                    continue
-                if name in entry_batches:
-                    feat_cols = entry_batches[name].feature_cols
-                else:
-                    # fallback para o batch base carregado on-demand
-                    feat_cols = base_batch.feature_cols if base_batch is not None else []
-                _model, _m_meta = entry_models[name]
-                spec = spec_by_name.get(name, {})
-                w_int = int(spec.get("window") or w)
-                meta_key = f"entry_{side}_{w_int}m"
-                meta[meta_key] = {
-                    "feature_cols": feat_cols,
-                    "best_iteration": int((_m_meta or {}).get("best_iteration", 0) or 0),
-                    "metrics": ((_m_meta or {}).get("metrics", None) or None),
-                    "pred_bias": float((_m_meta or {}).get("pred_bias", 0.0) or 0.0),
-                    "calibration": ((_m_meta or {}).get("calibration", None) or None),
-                }
+        # meta extra por janela e lado (regressao)
+        if reg_enabled:
+            for side in entry_sides:
+                entry_models = entry_models_by_side.get(side, {})
+                entry_batches = entry_batches_by_side.get(side, {})
+                base_batch = base_batch_by_side.get(side)
+                for name, w in entry_specs:
+                    if name not in entry_models:
+                        continue
+                    if name in entry_batches:
+                        feat_cols = entry_batches[name].feature_cols
+                    else:
+                        # fallback para o batch base carregado on-demand
+                        feat_cols = base_batch.feature_cols if base_batch is not None else []
+                    _model, _m_meta = entry_models[name]
+                    spec = spec_by_name.get(name, {})
+                    w_int = int(spec.get("window") or w)
+                    meta_key = f"entry_{side}_{w_int}m"
+                    meta[meta_key] = {
+                        "feature_cols": feat_cols,
+                        "best_iteration": int((_m_meta or {}).get("best_iteration", 0) or 0),
+                        "metrics": ((_m_meta or {}).get("metrics", None) or None),
+                        "pred_bias": float((_m_meta or {}).get("pred_bias", 0.0) or 0.0),
+                        "calibration": ((_m_meta or {}).get("calibration", None) or None),
+                    }
         if cls_enabled:
             for side in entry_sides:
                 cls_models = entry_cls_models_by_side.get(side, {})

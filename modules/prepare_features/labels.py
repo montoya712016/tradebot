@@ -60,6 +60,17 @@ ENTRY_GATE_TMAX_MIN = 720
 ENTRY_GATE_TP_PCT = 0.02
 ENTRY_GATE_SL_PCT = 0.01
 ENTRY_GATE_SCALE = 100.0
+ENTRY_GATE_REVERSAL_ONLY = True
+ENTRY_GATE_PRELOOKBACK_MIN = 120
+ENTRY_GATE_PREMOVE_ATR_SOFT = 0.80
+ENTRY_GATE_PREMOVE_ATR_HARD = 2.00
+ENTRY_GATE_TP_ATR = 1.80
+ENTRY_GATE_SL_ATR = 1.20
+ENTRY_GATE_NEAR_EXTREMA_ATR = 0.35
+ENTRY_GATE_TIMEOUT_RET_ATR_MIN = 0.25
+ENTRY_GATE_ATR_SPAN = 48
+ENTRY_GATE_WEIGHT_MIN = 0.20
+ENTRY_GATE_WEIGHT_MAX = 4.00
 
 
 @njit(cache=True)
@@ -295,6 +306,193 @@ def _compute_entry_gate_labels_numba(
             out_short[i] = np.float32(scale)
 
     return out_long, out_short
+
+
+def _compute_atr_abs_from_ohlc(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    span_bars: int,
+) -> np.ndarray:
+    h = pd.Series(np.asarray(high, dtype=np.float64))
+    l = pd.Series(np.asarray(low, dtype=np.float64))
+    c = pd.Series(np.asarray(close, dtype=np.float64))
+    prev_c = c.shift(1)
+    tr = pd.concat(
+        [
+            (h - l).abs(),
+            (h - prev_c).abs(),
+            (l - prev_c).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    span = max(2, int(span_bars))
+    atr = tr.ewm(span=span, adjust=False, min_periods=span).mean().bfill().ffill()
+    atr_np = atr.to_numpy(dtype=np.float64, copy=False)
+    floor = np.maximum(1e-8, np.abs(np.asarray(close, dtype=np.float64)) * 1e-6)
+    return np.maximum(atr_np, floor).astype(np.float64, copy=False)
+
+
+@njit(cache=True)
+def _compute_entry_gate_reversal_numba(
+    close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    atr_abs: np.ndarray,
+    past_high: np.ndarray,
+    past_low: np.ndarray,
+    fut_high: np.ndarray,
+    fut_low: np.ndarray,
+    horizon_bars: int,
+    tp_atr: float,
+    sl_atr: float,
+    pre_soft_atr: float,
+    pre_hard_atr: float,
+    near_ext_atr: float,
+    timeout_ret_atr: float,
+    scale: float,
+    w_min: float,
+    w_max: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n = close.size
+    out_long = np.zeros(n, np.float32)
+    out_short = np.zeros(n, np.float32)
+    w_long = np.full(n, np.float32(max(0.0, w_min)), np.float32)
+    w_short = np.full(n, np.float32(max(0.0, w_min)), np.float32)
+    eps = 1e-9
+    pre_h = pre_hard_atr if pre_hard_atr > pre_soft_atr else pre_soft_atr
+    if pre_h <= 0.0:
+        pre_h = 1.0
+    if near_ext_atr <= 0.0:
+        near_ext_atr = 0.25
+    for i in range(n):
+        px0 = close[i]
+        atr = atr_abs[i]
+        if (not np.isfinite(px0)) or (not np.isfinite(atr)) or px0 <= 0.0 or atr <= 0.0:
+            continue
+        end = i + horizon_bars
+        if end >= n:
+            end = n - 1
+        if end <= i:
+            continue
+
+        ph = past_high[i]
+        pl = past_low[i]
+        fh = fut_high[i]
+        fl = fut_low[i]
+
+        drop = 0.0
+        rise = 0.0
+        dist_bottom = 1e9
+        dist_top = 1e9
+        if np.isfinite(ph):
+            drop = (ph - px0) / atr
+        if np.isfinite(pl):
+            rise = (px0 - pl) / atr
+        if np.isfinite(fl):
+            dist_bottom = (px0 - fl) / atr
+        if np.isfinite(fh):
+            dist_top = (fh - px0) / atr
+
+        cand_long = (drop >= pre_soft_atr) and (dist_bottom <= near_ext_atr)
+        cand_short = (rise >= pre_soft_atr) and (dist_top <= near_ext_atr)
+
+        if cand_long:
+            tp_px = px0 + tp_atr * atr
+            sl_px = px0 - sl_atr * atr
+            hit = 0
+            for j in range(i + 1, end + 1):
+                hj = high[j]
+                lj = low[j]
+                cj = close[j]
+                hit_tp = np.isfinite(hj) and (hj >= tp_px)
+                hit_sl = np.isfinite(lj) and (lj <= sl_px)
+                if hit_tp and hit_sl:
+                    if np.isfinite(cj) and (cj >= px0):
+                        hit = 1
+                    else:
+                        hit = -1
+                    break
+                if hit_tp:
+                    hit = 1
+                    break
+                if hit_sl:
+                    hit = -1
+                    break
+            if hit == 0:
+                cend = close[end]
+                if np.isfinite(cend):
+                    r_to = (cend - px0) / atr
+                    if r_to >= timeout_ret_atr:
+                        hit = 1
+            if hit > 0:
+                out_long[i] = np.float32(scale)
+            strength = drop / pre_h
+            if strength < 0.0:
+                strength = 0.0
+            if strength > 1.5:
+                strength = 1.5
+            near = 1.0 - (dist_bottom / (near_ext_atr + eps))
+            if near < 0.0:
+                near = 0.0
+            if near > 1.0:
+                near = 1.0
+            bonus = 0.5 if hit > 0 else 0.0
+            ww = 0.6 + strength + near + bonus
+            if ww < w_min:
+                ww = w_min
+            if ww > w_max:
+                ww = w_max
+            w_long[i] = np.float32(ww)
+
+        if cand_short:
+            tp_px = px0 - tp_atr * atr
+            sl_px = px0 + sl_atr * atr
+            hit = 0
+            for j in range(i + 1, end + 1):
+                hj = high[j]
+                lj = low[j]
+                cj = close[j]
+                hit_tp = np.isfinite(lj) and (lj <= tp_px)
+                hit_sl = np.isfinite(hj) and (hj >= sl_px)
+                if hit_tp and hit_sl:
+                    if np.isfinite(cj) and (cj <= px0):
+                        hit = 1
+                    else:
+                        hit = -1
+                    break
+                if hit_tp:
+                    hit = 1
+                    break
+                if hit_sl:
+                    hit = -1
+                    break
+            if hit == 0:
+                cend = close[end]
+                if np.isfinite(cend):
+                    r_to = (px0 - cend) / atr
+                    if r_to >= timeout_ret_atr:
+                        hit = 1
+            if hit > 0:
+                out_short[i] = np.float32(scale)
+            strength = rise / pre_h
+            if strength < 0.0:
+                strength = 0.0
+            if strength > 1.5:
+                strength = 1.5
+            near = 1.0 - (dist_top / (near_ext_atr + eps))
+            if near < 0.0:
+                near = 0.0
+            if near > 1.0:
+                near = 1.0
+            bonus = 0.5 if hit > 0 else 0.0
+            ww = 0.6 + strength + near + bonus
+            if ww < w_min:
+                ww = w_min
+            if ww > w_max:
+                ww = w_max
+            w_short[i] = np.float32(ww)
+    return out_long, out_short, w_long, w_short
 
 
 @njit(cache=True)
@@ -892,22 +1090,24 @@ def apply_timing_regression_labels(
     df["timing_label_short"] = pd.Series(label_short, index=df.index)
     df["timing_weight_long"] = pd.Series(weights_long.astype(np.float32), index=df.index)
     df["timing_weight_short"] = pd.Series(weights_short.astype(np.float32), index=df.index)
-    # Aliases explicitos por tarefa para evitar ambiguidade no treino.
-    # Regressor (edge) e classificador (entry gate) podem evoluir depois
-    # para pesos diferentes sem quebrar contrato de colunas.
-    df["edge_weight_long"] = pd.Series(weights_long.astype(np.float32), index=df.index)
-    df["edge_weight_short"] = pd.Series(weights_short.astype(np.float32), index=df.index)
-    df["entry_gate_weight_long"] = pd.Series(weights_long.astype(np.float32), index=df.index)
-    df["entry_gate_weight_short"] = pd.Series(weights_short.astype(np.float32), index=df.index)
-    df["entry_gate_weight"] = pd.Series(weights.astype(np.float32), index=df.index)
 
     # ===== Edge labels (regressor) + Entry gates (classificador) =====
     if compute_edge_labels is None:
         v = os.getenv("SNIPER_COMPUTE_EDGE_LABELS", "").strip().lower()
-        compute_edge_labels = not bool(v) or v not in {"0", "false", "no", "off"}
+        compute_edge_labels = bool(v) and v not in {"0", "false", "no", "off"}
     if compute_entry_gates is None:
         v = os.getenv("SNIPER_COMPUTE_ENTRY_GATES", "").strip().lower()
         compute_entry_gates = not bool(v) or v not in {"0", "false", "no", "off"}
+
+    # Pesos base por tarefa.
+    if bool(compute_edge_labels):
+        df["edge_weight_long"] = pd.Series(weights_long.astype(np.float32), index=df.index)
+        df["edge_weight_short"] = pd.Series(weights_short.astype(np.float32), index=df.index)
+    else:
+        df.drop(columns=["edge_weight_long", "edge_weight_short"], inplace=True, errors="ignore")
+    df["entry_gate_weight_long"] = pd.Series(weights_long.astype(np.float32), index=df.index)
+    df["entry_gate_weight_short"] = pd.Series(weights_short.astype(np.float32), index=df.index)
+    df["entry_gate_weight"] = pd.Series(weights.astype(np.float32), index=df.index)
 
     if bool(compute_edge_labels) or bool(compute_entry_gates):
         edge_h_min = int(edge_horizon_min) if edge_horizon_min is not None else int(os.getenv("SNIPER_EDGE_HORIZON_MIN", str(int(EDGE_HORIZON_MIN))) or EDGE_HORIZON_MIN)
@@ -932,17 +1132,99 @@ def apply_timing_regression_labels(
             )
             df["edge_label_long"] = pd.Series(edge_long, index=df.index)
             df["edge_label_short"] = pd.Series(edge_short, index=df.index)
+        else:
+            df.drop(columns=["edge_label_long", "edge_label_short"], inplace=True, errors="ignore")
 
         if bool(compute_entry_gates):
-            gate_long, gate_short = _compute_entry_gate_labels_numba(
-                close,
-                int(gate_h_bars),
-                float(gate_tp),
-                float(gate_sl),
-                float(gate_scale_use),
+            rev_only = bool(ENTRY_GATE_REVERSAL_ONLY)
+            v_rev = os.getenv("SNIPER_ENTRY_GATE_REVERSAL_ONLY", "").strip().lower()
+            if v_rev:
+                rev_only = v_rev not in {"0", "false", "no", "off"}
+
+            if rev_only and ("high" in df.columns) and ("low" in df.columns):
+                pre_lb_min = int(os.getenv("SNIPER_ENTRY_GATE_PRELOOKBACK_MIN", str(int(ENTRY_GATE_PRELOOKBACK_MIN))) or ENTRY_GATE_PRELOOKBACK_MIN)
+                pre_soft_atr = float(os.getenv("SNIPER_ENTRY_GATE_PREMOVE_ATR_SOFT", str(float(ENTRY_GATE_PREMOVE_ATR_SOFT))) or ENTRY_GATE_PREMOVE_ATR_SOFT)
+                pre_hard_atr = float(os.getenv("SNIPER_ENTRY_GATE_PREMOVE_ATR_HARD", str(float(ENTRY_GATE_PREMOVE_ATR_HARD))) or ENTRY_GATE_PREMOVE_ATR_HARD)
+                tp_atr = float(os.getenv("SNIPER_ENTRY_GATE_TP_ATR", str(float(ENTRY_GATE_TP_ATR))) or ENTRY_GATE_TP_ATR)
+                sl_atr = float(os.getenv("SNIPER_ENTRY_GATE_SL_ATR", str(float(ENTRY_GATE_SL_ATR))) or ENTRY_GATE_SL_ATR)
+                near_ext_atr = float(os.getenv("SNIPER_ENTRY_GATE_NEAR_EXTREMA_ATR", str(float(ENTRY_GATE_NEAR_EXTREMA_ATR))) or ENTRY_GATE_NEAR_EXTREMA_ATR)
+                timeout_ret_atr = float(os.getenv("SNIPER_ENTRY_GATE_TIMEOUT_RET_ATR_MIN", str(float(ENTRY_GATE_TIMEOUT_RET_ATR_MIN))) or ENTRY_GATE_TIMEOUT_RET_ATR_MIN)
+                atr_span = int(os.getenv("SNIPER_ENTRY_GATE_ATR_SPAN", str(int(ENTRY_GATE_ATR_SPAN))) or ENTRY_GATE_ATR_SPAN)
+                gate_w_min = float(os.getenv("SNIPER_ENTRY_GATE_WEIGHT_MIN", str(float(ENTRY_GATE_WEIGHT_MIN))) or ENTRY_GATE_WEIGHT_MIN)
+                gate_w_max = float(os.getenv("SNIPER_ENTRY_GATE_WEIGHT_MAX", str(float(ENTRY_GATE_WEIGHT_MAX))) or ENTRY_GATE_WEIGHT_MAX)
+
+                high_arr = df["high"].to_numpy(dtype=np.float64, copy=False)
+                low_arr = df["low"].to_numpy(dtype=np.float64, copy=False)
+                atr_abs = _compute_atr_abs_from_ohlc(high_arr, low_arr, close, max(2, int(atr_span)))
+                fut_high, _ = _future_window_max_min_numba(high_arr, int(gate_h_bars))
+                _, fut_low = _future_window_max_min_numba(low_arr, int(gate_h_bars))
+                pre_lb_bars = int(max(2, round(float(pre_lb_min) * 60.0 / float(candle_sec))))
+                past_high = pd.Series(high_arr).rolling(pre_lb_bars, min_periods=pre_lb_bars).max().shift(1).to_numpy(dtype=np.float64, copy=False)
+                past_low = pd.Series(low_arr).rolling(pre_lb_bars, min_periods=pre_lb_bars).min().shift(1).to_numpy(dtype=np.float64, copy=False)
+
+                gate_long, gate_short, gate_w_long, gate_w_short = _compute_entry_gate_reversal_numba(
+                    close.astype(np.float64, copy=False),
+                    high_arr.astype(np.float64, copy=False),
+                    low_arr.astype(np.float64, copy=False),
+                    atr_abs.astype(np.float64, copy=False),
+                    past_high.astype(np.float64, copy=False),
+                    past_low.astype(np.float64, copy=False),
+                    fut_high.astype(np.float64, copy=False),
+                    fut_low.astype(np.float64, copy=False),
+                    int(gate_h_bars),
+                    float(tp_atr),
+                    float(sl_atr),
+                    float(pre_soft_atr),
+                    float(pre_hard_atr),
+                    float(near_ext_atr),
+                    float(timeout_ret_atr),
+                    float(gate_scale_use),
+                    float(gate_w_min),
+                    float(gate_w_max),
+                )
+                df["entry_gate_long"] = pd.Series(gate_long, index=df.index)
+                df["entry_gate_short"] = pd.Series(gate_short, index=df.index)
+                df["entry_gate_weight_long"] = pd.Series(gate_w_long.astype(np.float32), index=df.index)
+                df["entry_gate_weight_short"] = pd.Series(gate_w_short.astype(np.float32), index=df.index)
+                df["entry_gate_weight"] = pd.Series(
+                    np.maximum(gate_w_long.astype(np.float32), gate_w_short.astype(np.float32)),
+                    index=df.index,
+                )
+            else:
+                gate_long, gate_short = _compute_entry_gate_labels_numba(
+                    close,
+                    int(gate_h_bars),
+                    float(gate_tp),
+                    float(gate_sl),
+                    float(gate_scale_use),
+                )
+                df["entry_gate_long"] = pd.Series(gate_long, index=df.index)
+                df["entry_gate_short"] = pd.Series(gate_short, index=df.index)
+        else:
+            df.drop(
+                columns=[
+                    "entry_gate_long",
+                    "entry_gate_short",
+                    "entry_gate_weight",
+                    "entry_gate_weight_long",
+                    "entry_gate_weight_short",
+                ],
+                inplace=True,
+                errors="ignore",
             )
-            df["entry_gate_long"] = pd.Series(gate_long, index=df.index)
-            df["entry_gate_short"] = pd.Series(gate_short, index=df.index)
+    else:
+        df.drop(columns=["edge_label_long", "edge_label_short"], inplace=True, errors="ignore")
+        df.drop(
+            columns=[
+                "entry_gate_long",
+                "entry_gate_short",
+                "entry_gate_weight",
+                "entry_gate_weight_long",
+                "entry_gate_weight_short",
+            ],
+            inplace=True,
+            errors="ignore",
+        )
     return df
 
 
@@ -969,4 +1251,15 @@ __all__ = [
     "ENTRY_GATE_TP_PCT",
     "ENTRY_GATE_SL_PCT",
     "ENTRY_GATE_SCALE",
+    "ENTRY_GATE_REVERSAL_ONLY",
+    "ENTRY_GATE_PRELOOKBACK_MIN",
+    "ENTRY_GATE_PREMOVE_ATR_SOFT",
+    "ENTRY_GATE_PREMOVE_ATR_HARD",
+    "ENTRY_GATE_TP_ATR",
+    "ENTRY_GATE_SL_ATR",
+    "ENTRY_GATE_NEAR_EXTREMA_ATR",
+    "ENTRY_GATE_TIMEOUT_RET_ATR_MIN",
+    "ENTRY_GATE_ATR_SPAN",
+    "ENTRY_GATE_WEIGHT_MIN",
+    "ENTRY_GATE_WEIGHT_MAX",
 ]

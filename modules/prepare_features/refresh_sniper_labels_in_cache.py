@@ -392,16 +392,22 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
                 ok += 1
                 n = int(out.get("n", 0) or 0)
                 if n > 0:
+                    def _sf(v: float) -> float:
+                        try:
+                            vv = float(v)
+                            return vv if np.isfinite(vv) else 0.0
+                        except Exception:
+                            return 0.0
                     rows_total += n
-                    sum_nz_long += float(out.get("nz_l", 0.0)) * n
-                    sum_nz_short += float(out.get("nz_s", 0.0)) * n
-                    sum_overlap_20 += float(out.get("ov20", 0.0)) * n
-                    sum_mean_long += float(out.get("m_l", 0.0)) * n
-                    sum_mean_short += float(out.get("m_s", 0.0)) * n
-                    sum_edge_long += float(out.get("edge_l", 0.0)) * n
-                    sum_edge_short += float(out.get("edge_s", 0.0)) * n
-                    sum_gate_long += float(out.get("gate_l", 0.0)) * n
-                    sum_gate_short += float(out.get("gate_s", 0.0)) * n
+                    sum_nz_long += _sf(out.get("nz_l", 0.0)) * n
+                    sum_nz_short += _sf(out.get("nz_s", 0.0)) * n
+                    sum_overlap_20 += _sf(out.get("ov20", 0.0)) * n
+                    sum_mean_long += _sf(out.get("m_l", 0.0)) * n
+                    sum_mean_short += _sf(out.get("m_s", 0.0)) * n
+                    sum_edge_long += _sf(out.get("edge_l", 0.0)) * n
+                    sum_edge_short += _sf(out.get("edge_s", 0.0)) * n
+                    sum_gate_long += _sf(out.get("gate_l", 0.0)) * n
+                    sum_gate_short += _sf(out.get("gate_s", 0.0)) * n
                     p95_long_vals.append(float(out.get("p95_l", float("nan"))))
                     p95_short_vals.append(float(out.get("p95_s", float("nan"))))
         except Exception as e:
