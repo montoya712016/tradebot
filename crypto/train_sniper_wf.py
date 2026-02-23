@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,6 +23,7 @@ _add_repo_paths()
 
 from train.train_sniper_wf import TrainSniperWFSettings, run  # type: ignore
 from crypto.trade_contract import TradeContract  # type: ignore
+from crypto.build_ohlc_cache import run_build as run_ohlc_build  # type: ignore
 
 
 def _env_str(name: str, default: str) -> str:
@@ -31,6 +32,24 @@ def _env_str(name: str, default: str) -> str:
 
 
 def main() -> None:
+    max_symbols = 0
+    total_days = 0
+    mcap_min_usd = 100_000_000.0
+    mcap_max_usd = 150_000_000_000.0
+
+    # Sem flag: sempre prewarm de OHLCV antes do treino.
+    pre = run_ohlc_build(
+        max_symbols=int(max_symbols),
+        days=int(total_days),
+        mcap_min_usd=float(mcap_min_usd),
+        mcap_max_usd=float(mcap_max_usd),
+        refresh=False,
+    )
+    print(
+        f"[train-wf-crypto] ohlc prewarm: ok={pre.get('ok')} skip={pre.get('skip')} fail={pre.get('fail')} sec={pre.get('seconds')}",
+        flush=True,
+    )
+
     metric_mode = _env_str("CRYPTO_ENTRY_METRIC_MODE", "aucpr")
     contract = TradeContract(
         entry_label_windows_minutes=(120,),
@@ -43,6 +62,8 @@ def main() -> None:
         asset_class="crypto",
         entry_metric_mode=metric_mode,
         contract=contract,
+        total_days=int(total_days),
+        max_symbols=int(max_symbols),
         offsets_step_days=180,
         offsets_days=(0, 180, 360, 540, 720, 900, 1080, 1260, 1440, 1620, 1800, 1980, 2160),
         entry_ratio_neg_per_pos=6.0,

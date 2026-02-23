@@ -11,7 +11,7 @@ Regras:
 - plota com plotly: candles, faixas de trades, probabilidades, sinais e equity
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 import sys
 import time
@@ -47,7 +47,6 @@ from backtest.sniper_walkforward import (
 )
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL
 from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract
-from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 from plotting.plotting import plot_backtest_single
 
 
@@ -127,8 +126,8 @@ class SingleSymbolDemoSettings:
     # Diagnóstico (prints)
     print_signal_diagnostics: bool = True
     # Thresholds são definidos manualmente em config/thresholds.py.
-    override_tau_entry: float | None = 0.775  # campeão do WF recente
-    override_tau_danger: float | None = DEFAULT_THRESHOLD_OVERRIDES.tau_danger
+    override_tau_entry: float | None = None
+    override_tau_danger: float | None = None
     # Danger desativado por enquanto
     use_danger_model: bool = False
     # Contrato usado para cache/simulação

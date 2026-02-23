@@ -18,10 +18,21 @@ import sys
 import time
 import uuid
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
+try:
+    from utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # type: ignore
+except Exception:
+    from modules.utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # type: ignore[import]
+try:
+    from utils.thermal_guard import ThermalGuard  # type: ignore
+except Exception:
+    from modules.utils.thermal_guard import ThermalGuard  # type: ignore[import]
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None  # type: ignore
 
 try:
     from prepare_features.prepare_features import (
@@ -44,6 +55,15 @@ except Exception:
 
 
 GLOBAL_FLAGS_FULL = build_flags(enable=FEATURE_KEYS, label=True)
+_THERMAL_GUARD = ThermalGuard.from_env()
+
+
+def _thermal_wait(where: str) -> None:
+    _THERMAL_GUARD.wait_until_safe(
+        where=where,
+        force_sample=False,
+        logger=lambda msg: print(f"[sniper-data] {msg}", flush=True),
+    )
 
 def _stock_helper_bundle() -> tuple[dict | None, object | None, object | None, object | None, object | None]:
     try:
@@ -231,9 +251,10 @@ def _symbol_cache_paths(symbol: str, cache_dir: Path, fmt: str) -> Tuple[Path, P
     return data_path, meta_path
 
 
-def _try_downcast_df(df: pd.DataFrame) -> pd.DataFrame:
+def _try_downcast_df(df: pd.DataFrame, *, copy: bool = True) -> pd.DataFrame:
     # reduz bastante RAM/disco sem quebrar as labels
-    df = df.copy()
+    if copy:
+        df = df.copy()
     for c in df.columns:
         if pd.api.types.is_float_dtype(df[c]):
             df.loc[:, c] = df[c].astype(np.float32, copy=False)
@@ -394,7 +415,7 @@ def _build_features_for_symbol(
             trade_contract=contract,
         )
     t_feat = time.perf_counter()
-    df_pf = _try_downcast_df(df_pf)
+    df_pf = _try_downcast_df(df_pf, copy=False)
     timings = {
         "load_s": float(t_load - t0),
         "ohlc_s": float(t_ohlc - t_load),
@@ -417,6 +438,7 @@ def ensure_feature_cache(
     # com `total_days` compatível com o solicitado (inclui o caso total_days<=0 => histórico completo).
     strict_total_days: bool = False,
     asset_class: str = "crypto",
+    abort_ram_pct: float = 85.0,
 ) -> Dict[str, Path]:
     """
     Garante que existe um cache de features+labels Sniper por símbolo (computado 1x).
@@ -546,6 +568,16 @@ def ensure_feature_cache(
 
     def _build_one(sym: str) -> tuple[str, Path | None, str | None]:
         # retorna (sym, path|None, err|None)
+        _thermal_wait(f"feature_cache_build:{sym}")
+        if abort_ram_pct > 0 and psutil is not None:
+            try:
+                ram_used = float(psutil.virtual_memory().percent)
+                if ram_used >= float(abort_ram_pct):
+                    raise RuntimeError(f"RAM guard: {ram_used:.1f}% >= {float(abort_ram_pct):.1f}%")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
         data_path, meta_path = _symbol_cache_paths(sym, cache_dir, fmt)
         try:
             t0 = time.perf_counter()
@@ -648,23 +680,39 @@ def ensure_feature_cache(
                     mw = min(8, int(os.cpu_count() or 8))
         mw = max(1, int(mw))
         # Nota: o gargalo aqui é misto (I/O MySQL + CPU features). Threads ajudam porque há muito I/O/espera.
-        with ThreadPoolExecutor(max_workers=mw) as ex:
-            futs = {ex.submit(_build_one, sym): sym for sym in to_build}
-            for fut in as_completed(futs):
-                sym = futs[fut]
-                _print_progress(sym)
-                sym, path, err = fut.result()
-                if err:
-                    skipped.append(sym)
-                    sys.stderr.write("\n")
-                    sys.stderr.flush()
-                    print(f"[cache] SKIP {sym}: {err}", flush=True)
-                elif path is not None:
-                    out[sym] = path
-                done += 1
-                _print_progress(sym)
+        cache_policy = AdaptiveParallelPolicy(
+            max_ram_pct=float(os.getenv("SNIPER_CACHE_RAM_PCT", str(float(abort_ram_pct) if abort_ram_pct > 0 else 85.0)) or "85"),
+            min_free_mb=float(os.getenv("SNIPER_CACHE_MIN_FREE_MB", "1536") or "1536"),
+            per_worker_mem_mb=float(os.getenv("SNIPER_CACHE_PER_WORKER_MB", "768") or "768"),
+            min_workers=1,
+            poll_interval_s=0.3,
+            log_every_s=20.0,
+        )
+        print(
+            f"[cache] workers={mw} ram_cap={cache_policy.max_ram_pct:.1f}% min_free_mb={cache_policy.min_free_mb:.0f} per_worker_mb={cache_policy.per_worker_mem_mb:.0f}",
+            flush=True,
+        )
+        for sym_submitted, fut in run_adaptive_thread_map(
+            to_build,
+            _build_one,
+            max_workers=mw,
+            policy=cache_policy,
+            task_name="feature-cache-build",
+        ):
+            _print_progress(sym_submitted)
+            sym, path, err = fut.result()
+            if err:
+                skipped.append(sym)
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+                print(f"[cache] SKIP {sym}: {err}", flush=True)
+            elif path is not None:
+                out[sym] = path
+            done += 1
+            _print_progress(sym)
     else:
         for sym in to_build:
+            _thermal_wait(f"feature_cache_seq:{sym}")
             _print_progress(sym)
             sym, path, err = _build_one(sym)
             if err:
@@ -1052,7 +1100,7 @@ def prepare_sniper_dataset(
                 entry_df = sniper_ds.entry
                 if entry_df.empty:
                     continue
-                entry_df = _try_downcast_df(entry_df)
+                entry_df = _try_downcast_df(entry_df, copy=False)
                 entry_df["sym_id"] = int(sym_idx)
                 feat_cols = feat_cols_entry_map.get(name)
                 if not feat_cols:
@@ -1208,6 +1256,8 @@ def prepare_sniper_dataset_from_cache(
     seed: int = 42,
     feature_flags: Dict[str, bool] | None = None,
     asset_class: str = "crypto",
+    parallel: bool = True,
+    max_workers: int | None = None,
 ) -> SniperDataPack:
     """
     Calcula features 1x por simbolo (cache em disco) e, no walk-forward, apenas
@@ -1379,6 +1429,7 @@ def prepare_sniper_dataset_from_cache(
         return X, y, w, ts, sym_arr
 
     def _process_symbol(sym_idx: int, symbol: str):
+        _thermal_wait(f"dataset_from_cache:{symbol}")
         data_path = cache_map.get(symbol)
         if data_path is None or (not Path(data_path).exists()):
             raise RuntimeError(f"{symbol}: cache nao encontrado")
@@ -1390,7 +1441,7 @@ def prepare_sniper_dataset_from_cache(
             df = df[df.index < cutoff]
         if df.empty:
             raise RuntimeError(f"{symbol}: sem dados apos corte")
-        df = _try_downcast_df(df)
+        df = _try_downcast_df(df, copy=False)
         frozen_mask = _frozen_ohlc_mask(df) if str(asset_class or "crypto").lower() == "stocks" else None
 
         frames_local: dict[str, tuple[pd.DataFrame, List[str]]] = {}
@@ -1411,7 +1462,7 @@ def prepare_sniper_dataset_from_cache(
                 entry_df = entry_df.loc[~frozen_mask.reindex(entry_df.index).fillna(False)].copy()
                 if entry_df.empty:
                     continue
-            entry_df = _try_downcast_df(entry_df)
+            entry_df = _try_downcast_df(entry_df, copy=False)
             entry_df["sym_id"] = int(sym_idx)
             feat_cols = _list_feature_columns(entry_df)
             cols_keep = list(feat_cols) + ["label_entry", "sym_id"]
@@ -1434,70 +1485,142 @@ def prepare_sniper_dataset_from_cache(
     total_neg = 0
     batch_flush_n = 8
     done = 0
-    for sym_idx, symbol in enumerate(symbols):
-        pos_n = None
-        neg_n = None
-        try:
-            _, res_symbol, frames_local = _process_symbol(sym_idx, symbol)
-            if not frames_local:
-                symbols_skipped.append(res_symbol)
-            else:
-                pref = frames_local.get(preferred_name)
-                if pref is not None:
-                    pref_df = pref[0]
-                    if not pref_df.empty and "label_entry" in pref_df.columns:
-                        y = pref_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
-                        pos_n = int(np.sum(y >= 0.5))
-                        neg_n = int(np.sum(y < 0.5))
-                if pos_n is None or neg_n is None:
-                    for _name, (entry_df, _feat_cols) in frames_local.items():
-                        if not entry_df.empty and "label_entry" in entry_df.columns:
-                            y = entry_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
-                            pos_n = int(np.sum(y >= 0.5))
-                            neg_n = int(np.sum(y < 0.5))
-                            break
-                for name, (entry_df, feat_cols) in frames_local.items():
-                    if name not in feat_cols_entry_map or not feat_cols_entry_map[name]:
-                        feat_cols_entry_map[name] = list(feat_cols)
-                    weight_col = ""
-                    for spec in entry_specs:
-                        if str(spec["name"]) == name:
-                            weight_col = str(spec.get("weight_col") or "")
-                            break
-                    buf = entry_buf_map.get(name)
-                    if buf is not None:
-                        buf.append(entry_df)
-                        if len(buf) >= batch_flush_n:
-                            pool_df = entry_pool_map.get(name)
-                            combined = pd.concat(([pool_df] if pool_df is not None and not pool_df.empty else []) + buf, axis=0, ignore_index=False)
-                            pool_df = _sample_df(
-                                combined,
-                                "label_entry",
-                                float(entry_ratio_neg_per_pos),
-                                int(max_rows_entry),
-                                weight_col=weight_col,
-                            )
-                            entry_pool_map[name] = pool_df
-                            buf.clear()
-                            del combined
-                symbols_used.append(res_symbol)
-        except Exception:
-            symbols_skipped.append(symbol)
-        done += 1
+
+    def _consume_symbol_result(
+        res_symbol: str,
+        frames_local: dict[str, tuple[pd.DataFrame, List[str]]] | None,
+        *,
+        fallback_symbol: str,
+    ) -> tuple[int, int]:
+        pos_n: int | None = None
+        neg_n: int | None = None
+        if not frames_local:
+            symbols_skipped.append(res_symbol or fallback_symbol)
+            return 0, 0
+
+        pref = frames_local.get(preferred_name)
+        if pref is not None:
+            pref_df = pref[0]
+            if not pref_df.empty and "label_entry" in pref_df.columns:
+                y = pref_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                pos_n = int(np.sum(y >= 0.5))
+                neg_n = int(np.sum(y < 0.5))
         if pos_n is None or neg_n is None:
-            pos_n, neg_n = 0, 0
-        total_pos += int(pos_n)
-        total_neg += int(neg_n)
-        _print_progress(
-            sym_idx + 1,
-            symbol,
-            pos_n=pos_n,
-            neg_n=neg_n,
-            pos_total=total_pos,
-            neg_total=total_neg,
+            for _name, (entry_df, _feat_cols) in frames_local.items():
+                if not entry_df.empty and "label_entry" in entry_df.columns:
+                    y = entry_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                    pos_n = int(np.sum(y >= 0.5))
+                    neg_n = int(np.sum(y < 0.5))
+                    break
+
+        for name, (entry_df, feat_cols) in frames_local.items():
+            if name not in feat_cols_entry_map or not feat_cols_entry_map[name]:
+                feat_cols_entry_map[name] = list(feat_cols)
+            weight_col = ""
+            for spec in entry_specs:
+                if str(spec["name"]) == name:
+                    weight_col = str(spec.get("weight_col") or "")
+                    break
+            buf = entry_buf_map.get(name)
+            if buf is not None:
+                buf.append(entry_df)
+                if len(buf) >= batch_flush_n:
+                    pool_df = entry_pool_map.get(name)
+                    combined = pd.concat(([pool_df] if pool_df is not None and not pool_df.empty else []) + buf, axis=0, ignore_index=False)
+                    pool_df = _sample_df(
+                        combined,
+                        "label_entry",
+                        float(entry_ratio_neg_per_pos),
+                        int(max_rows_entry),
+                        weight_col=weight_col,
+                    )
+                    entry_pool_map[name] = pool_df
+                    buf.clear()
+                    del combined
+        symbols_used.append(res_symbol or fallback_symbol)
+        return int(pos_n or 0), int(neg_n or 0)
+
+    if parallel and len(symbols) > 1:
+        if max_workers is not None and int(max_workers) > 0:
+            mw = int(max_workers)
+        else:
+            env_mw = os.getenv("SNIPER_DATASET_WORKERS", "").strip()
+            mw = int(env_mw) if env_mw else min(8, int(os.cpu_count() or 4))
+        mw = max(1, mw)
+        dataset_policy = AdaptiveParallelPolicy(
+            max_ram_pct=float(os.getenv("SNIPER_DATASET_RAM_PCT", "85") or "85"),
+            min_free_mb=float(os.getenv("SNIPER_DATASET_MIN_FREE_MB", "2048") or "2048"),
+            per_worker_mem_mb=float(os.getenv("SNIPER_DATASET_PER_WORKER_MB", "1024") or "1024"),
+            min_workers=1,
+            poll_interval_s=0.3,
+            log_every_s=20.0,
         )
-        if done % 5 == 0:
-            gc.collect()
+        print(
+            f"[sniper-data] dataset_workers={mw} ram_cap={dataset_policy.max_ram_pct:.1f}% min_free_mb={dataset_policy.min_free_mb:.0f} per_worker_mb={dataset_policy.per_worker_mem_mb:.0f}",
+            flush=True,
+        )
+        for pair_submitted, fut in run_adaptive_thread_map(
+            list(enumerate(symbols)),
+            lambda pair: _process_symbol(pair[0], pair[1]),
+            max_workers=mw,
+            policy=dataset_policy,
+            task_name="dataset-build",
+        ):
+            _sym_idx, submitted_symbol = pair_submitted
+            pos_n = 0
+            neg_n = 0
+            current_symbol = submitted_symbol
+            try:
+                _, res_symbol, frames_local = fut.result()
+                current_symbol = res_symbol or submitted_symbol
+                pos_n, neg_n = _consume_symbol_result(
+                    current_symbol,
+                    frames_local,
+                    fallback_symbol=submitted_symbol,
+                )
+            except Exception:
+                symbols_skipped.append(submitted_symbol)
+            done += 1
+            total_pos += int(pos_n)
+            total_neg += int(neg_n)
+            _print_progress(
+                done,
+                current_symbol,
+                pos_n=pos_n,
+                neg_n=neg_n,
+                pos_total=total_pos,
+                neg_total=total_neg,
+            )
+            if done % 5 == 0:
+                gc.collect()
+    else:
+        for sym_idx, symbol in enumerate(symbols):
+            pos_n = 0
+            neg_n = 0
+            current_symbol = symbol
+            try:
+                _, res_symbol, frames_local = _process_symbol(sym_idx, symbol)
+                current_symbol = res_symbol or symbol
+                pos_n, neg_n = _consume_symbol_result(
+                    current_symbol,
+                    frames_local,
+                    fallback_symbol=symbol,
+                )
+            except Exception:
+                symbols_skipped.append(symbol)
+            done += 1
+            total_pos += int(pos_n)
+            total_neg += int(neg_n)
+            _print_progress(
+                done,
+                current_symbol,
+                pos_n=pos_n,
+                neg_n=neg_n,
+                pos_total=total_pos,
+                neg_total=total_neg,
+            )
+            if done % 5 == 0:
+                gc.collect()
     print("", flush=True)
     # flush remaining buffers
     for name, buf in entry_buf_map.items():

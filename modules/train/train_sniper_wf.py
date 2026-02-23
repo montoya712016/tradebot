@@ -38,7 +38,22 @@ from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore
 
 # Defaults de performance/telemetria para rodar com "Run" sem flags externas.
 os.environ.setdefault("SNIPER_CACHE_PROGRESS_EVERY_S", "3")
-os.environ.setdefault("SNIPER_CACHE_WORKERS", "6")
+os.environ.setdefault("SNIPER_CACHE_WORKERS", "8")
+os.environ.setdefault("SNIPER_CACHE_RAM_PCT", "85")
+os.environ.setdefault("SNIPER_CACHE_MIN_FREE_MB", "1536")
+os.environ.setdefault("SNIPER_CACHE_PER_WORKER_MB", "768")
+os.environ.setdefault("SNIPER_DATASET_WORKERS", "4")
+os.environ.setdefault("SNIPER_DATASET_RAM_PCT", "85")
+os.environ.setdefault("SNIPER_DATASET_MIN_FREE_MB", "2048")
+os.environ.setdefault("SNIPER_DATASET_PER_WORKER_MB", "1024")
+os.environ.setdefault("SNIPER_LABELS_REFRESH_WORKERS", "8")
+os.environ.setdefault("SNIPER_THERMAL_GUARD", "1")
+os.environ.setdefault("SNIPER_THERMAL_MAX_TEMP_C", "80")
+os.environ.setdefault("SNIPER_THERMAL_RESUME_BELOW_C", "70")
+os.environ.setdefault("SNIPER_THERMAL_CHECK_EVERY_S", "10")
+os.environ.setdefault("SNIPER_THERMAL_COOLDOWN_S", "15")
+os.environ.setdefault("PF_OHLC_CACHE", "1")
+os.environ.setdefault("PF_OHLC_CACHE_REFRESH", "0")
 os.environ.setdefault("PF_PREFER_PURE_FOR_THREADS", "0")
 
 from train.sniper_trainer import (  # type: ignore[import]

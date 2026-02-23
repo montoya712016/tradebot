@@ -49,6 +49,19 @@ else:
 from config.symbols import default_top_market_cap_path, load_market_caps  # noqa: E402
 from train.sniper_dataflow import _cache_dir, _cache_format, _symbol_cache_paths  # type: ignore  # noqa: E402
 from prepare_features.labels import apply_trade_contract_labels  # noqa: E402
+from utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # noqa: E402
+from utils.thermal_guard import ThermalGuard  # noqa: E402
+
+
+_THERMAL_GUARD = ThermalGuard.from_env()
+
+
+def _thermal_wait(where: str) -> None:
+    _THERMAL_GUARD.wait_until_safe(
+        where=where,
+        force_sample=False,
+        logger=lambda msg: print(f"[labels-refresh] {msg}", flush=True),
+    )
 
 
 @dataclass
@@ -66,6 +79,12 @@ class RefreshLabelsSettings:
     contract: TradeContract = DEFAULT_TRADE_CONTRACT
     # se True, imprime 1 linha por símbolo
     verbose: bool = True
+    # workers para refresh paralelo (0 => auto)
+    workers: int = 0
+    # segurança de recursos (não aborta; reduz paralelismo)
+    max_ram_pct: float = 85.0
+    min_free_mb: float = 1024.0
+    per_worker_mem_mb: float = 512.0
 
 
 def _atomic_save_df(df: pd.DataFrame, path: Path) -> None:
@@ -157,6 +176,26 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
     total = len(symbols)
     last_len = 0
     last_progress_ts = 0.0
+    done_count = 0
+
+    workers = int(getattr(s, "workers", 0) or 0)
+    if workers <= 0:
+        workers = int(os.getenv("SNIPER_LABELS_REFRESH_WORKERS", "0") or "0")
+    if workers <= 0:
+        workers = min(8, max(1, (os.cpu_count() or 4) // 2))
+    workers = max(1, min(32, workers))
+    policy = AdaptiveParallelPolicy(
+        max_ram_pct=float(getattr(s, "max_ram_pct", 85.0)),
+        min_free_mb=float(getattr(s, "min_free_mb", 1024.0)),
+        per_worker_mem_mb=float(getattr(s, "per_worker_mem_mb", 512.0)),
+        min_workers=1,
+        poll_interval_s=0.5,
+        log_every_s=10.0,
+    )
+    print(
+        f"[labels-refresh] workers={workers} ram_cap={policy.max_ram_pct:.1f}% min_free_mb={policy.min_free_mb:.0f} per_worker_mb={policy.per_worker_mem_mb:.0f}",
+        flush=True,
+    )
 
     def _bar(done: int, total: int, width: int = 26) -> str:
         total = max(1, int(total))
@@ -180,7 +219,7 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
     def _print_progress(current_sym: str) -> None:
         nonlocal last_len
         nonlocal last_progress_ts
-        done = ok + fail
+        done = done_count
         pct = 100.0 * done / max(1, total)
         elapsed = time.perf_counter() - t0
         rate = elapsed / max(1, done)
@@ -198,63 +237,76 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
                 print(line, flush=True)
                 last_progress_ts = now
         last_len = max(last_len, len(line))
-    for i, sym in enumerate(symbols, start=1):
-        if s.verbose:
-            _print_progress(sym)
+
+    def _process_symbol(sym: str) -> dict:
+        _thermal_wait(f"refresh_symbol:{sym}")
         data_path, meta_path = _symbol_cache_paths(sym, cache_dir, fmt)
         if not data_path.exists():
-            continue
+            return {"sym": sym, "ok": False, "skip": True}
+        df = pd.read_parquet(data_path) if data_path.suffix.lower() == ".parquet" else pd.read_pickle(data_path)
+        if df is None or df.empty:
+            raise RuntimeError("df vazio")
+        need = {"close", "high", "low"}
+        if not need.issubset(df.columns):
+            raise RuntimeError(f"faltam colunas: {sorted(need - set(df.columns))}")
+
+        # recalcula labels (somente sniper_*)
+        df_lab = apply_trade_contract_labels(df[["close", "high", "low"]].copy(), contract=s.contract, candle_sec=int(s.candle_sec))
+        cols = [
+            "sniper_entry_label",
+            "sniper_entry_weight",
+            "sniper_mae_pct",
+            "sniper_exit_code",
+            "sniper_exit_wait_bars",
+        ]
+        windows = list(getattr(s.contract, "entry_label_windows_minutes", []) or [])
+        for w in windows:
+            suf = f"{int(w)}m"
+            cols.extend(
+                [
+                    f"sniper_entry_label_{suf}",
+                    f"sniper_entry_weight_{suf}",
+                    f"sniper_mae_pct_{suf}",
+                    f"sniper_exit_code_{suf}",
+                    f"sniper_exit_wait_bars_{suf}",
+                ]
+            )
+        for c in cols:
+            if c in df_lab.columns:
+                df[c] = df_lab[c]
+
+        _atomic_save_df(df, data_path)
+        # atualiza meta com um carimbo (opcional)
         try:
-            df = pd.read_parquet(data_path) if data_path.suffix.lower() == ".parquet" else pd.read_pickle(data_path)
-            if df is None or df.empty:
-                raise RuntimeError("df vazio")
-            need = {"close", "high", "low"}
-            if not need.issubset(df.columns):
-                raise RuntimeError(f"faltam colunas: {sorted(need - set(df.columns))}")
+            meta = {}
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = dict(meta or {})
+            meta["labels_refreshed_utc"] = pd.Timestamp.utcnow().tz_localize(None).isoformat()
+            meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        return {"sym": sym, "ok": True, "skip": False}
 
-            # recalcula labels (somente sniper_*)
-            df_lab = apply_trade_contract_labels(df[["close", "high", "low"]].copy(), contract=s.contract, candle_sec=int(s.candle_sec))
-            cols = [
-                "sniper_entry_label",
-                "sniper_entry_weight",
-                "sniper_mae_pct",
-                "sniper_exit_code",
-                "sniper_exit_wait_bars",
-            ]
-            windows = list(getattr(s.contract, "entry_label_windows_minutes", []) or [])
-            for w in windows:
-                suf = f"{int(w)}m"
-                cols.extend(
-                    [
-                        f"sniper_entry_label_{suf}",
-                        f"sniper_entry_weight_{suf}",
-                        f"sniper_mae_pct_{suf}",
-                        f"sniper_exit_code_{suf}",
-                        f"sniper_exit_wait_bars_{suf}",
-                    ]
-                )
-            for c in cols:
-                if c in df_lab.columns:
-                    df[c] = df_lab[c]
-
-            _atomic_save_df(df, data_path)
-            # atualiza meta com um carimbo (opcional)
-            try:
-                meta = {}
-                if meta_path.exists():
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                meta = dict(meta or {})
-                meta["labels_refreshed_utc"] = pd.Timestamp.utcnow().tz_localize(None).isoformat()
-                meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-            except Exception:
-                pass
-
-            ok += 1
-            if s.verbose:
-                _print_progress(sym)
+    for sym_submitted, fut in run_adaptive_thread_map(
+        symbols,
+        _process_symbol,
+        max_workers=workers,
+        policy=policy,
+        task_name="labels-refresh",
+    ):
+        cur_sym = sym_submitted
+        try:
+            out = fut.result()
+            cur_sym = str(out.get("sym", sym_submitted))
+            if bool(out.get("ok", False)):
+                ok += 1
         except Exception as e:
             fail += 1
-            print(f"[labels-refresh] FAIL {sym}: {type(e).__name__}: {e}", flush=True)
+            print(f"[labels-refresh] FAIL {sym_submitted}: {type(e).__name__}: {e}", flush=True)
+        done_count += 1
+        if s.verbose:
+            _print_progress(cur_sym)
 
     dt = time.perf_counter() - t0
     if s.verbose:

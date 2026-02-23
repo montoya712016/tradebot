@@ -32,6 +32,11 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_str(name: str, default: str) -> str:
+    v = os.getenv(name, "")
+    return v.strip() or default
+
+
 def _env_bool(name: str, default: bool) -> bool:
     v = os.getenv(name, "").strip().lower()
     if not v:
@@ -53,12 +58,12 @@ def _latest_wf_run_dir() -> str | None:
 
 
 def main() -> None:
-    symbol = "USDEUSDT"
-    days = 720
-    total_days_cache = 0
-    run_dir = _latest_wf_run_dir()
-    plot_out = "data/generated/plots/crypto_single_symbol.html"
-    plot_candles = True
+    symbol = _env_str("BT_SYMBOL", "XLMUSDT").upper()
+    days = _env_int("BT_DAYS", 720)
+    total_days_cache = _env_int("BT_TOTAL_DAYS_CACHE", 0)
+    run_dir = _env_str("BT_RUN_DIR", "") or _latest_wf_run_dir()
+    plot_out = _env_str("BT_PLOT_OUT", "data/generated/plots/crypto_single_symbol.html")
+    plot_candles = _env_bool("BT_PLOT_CANDLES", True)
 
     settings = SingleSymbolDemoSettings(
         asset_class="crypto",

@@ -182,7 +182,9 @@ def apply_threshold_overrides(
     periods: List[PeriodModel],
     *,
     tau_entry: float | None = None,
+    tau_danger: float | None = None,
     tau_add_multiplier: float = 1.10,
+    tau_danger_add_multiplier: float = 0.90,
 ) -> List[PeriodModel]:
     """
     Aplica overrides (simulação) em todos os períodos, mantendo consistência de thresholds derivados.
@@ -190,7 +192,9 @@ def apply_threshold_overrides(
     out: List[PeriodModel] = []
     for pm in periods:
         te = pm.tau_entry if tau_entry is None else float(tau_entry)
+        td = pm.tau_danger if tau_danger is None else float(tau_danger)
         ta = float(min(0.99, max(0.01, te * float(tau_add_multiplier))))
+        tda = float(min(0.99, max(0.01, td * float(tau_danger_add_multiplier))))
         tau_entry_map = dict(pm.tau_entry_map or {})
         if tau_entry is not None:
             tau_entry_map = {k: float(te) for k in (tau_entry_map.keys() or ["mid"])}
@@ -199,7 +203,9 @@ def apply_threshold_overrides(
                 pm,
                 tau_entry=float(te),
                 tau_entry_map=tau_entry_map,
+                tau_danger=float(td),
                 tau_add=float(ta),
+                tau_danger_add=float(tda),
             )
         )
     return out
