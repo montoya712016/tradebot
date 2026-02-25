@@ -52,9 +52,6 @@ def main() -> None:
 
     metric_mode = _env_str("CRYPTO_ENTRY_METRIC_MODE", "aucpr")
     contract = TradeContract(
-        entry_label_windows_minutes=(120,),
-        entry_label_min_profit_pcts=(0.032,),
-        entry_label_weight_alpha=0.5,
         exit_ema_span=120,
         exit_ema_init_offset_pct=0.002,
     )
@@ -67,7 +64,10 @@ def main() -> None:
         offsets_step_days=180,
         offsets_days=(0, 180, 360, 540, 720, 900, 1080, 1260, 1440, 1620, 1800, 1980, 2160),
         entry_ratio_neg_per_pos=6.0,
-        max_rows_entry=2_000_000,
+        max_rows_entry=3_000_000,
+        use_full_entry_pool=True,
+        # SemÃ¢ntica atual: valor por lado (long e short). 5M por lado ~= 10M total.
+        full_pool_max_rows_entry=5_000_000,
         min_symbols_used_per_period=30,
     )
     run_dir = run(settings)

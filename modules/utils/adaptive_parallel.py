@@ -22,9 +22,13 @@ class AdaptiveParallelPolicy:
     max_ram_pct: float = 85.0
     min_free_mb: float = 1024.0
     per_worker_mem_mb: float = 512.0
+    critical_ram_pct: float = 95.0
+    critical_min_free_mb: float = 512.0
+    abort_on_critical_ram: bool = True
     min_workers: int = 1
     poll_interval_s: float = 0.5
     log_every_s: float = 10.0
+    throttle_sleep_s: float = 2.0
 
 
 def _system_mem() -> tuple[float, float]:
@@ -34,6 +38,12 @@ def _system_mem() -> tuple[float, float]:
     used_pct = float(vm.percent)
     avail_mb = float(vm.available) / (1024.0 * 1024.0)
     return used_pct, avail_mb
+
+
+def _is_critical_mem(policy: AdaptiveParallelPolicy) -> tuple[bool, float, float]:
+    used_pct, avail_mb = _system_mem()
+    critical = (used_pct >= float(policy.critical_ram_pct)) or (avail_mb <= float(policy.critical_min_free_mb))
+    return bool(critical), float(used_pct), float(avail_mb)
 
 
 def _recommended_workers(
@@ -92,6 +102,13 @@ def run_adaptive_thread_map(
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         while q or in_flight:
+            if bool(policy.abort_on_critical_ram):
+                crit, used_pct, avail_mb = _is_critical_mem(policy)
+                if crit:
+                    raise MemoryError(
+                        f"[adaptive:{task_name}] RAM critica: ram={used_pct:.1f}% avail={avail_mb:.0f}MB "
+                        f"(limites crit={policy.critical_ram_pct:.1f}%/{policy.critical_min_free_mb:.0f}MB)"
+                    )
             running_cap = _recommended_workers(len(in_flight), max_workers, policy)
             while q and len(in_flight) < running_cap:
                 item = q.popleft()
@@ -107,7 +124,7 @@ def run_adaptive_thread_map(
                         flush=True,
                     )
                     last_log = now
-                time.sleep(max(0.1, float(policy.poll_interval_s)))
+                time.sleep(max(float(policy.poll_interval_s), float(policy.throttle_sleep_s)))
                 continue
 
             done, _ = wait(

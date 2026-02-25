@@ -31,6 +31,7 @@ LIQUIDITY_MIN = [1440]
 VOL_Z_SHORT_MIN = [60]
 VOL_Z_LONG_MIN = [720]
 RANGE_RATIO_PAIRS = [(60, 1440)]
+EFF_MIN = [30, 60, 120, 240]
 ROLLING_MINP_MODE = "full"  # full|half|progressive
 EMA_MINP_MODE = "full"      # full|half|progressive
 

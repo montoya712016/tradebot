@@ -58,12 +58,15 @@ def _latest_wf_run_dir() -> str | None:
 
 
 def main() -> None:
-    symbol = _env_str("BT_SYMBOL", "XLMUSDT").upper()
-    days = _env_int("BT_DAYS", 720)
+    symbol = _env_str("BT_SYMBOL", "ADAUSDT").upper()
+    days = _env_int("BT_DAYS", 360)
     total_days_cache = _env_int("BT_TOTAL_DAYS_CACHE", 0)
     run_dir = _env_str("BT_RUN_DIR", "") or _latest_wf_run_dir()
     plot_out = _env_str("BT_PLOT_OUT", "data/generated/plots/crypto_single_symbol.html")
     plot_candles = _env_bool("BT_PLOT_CANDLES", True)
+    disable_calib = _env_bool("BT_DISABLE_CALIB", True)
+    long_only = _env_bool("BT_LONG_ONLY", True)
+    tau_entry = float(os.getenv("BT_TAU_ENTRY", "0.75").strip())
 
     settings = SingleSymbolDemoSettings(
         asset_class="crypto",
@@ -73,6 +76,9 @@ def main() -> None:
         run_dir=run_dir,
         plot_out=plot_out,
         plot_candles=plot_candles,
+        disable_entry_calibration=disable_calib,
+        long_only=long_only,
+        override_tau_entry=tau_entry,
     )
     run(settings)
 

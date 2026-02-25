@@ -38,6 +38,31 @@ FEATURE_PALETTE = [
     "#79c0ff",
 ]
 
+PRICE_LABEL_STYLES = {
+    "sniper_price_label": {"color": "rgba(0,220,80,0.95)", "dash": "dash"},
+    "sniper_price_label_long": {"color": "rgba(0,220,80,0.95)", "dash": "dash"},
+    "sniper_price_label_short": {"color": "rgba(220,40,40,0.95)", "dash": "dash"},
+    "sniper_price_trend_long": {"color": "rgba(0,200,0,0.9)", "dash": "dash"},
+    "sniper_price_trend_short": {"color": "rgba(220,40,40,0.9)", "dash": "dash"},
+    "sniper_price_mr_long": {"color": "rgba(0,230,255,0.95)", "dash": "dot"},
+    "sniper_price_mr_short": {"color": "rgba(255,140,0,0.95)", "dash": "dot"},
+}
+
+# Fixed palette for weight subplot (avoid hash-based colors).
+PRICE_WEIGHT_STYLES = {
+    # final side weights
+    "sniper_price_weight_long": {"color": "#22c55e"},   # green
+    "sniper_price_weight_short": {"color": "#ef4444"},  # red
+    # context components
+    "sniper_price_weight_eff": {"color": "#60a5fa"},    # blue
+    "sniper_price_weight_adx": {"color": "#c084fc"},    # violet
+    "sniper_price_weight_atr": {"color": "#f59e0b"},    # amber
+    # future-quality components
+    "sniper_price_weight_future_eff": {"color": "#06b6d4"},  # cyan
+    "sniper_price_weight_timing_long": {"color": "#86efac"}, # light green
+    "sniper_price_weight_timing_short": {"color": "#fca5a5"},# light red
+}
+
 try:
     from prepare_features import pf_config as cfg  # type: ignore[import]
 except Exception:
@@ -67,6 +92,10 @@ def _safe_series(df: pd.DataFrame, col: str) -> np.ndarray | None:
 
 
 def _color_for_name(name: str) -> str:
+    if str(name) in PRICE_LABEL_STYLES:
+        return str(PRICE_LABEL_STYLES[str(name)]["color"])
+    if str(name) in PRICE_WEIGHT_STYLES:
+        return str(PRICE_WEIGHT_STYLES[str(name)]["color"])
     try:
         import hashlib
 
@@ -215,6 +244,8 @@ def _build_panels(flags: dict[str, Any]) -> list[str]:
         panels.append("mom_short")
     if flags.get("wick_stats"):
         panels.append("wick_stats")
+    if flags.get("eff"):
+        panels.append("eff")
     if flags.get("label"):
         panels.append("entry_weights")
     return panels
@@ -908,6 +939,32 @@ def plot_all(
                 gap_threshold=gap_threshold,
             )
 
+        # eff
+        if "eff" in row_map:
+            eff_windows = getattr(cfg, "EFF_MIN", None) if cfg is not None else None
+            if eff_windows:
+                for m in eff_windows:
+                    col = f"eff_{m}"
+                    _add_line(
+                        fig,
+                        row=row_map["eff"],
+                        x=x,
+                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                        name=col,
+                        gap_threshold=gap_threshold,
+                    )
+            else:
+                for col in df.columns:
+                    if str(col).startswith("eff_"):
+                        _add_line(
+                            fig,
+                            row=row_map["eff"],
+                            x=x,
+                            y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                            name=str(col),
+                            gap_threshold=gap_threshold,
+                        )
+
         # entry_weights
         if "entry_weights" in row_map:
             for col in df.columns:
@@ -920,7 +977,17 @@ def plot_all(
                         name=col,
                         gap_threshold=gap_threshold,
                     )
-            # labels sao marcadas no candle via linhas verticais; aqui mantemos apenas weights
+            for col in ("sniper_price_weight_long", "sniper_price_weight_short"):
+                if col in df.columns:
+                    _add_line(
+                        fig,
+                        row=row_map["entry_weights"],
+                        x=x,
+                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
+                        name=col,
+                        gap_threshold=gap_threshold,
+                    )
+            # labels sao marcados apenas no candle
     else:
         # fallback: detect columns by prefix (evita dependência circular com pf_config)
         def _plot_prefix(panel: str, prefixes: tuple[str, ...]):
@@ -966,7 +1033,19 @@ def plot_all(
         _plot_prefix("breakout", ("break_high_", "break_low_", "bars_since_bhigh_", "bars_since_blow_"))
         _plot_prefix("mom_short", ("slope_diff_",))
         _plot_prefix("wick_stats", ("wick_lower_", "wick_upper_", "wick_"))
-        _plot_prefix("entry_weights", ("sniper_entry_weight_", "sniper_entry_label_"))
+        _plot_prefix("eff", ("eff_",))
+        _plot_prefix("entry_weights", ("sniper_entry_weight_",))
+        if "entry_weights" in row_map:
+            for col in ("sniper_price_weight_long", "sniper_price_weight_short"):
+                if col in df.columns:
+                    _add_line(
+                        fig,
+                        row=row_map["entry_weights"],
+                        x=x,
+                        y=_safe_series(df, col),
+                        name=col,
+                        gap_threshold=gap_threshold,
+                    )
 
     # Label markers on candles (sniper_entry_label_* == 1)
     shapes = []
@@ -992,6 +1071,26 @@ def plot_all(
                             y0=y0,
                             y1=y1,
                             line=dict(color="rgba(0,160,0,0.9)", width=1, dash="dash"),
+                            layer="above",
+                        )
+                    )
+            for col, style in PRICE_LABEL_STYLES.items():
+                if col not in df.columns:
+                    continue
+                sel = df[col].to_numpy(copy=False) == 1
+                if not np.any(sel):
+                    continue
+                for i in np.where(sel)[0].tolist():
+                    shapes.append(
+                        dict(
+                            type="line",
+                            xref="x",
+                            yref="y1",
+                            x0=x[i],
+                            x1=x[i],
+                            y0=y0,
+                            y1=y1,
+                            line=dict(color=str(style["color"]), width=1, dash=str(style["dash"])),
                             layer="above",
                         )
                     )
@@ -1048,11 +1147,13 @@ def plot_backtest_single(
     trades,
     equity: np.ndarray,
     p_entry: np.ndarray,
-    p_danger: np.ndarray,
+    p_entry_long: np.ndarray | None = None,
+    p_entry_short: np.ndarray | None = None,
+    p_danger: np.ndarray | None = None,
     entry_sig: np.ndarray,
-    danger_sig: np.ndarray,
+    danger_sig: np.ndarray | None = None,
     tau_entry: float,
-    tau_danger: float,
+    tau_danger: float | None = None,
     title: str = "backtest",
     save_path: str | None = None,
     show: bool = True,
@@ -1062,6 +1163,7 @@ def plot_backtest_single(
     plot_probs: bool = True,
     plot_signals: bool = True,
     plot_candles: bool = True,
+    plot_entry_combined: bool = False,
 ) -> go.Figure:
     """
     Plot resultado de backtest single-symbol com candles, probs, sinais e equity.
@@ -1191,17 +1293,42 @@ def plot_backtest_single(
 
     # Probabilidades
     if plot_probs:
-        fig.add_trace(
-            go.Scatter(
-                x=idx,
-                y=_apply_gap_nan(np.asarray(p_entry, dtype=float), gap_mask),
-                name="p_entry",
-                mode="lines",
-                line=dict(color="#58a6ff", width=1),
-            ),
-            row=row_map["probs"],
-            col=1,
-        )
+        if p_entry_long is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=_apply_gap_nan(np.asarray(p_entry_long, dtype=float), gap_mask),
+                    name="p_long",
+                    mode="lines",
+                    line=dict(color="#3fb950", width=1.1),
+                ),
+                row=row_map["probs"],
+                col=1,
+            )
+        if p_entry_short is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=_apply_gap_nan(np.asarray(p_entry_short, dtype=float), gap_mask),
+                    name="p_short",
+                    mode="lines",
+                    line=dict(color="#f85149", width=1.1),
+                ),
+                row=row_map["probs"],
+                col=1,
+            )
+        if bool(plot_entry_combined):
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=_apply_gap_nan(np.asarray(p_entry, dtype=float), gap_mask),
+                    name="p_entry_max",
+                    mode="lines",
+                    line=dict(color="#58a6ff", width=1, dash="dot"),
+                ),
+                row=row_map["probs"],
+                col=1,
+            )
         fig.add_trace(
             go.Scatter(
                 x=idx,
@@ -1213,7 +1340,7 @@ def plot_backtest_single(
             row=row_map["probs"],
             col=1,
         )
-        if np.any(np.asarray(p_danger, dtype=float)):
+        if p_danger is not None and np.any(np.asarray(p_danger, dtype=float)):
             fig.add_trace(
                 go.Scatter(
                     x=idx,
@@ -1228,7 +1355,7 @@ def plot_backtest_single(
             fig.add_trace(
                 go.Scatter(
                     x=idx,
-                    y=[float(tau_danger)] * len(idx),
+                    y=[float(tau_danger if tau_danger is not None else 1.0)] * len(idx),
                     name="tau_danger",
                     mode="lines",
                     line=dict(color="#ff7b72", dash="dash", width=1),
@@ -1251,17 +1378,18 @@ def plot_backtest_single(
             row=row_map["signals"],
             col=1,
         )
-        fig.add_trace(
-            go.Scatter(
-                x=idx,
-                y=_apply_gap_nan(danger_sig.astype(float), gap_mask),
-                name="danger",
-                mode="lines",
-                line=dict(color="#ff7b72", width=1),
-            ),
-            row=row_map["signals"],
-            col=1,
-        )
+        if danger_sig is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=_apply_gap_nan(np.asarray(danger_sig).astype(float), gap_mask),
+                    name="danger",
+                    mode="lines",
+                    line=dict(color="#ff7b72", width=1),
+                ),
+                row=row_map["signals"],
+                col=1,
+            )
         fig.update_yaxes(range=[-0.1, 1.1], row=row_map["signals"], col=1)
 
     # Equity

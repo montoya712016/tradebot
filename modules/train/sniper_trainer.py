@@ -29,6 +29,7 @@ try:
         ensure_feature_cache,
         GLOBAL_FLAGS_FULL,
         SniperBatch,
+        SniperDataPack,
     )
 except Exception:
     import sys
@@ -47,6 +48,7 @@ except Exception:
         ensure_feature_cache,
         GLOBAL_FLAGS_FULL,
         SniperBatch,
+        SniperDataPack,
     )
 try:
     from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
@@ -96,6 +98,8 @@ class TrainConfig:
     feature_flags: dict | None = None
     # onde salvar/ler cache de features (senão usa padrão por asset)
     feature_cache_dir: Path | None = None
+    use_full_entry_pool: bool = True
+    full_pool_max_rows_entry: int = 4_000_000
     # Thresholds são definidos manualmente em config/thresholds.py (sem calibrar no treino).
 
 
@@ -416,6 +420,154 @@ def _save_model(booster: xgb.Booster, path: Path) -> None:
         pass
 
 
+def _empty_batch_like(b: SniperBatch | None = None) -> SniperBatch:
+    n_feats = int(b.X.shape[1]) if (b is not None and getattr(b, "X", None) is not None and b.X.ndim == 2) else 0
+    return SniperBatch(
+        X=np.empty((0, n_feats), dtype=np.float32),
+        y=np.empty((0,), dtype=np.float32),
+        w=np.empty((0,), dtype=np.float32),
+        ts=np.empty((0,), dtype="datetime64[ns]"),
+        sym_id=np.empty((0,), dtype=np.int32),
+        feature_cols=list(getattr(b, "feature_cols", []) or []),
+    )
+
+
+def _sample_indices_binary(
+    y: np.ndarray,
+    *,
+    ratio_neg_per_pos: float,
+    max_rows: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if y.size == 0:
+        return np.empty((0,), dtype=np.int64)
+    pos_idx = np.flatnonzero(y >= 0.5)
+    neg_idx = np.flatnonzero(y < 0.5)
+    if pos_idx.size == 0:
+        return np.empty((0,), dtype=np.int64)
+    ratio = float(max(0.0, ratio_neg_per_pos))
+    max_rows = int(max_rows)
+    pos_keep_n = int(pos_idx.size)
+    if max_rows > 0:
+        max_pos = int(max(1, round(max_rows / (1.0 + ratio))))
+        pos_keep_n = min(pos_keep_n, max_pos)
+    pos_keep = rng.choice(pos_idx, size=pos_keep_n, replace=False) if pos_keep_n < pos_idx.size else pos_idx
+    neg_target = int(round(pos_keep_n * ratio))
+    if max_rows > 0:
+        neg_target = min(neg_target, max(0, max_rows - pos_keep_n))
+    if neg_target <= 0 or neg_idx.size == 0:
+        keep = pos_keep
+    else:
+        neg_keep = rng.choice(neg_idx, size=neg_target, replace=False) if neg_target < neg_idx.size else neg_idx
+        keep = np.concatenate([pos_keep, neg_keep])
+    keep.sort()
+    return keep.astype(np.int64, copy=False)
+
+
+def _slice_and_rebalance_batch(
+    b: SniperBatch | None,
+    *,
+    cutoff_ts: np.datetime64 | None,
+    ratio_neg_per_pos: float,
+    max_rows: int,
+    seed: int,
+) -> SniperBatch:
+    if b is None or b.X.size == 0 or b.ts.size == 0:
+        return _empty_batch_like(b)
+    mask = np.ones(int(b.ts.shape[0]), dtype=bool)
+    if cutoff_ts is not None:
+        mask &= (b.ts <= cutoff_ts)
+    if not bool(np.any(mask)):
+        return _empty_batch_like(b)
+    idx0 = np.flatnonzero(mask)
+    y0 = b.y[idx0]
+    rng = np.random.default_rng(int(seed))
+    keep_rel = _sample_indices_binary(
+        y0,
+        ratio_neg_per_pos=float(ratio_neg_per_pos),
+        max_rows=int(max_rows),
+        rng=rng,
+    )
+    if keep_rel.size == 0:
+        return _empty_batch_like(b)
+    idx = idx0[keep_rel]
+    return SniperBatch(
+        X=b.X[idx],
+        y=b.y[idx],
+        w=b.w[idx],
+        ts=b.ts[idx],
+        sym_id=b.sym_id[idx],
+        feature_cols=list(b.feature_cols),
+    )
+
+
+def _slice_pack_from_full_pool(
+    pool: SniperDataPack,
+    *,
+    remove_tail_days: int,
+    ratio_neg_per_pos: float,
+    max_rows_entry: int,
+    seed: int,
+) -> SniperDataPack:
+    ts_candidates: list[np.ndarray] = []
+    for _b in (pool.entry_long, pool.entry_short):
+        if _b is not None and _b.ts.size:
+            ts_candidates.append(_b.ts)
+    max_ts = max((np.max(x) for x in ts_candidates), default=None)
+    cutoff_ts = None
+    if max_ts is not None:
+        cutoff_ts = np.datetime64(pd.to_datetime(max_ts) - pd.Timedelta(days=int(remove_tail_days)))
+
+    side_cap = int(max_rows_entry)
+    b_long = _slice_and_rebalance_batch(
+        pool.entry_long,
+        cutoff_ts=cutoff_ts,
+        ratio_neg_per_pos=float(ratio_neg_per_pos),
+        max_rows=side_cap,
+        seed=int(seed) + 11,
+    )
+    b_short = _slice_and_rebalance_batch(
+        pool.entry_short,
+        cutoff_ts=cutoff_ts,
+        ratio_neg_per_pos=float(ratio_neg_per_pos),
+        max_rows=side_cap,
+        seed=int(seed) + 23,
+    )
+    entry_mid = b_long if b_long.X.size > 0 else b_short
+    entry = entry_mid if entry_mid is not None else _empty_batch_like(pool.entry_long or pool.entry_short)
+    empty = _empty_batch_like(pool.entry_long or pool.entry_short)
+
+    ids_parts = [np.unique(b.sym_id) for b in (b_long, b_short) if b is not None and b.sym_id.size]
+    syms_all = list(getattr(pool, "symbols", []) or [])
+    if ids_parts:
+        ids = np.unique(np.concatenate(ids_parts))
+        symbols_used = [syms_all[int(i)] for i in ids if 0 <= int(i) < len(syms_all)]
+    else:
+        symbols_used = []
+    used_set = set(symbols_used)
+    symbols_skipped = [s for s in syms_all if s not in used_set]
+
+    train_end = None
+    for _b in (b_long, b_short):
+        if _b is not None and _b.ts.size:
+            t = pd.to_datetime(_b.ts.max())
+            train_end = t if train_end is None else max(train_end, t)
+
+    return SniperDataPack(
+        entry=entry,
+        entry_short=b_short,
+        entry_mid=entry_mid,
+        entry_long=b_long,
+        danger=empty,
+        exit=empty,
+        contract=pool.contract,
+        symbols=syms_all,
+        symbols_used=(symbols_used or None),
+        symbols_skipped=(symbols_skipped or None),
+        train_end_utc=train_end,
+    )
+
+
 def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
     cfg = cfg or TrainConfig()
     asset_class = str(getattr(cfg, "asset_class", "crypto") or "crypto").lower()
@@ -468,9 +620,58 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         if not symbols:
             raise RuntimeError("Nenhum símbolo restou após gerar cache (ver logs [cache])")
 
+    full_pool_pack = None
+    if bool(getattr(cfg, "use_full_entry_pool", True)):
+        pool_rows = int(getattr(cfg, "full_pool_max_rows_entry", 0) or 0)
+        base_rows = int(getattr(cfg, "max_rows_entry", 2_000_000) or 2_000_000)
+        if pool_rows <= base_rows:
+            pool_rows = max(base_rows * 2, base_rows)
+        print(f"[sniper-train] pool-full: construindo 1x (rows_target={pool_rows})", flush=True)
+        if bool(getattr(cfg, "use_feature_cache", True)):
+            full_pool_pack = prepare_sniper_dataset_from_cache(
+                symbols,
+                total_days=int(cfg.total_days),
+                remove_tail_days=0,
+                contract=contract,
+                cache_map=cache_map,
+                entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
+                max_rows_entry=int(pool_rows),
+                seed=7331,
+                asset_class=asset_class,
+                feature_flags=feature_flags,
+            )
+        else:
+            full_pool_pack = prepare_sniper_dataset(
+                symbols,
+                total_days=int(cfg.total_days),
+                remove_tail_days=0,
+                contract=contract,
+                entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
+                max_rows_entry=int(pool_rows),
+                seed=7331,
+                asset_class=asset_class,
+                feature_flags=feature_flags,
+            )
+        try:
+            for _side_name, _b in (("long", full_pool_pack.entry_long), ("short", full_pool_pack.entry_short)):
+                if _b is not None and _b.X.size > 0:
+                    _pos = int((_b.y >= 0.5).sum())
+                    _neg = int((_b.y < 0.5).sum())
+                    print((f"[sniper-train] pool-full entry_{_side_name}: pos={_pos:,} neg={_neg:,}").replace(",", "."), flush=True)
+        except Exception:
+            pass
+
     for tail in cfg.offsets_days:
         print(f"[sniper-train] periodo T-{tail}d", flush=True)
-        if bool(getattr(cfg, "use_feature_cache", True)):
+        if full_pool_pack is not None:
+            pack = _slice_pack_from_full_pool(
+                full_pool_pack,
+                remove_tail_days=int(tail),
+                ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
+                max_rows_entry=int(getattr(cfg, "max_rows_entry", 2_000_000)),
+                seed=1337 + int(tail),
+            )
+        elif bool(getattr(cfg, "use_feature_cache", True)):
             pack = prepare_sniper_dataset_from_cache(
                 symbols,
                 total_days=int(cfg.total_days),
@@ -515,28 +716,27 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             if int(n_used) < int(min_used):
                 print(f"[sniper-train] {tail}d: symbols_used={n_used} < min_symbols_used_per_period={min_used} -> pulando", flush=True)
                 continue
-        if pack.entry_mid.X.size == 0:
+        if (pack.entry_long is None or pack.entry_long.X.size == 0) and (pack.entry_short is None or pack.entry_short.X.size == 0):
             print(f"[sniper-train] {tail}d: dataset vazio, pulando")
             continue
-        try:
-            pos_e = int((pack.entry_mid.y >= 0.5).sum())
-            neg_e = int((pack.entry_mid.y < 0.5).sum())
-            print((f"[sniper-train] dataset entry: pos={pos_e:,} neg={neg_e:,}").replace(",", "."), flush=True)
-        except Exception:
-            pass
+        for side_name, side_batch in (("long", pack.entry_long), ("short", pack.entry_short)):
+            try:
+                if side_batch is not None and side_batch.X.size > 0:
+                    pos_e = int((side_batch.y >= 0.5).sum())
+                    neg_e = int((side_batch.y < 0.5).sum())
+                    print((f"[sniper-train] dataset entry_{side_name}: pos={pos_e:,} neg={neg_e:,}").replace(",", "."), flush=True)
+            except Exception:
+                pass
 
-        windows = list(getattr(cfg.contract, "entry_label_windows_minutes", []) or [])
-        if not windows:
-            raise RuntimeError("entry_label_windows_minutes vazio")
-        entry_specs = [("mid", int(windows[0]))]
-        entry_batches = {"mid": pack.entry_mid}
+        entry_specs = [("long", "long"), ("short", "short")]
+        entry_batches = {"long": pack.entry_long, "short": pack.entry_short}
         entry_models: dict[str, tuple[xgb.Booster, dict]] = {}
-        for name, w in entry_specs:
-            b = entry_batches.get(name, pack.entry_mid)
+        for name, tag in entry_specs:
+            b = entry_batches.get(name)
             if b is None or b.X.size == 0:
-                print(f"[sniper-train] EntryScore {name} ({w}m): dataset vazio, pulando", flush=True)
+                print(f"[sniper-train] EntryScore {name}: dataset vazio, pulando", flush=True)
                 continue
-            print(f"[sniper-train] treinando EntryScore {name} ({w}m)...", flush=True)
+            print(f"[sniper-train] treinando EntryScore {name}...", flush=True)
             m, m_meta = _train_xgb_classifier(b, entry_params)
             entry_models[name] = (m, m_meta)
             print(f"[sniper-train] EntryScore {name}: best_iter={m_meta['best_iteration']}", flush=True)
@@ -549,24 +749,23 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         try:
             if getattr(pack, "train_end_utc", None) is not None:
                 period_train_end = pd.to_datetime(pack.train_end_utc)
-            elif pack.entry_mid.ts.size:
-                period_train_end = pd.to_datetime(pack.entry_mid.ts.max())
+            elif pack.entry_long is not None and pack.entry_long.ts.size:
+                period_train_end = pd.to_datetime(pack.entry_long.ts.max())
+            elif pack.entry_short is not None and pack.entry_short.ts.size:
+                period_train_end = pd.to_datetime(pack.entry_short.ts.max())
         except Exception:
             period_train_end = None
 
         period_dir = run_dir / f"period_{int(tail)}d"
-        # salva modelo entry (mantem entry_model como alias do "mid")
-        for name, w in entry_specs:
+        # salva modelos entry por lado (sem alias legado "mid")
+        for name, _tag in entry_specs:
             if name not in entry_models:
                 continue
             model, _m_meta = entry_models[name]
-            d = period_dir / f"entry_model_{int(w)}m"
+            d = period_dir / f"entry_model_{name}"
             d.mkdir(parents=True, exist_ok=True)
             _save_model(model, d / "model_entry.json")
-        if "mid" in entry_models:
-            (period_dir / "entry_model").mkdir(parents=True, exist_ok=True)
-            _save_model(entry_models["mid"][0], period_dir / "entry_model" / "model_entry.json")
-        base_name = "mid"
+        base_name = "long" if "long" in entry_models else "short"
         base_batch = entry_batches[base_name]
         base_meta = entry_models[base_name][1]
         meta = {
@@ -586,12 +785,12 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             "symbols_used": (pack.symbols_used or None),
             "symbols_skipped": (pack.symbols_skipped or None),
         }
-        # meta extra por janela
-        for name, w in entry_specs:
+        # meta extra por lado
+        for name, _tag in entry_specs:
             if name not in entry_models:
                 continue
             _m, _m_meta = entry_models[name]
-            meta[f"entry_{int(w)}m"] = {
+            meta[f"entry_{name}"] = {
                 "feature_cols": entry_batches[name].feature_cols,
                 "calibration": _m_meta["calibrator"],
             }

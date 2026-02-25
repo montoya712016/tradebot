@@ -23,6 +23,7 @@ from .pf_config import (
     LIQUIDITY_MIN,
     VOL_Z_SHORT_MIN, VOL_Z_LONG_MIN,
     RANGE_RATIO_PAIRS,
+    EFF_MIN,
 )
 
 warnings.simplefilter("ignore", pd.errors.PerformanceWarning)
@@ -415,6 +416,57 @@ def _rolling_max_and_argmax_dist(x: np.ndarray, win: int, minp: int) -> Tuple[np
 
 
 @njit(cache=True)
+def _rolling_efficiency(x: np.ndarray, win: int, minp: int) -> np.ndarray:
+    """
+    Directional efficiency (past-only):
+      abs(x[t] - x[t-win+1]) / sum(abs(diff)) dentro da janela.
+    """
+    n = x.size
+    out = np.empty(n, np.float64); out[:] = np.nan
+    if n == 0:
+        return out
+    if win < 1:
+        win = 1
+    if minp < 2:
+        minp = 2
+    if minp > win:
+        minp = win
+
+    ad = np.empty(n, np.float64)
+    ad[0] = 0.0
+    for i in range(1, n):
+        a = x[i - 1]
+        b = x[i]
+        if np.isfinite(a) and np.isfinite(b):
+            ad[i] = abs(b - a)
+        else:
+            ad[i] = 0.0
+    pref = np.empty(n + 1, np.float64)
+    pref[0] = 0.0
+    for i in range(n):
+        pref[i + 1] = pref[i] + ad[i]
+
+    for i in range(n):
+        left = i - win + 1
+        if left < 0:
+            left = 0
+        L = i - left + 1
+        if L < minp:
+            continue
+        xi = x[i]
+        xl = x[left]
+        if (not np.isfinite(xi)) or (not np.isfinite(xl)):
+            continue
+        net = abs(xi - xl)
+        denom = pref[i + 1] - pref[left + 1]  # soma absdiff de left+1..i
+        if denom > 1e-12:
+            out[i] = net / denom
+        else:
+            out[i] = 0.0
+    return out
+
+
+@njit(cache=True)
 def _rolling_minmax_and_dist(
     x: np.ndarray, win: int, minp: int
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -612,6 +664,10 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         for a, b in RANGE_RATIO_PAIRS:
             cols.append(f"range_ratio_{a}_{b}")
         feat_counts["range_ratio"] = len(RANGE_RATIO_PAIRS)
+    if flags.get("eff"):
+        for m in EFF_MIN:
+            cols.append(f"eff_{m}")
+        feat_counts["eff"] = len(EFF_MIN)
 
     # novos blocos de contexto recente
     if flags.get("runs"):
@@ -649,7 +705,7 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
 
     timings = {k: 0.0 for k in [
         "shitidx","atr","keltner","rsi","slope","vol","ci","cum_logret",
-        "cci","adx","time_since","zlog","slope_reserr","vol_ratio","regime","liquidity","rev_speed","vol_z","shadow","range_ratio"
+        "cci","adx","time_since","zlog","slope_reserr","vol_ratio","regime","liquidity","rev_speed","vol_z","shadow","range_ratio","eff"
     ]}
 
     for idxs in df.groupby(seg_id).groups.values():
@@ -1000,6 +1056,14 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
                 df.loc[idxs, f"range_ratio_{a}_{b}"] = rr
             timings["range_ratio"] += (time.perf_counter() - _t0)
 
+        if flags.get("eff"):
+            _t0 = time.perf_counter()
+            for m in EFF_MIN:
+                win = w(m)
+                eff = _rolling_efficiency(close, win, max(2, MP(win)))
+                df.loc[idxs, f"eff_{m}"] = eff
+            timings["eff"] += (time.perf_counter() - _t0)
+
         # ── novos blocos ────────────────────────────────────────────────────────
         if flags.get("runs"):
             _t0 = time.perf_counter()
@@ -1081,7 +1145,7 @@ def make_features(df: pd.DataFrame, flags: Dict[str, bool], *, verbose: bool = T
         "shitidx","keltner","atr","rsi","slope","vol","ci","cum_logret",
         "cci","adx","time_since","zlog","slope_reserr","vol_ratio","regime","liquidity","rev_speed","vol_z","shadow","range_ratio",
         # novos
-        "runs","hh_hl","ema_cross","breakout","mom_short","wick_stats"
+        "runs","hh_hl","ema_cross","breakout","mom_short","wick_stats","eff"
     ]
     parts = []
     for k in order:

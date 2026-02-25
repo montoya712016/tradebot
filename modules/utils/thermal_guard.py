@@ -78,8 +78,13 @@ class ThermalGuardConfig:
     enabled: bool = True
     max_temp_c: float = 80.0
     resume_temp_c: float = 70.0
+    warm_temp_c: float = 75.0
     check_every_s: float = 10.0
     cooldown_s: float = 15.0
+    warm_sleep_s: float = 3.0
+    critical_temp_c: float = 90.0
+    abort_on_critical: bool = True
+    max_wait_s: float = 900.0
     log_prefix: str = "[thermal-guard]"
 
 
@@ -95,14 +100,25 @@ class ThermalGuard:
         enabled = _env_bool("SNIPER_THERMAL_GUARD", True)
         max_temp = _env_float("SNIPER_THERMAL_MAX_TEMP_C", 80.0)
         resume_temp = _env_float("SNIPER_THERMAL_RESUME_BELOW_C", 70.0)
+        warm_temp = _env_float("SNIPER_THERMAL_WARM_TEMP_C", max(0.0, max_temp - 5.0))
+        critical_temp = _env_float("SNIPER_THERMAL_CRITICAL_TEMP_C", max_temp + 10.0)
         if resume_temp >= max_temp:
             resume_temp = max_temp - 5.0
+        if warm_temp >= max_temp:
+            warm_temp = max(max_temp - 2.0, resume_temp)
+        if critical_temp <= max_temp:
+            critical_temp = max_temp + 5.0
         cfg = ThermalGuardConfig(
             enabled=enabled,
             max_temp_c=max_temp,
             resume_temp_c=resume_temp,
+            warm_temp_c=warm_temp,
             check_every_s=max(1.0, _env_float("SNIPER_THERMAL_CHECK_EVERY_S", 10.0)),
             cooldown_s=max(1.0, _env_float("SNIPER_THERMAL_COOLDOWN_S", 15.0)),
+            warm_sleep_s=max(0.5, _env_float("SNIPER_THERMAL_WARM_SLEEP_S", 3.0)),
+            critical_temp_c=critical_temp,
+            abort_on_critical=_env_bool("SNIPER_THERMAL_ABORT_ON_CRITICAL", True),
+            max_wait_s=max(5.0, _env_float("SNIPER_THERMAL_MAX_WAIT_S", 900.0)),
         )
         return cls(cfg)
 
@@ -212,11 +228,33 @@ class ThermalGuard:
         if not bool(self.cfg.enabled):
             return self.sample(force=force_sample)
         wait_now, sample = self.should_wait(force_sample=force_sample)
+        peak0 = sample.peak_c
+        if (
+            bool(self.cfg.abort_on_critical)
+            and peak0 is not None
+            and float(peak0) >= float(self.cfg.critical_temp_c)
+        ):
+            msg = (
+                f"{self.cfg.log_prefix} CRITICAL em {where}: cpu={sample.cpu_c}C gpu={sample.gpu_c}C "
+                f"(crit={self.cfg.critical_temp_c:.1f}C)"
+            )
+            if logger is not None:
+                logger(msg + " -> abortando")
+            raise RuntimeError(msg)
         if not sample.has_any:
             if (not self._warned_no_sensors) and logger is not None:
                 logger(f"{self.cfg.log_prefix} ativo sem sensores CPU/GPU; seguindo sem throttle")
                 self._warned_no_sensors = True
             return sample
+        # Pré-throttle leve quando está quente, mas ainda abaixo do limite.
+        if (not wait_now) and sample.peak_c is not None and float(sample.peak_c) >= float(self.cfg.warm_temp_c):
+            if logger is not None:
+                logger(
+                    f"{self.cfg.log_prefix} warm em {where}: cpu={sample.cpu_c}C gpu={sample.gpu_c}C "
+                    f"(warm>={self.cfg.warm_temp_c:.1f}C). sleep {self.cfg.warm_sleep_s:.1f}s"
+                )
+            time.sleep(float(self.cfg.warm_sleep_s))
+            return self.sample(force=True)
         if not wait_now:
             return sample
 
@@ -225,10 +263,23 @@ class ThermalGuard:
                 f"{self.cfg.log_prefix} quente em {where}: cpu={sample.cpu_c}C gpu={sample.gpu_c}C "
                 f"(limite={self.cfg.max_temp_c:.1f}C). aguardando..."
             )
+        t_wait0 = time.time()
         while True:
             time.sleep(float(self.cfg.cooldown_s))
             sample = self.sample(force=True)
             peak = sample.peak_c
+            if (
+                bool(self.cfg.abort_on_critical)
+                and peak is not None
+                and float(peak) >= float(self.cfg.critical_temp_c)
+            ):
+                msg = (
+                    f"{self.cfg.log_prefix} CRITICAL em {where}: cpu={sample.cpu_c}C gpu={sample.gpu_c}C "
+                    f"(crit={self.cfg.critical_temp_c:.1f}C)"
+                )
+                if logger is not None:
+                    logger(msg + " -> abortando")
+                raise RuntimeError(msg)
             if peak is None:
                 if logger is not None:
                     logger(f"{self.cfg.log_prefix} sensores indisponiveis; retomando")
@@ -240,6 +291,14 @@ class ThermalGuard:
                         f"(alvo<{self.cfg.resume_temp_c:.1f}C)"
                     )
                 return sample
+            if (time.time() - t_wait0) >= float(self.cfg.max_wait_s):
+                msg = (
+                    f"{self.cfg.log_prefix} timeout quente em {where}: cpu={sample.cpu_c}C gpu={sample.gpu_c}C "
+                    f"(espera>{self.cfg.max_wait_s:.0f}s)"
+                )
+                if logger is not None:
+                    logger(msg + " -> abortando")
+                raise RuntimeError(msg)
             if logger is not None:
                 logger(
                     f"{self.cfg.log_prefix} ainda quente: cpu={sample.cpu_c}C gpu={sample.gpu_c}C "

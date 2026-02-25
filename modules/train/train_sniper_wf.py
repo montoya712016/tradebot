@@ -38,20 +38,29 @@ from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore
 
 # Defaults de performance/telemetria para rodar com "Run" sem flags externas.
 os.environ.setdefault("SNIPER_CACHE_PROGRESS_EVERY_S", "3")
-os.environ.setdefault("SNIPER_CACHE_WORKERS", "8")
-os.environ.setdefault("SNIPER_CACHE_RAM_PCT", "85")
-os.environ.setdefault("SNIPER_CACHE_MIN_FREE_MB", "1536")
-os.environ.setdefault("SNIPER_CACHE_PER_WORKER_MB", "768")
-os.environ.setdefault("SNIPER_DATASET_WORKERS", "4")
-os.environ.setdefault("SNIPER_DATASET_RAM_PCT", "85")
-os.environ.setdefault("SNIPER_DATASET_MIN_FREE_MB", "2048")
+os.environ.setdefault("SNIPER_CACHE_WORKERS", "4")
+os.environ.setdefault("SNIPER_CACHE_RAM_PCT", "78")
+os.environ.setdefault("SNIPER_CACHE_MIN_FREE_MB", "3072")
+os.environ.setdefault("SNIPER_CACHE_PER_WORKER_MB", "1024")
+os.environ.setdefault("SNIPER_DATASET_WORKERS", "2")
+os.environ.setdefault("SNIPER_DATASET_RAM_PCT", "80")
+os.environ.setdefault("SNIPER_DATASET_MIN_FREE_MB", "3072")
 os.environ.setdefault("SNIPER_DATASET_PER_WORKER_MB", "1024")
-os.environ.setdefault("SNIPER_LABELS_REFRESH_WORKERS", "8")
+os.environ.setdefault("SNIPER_LABELS_REFRESH_WORKERS", "4")
 os.environ.setdefault("SNIPER_THERMAL_GUARD", "1")
-os.environ.setdefault("SNIPER_THERMAL_MAX_TEMP_C", "80")
-os.environ.setdefault("SNIPER_THERMAL_RESUME_BELOW_C", "70")
-os.environ.setdefault("SNIPER_THERMAL_CHECK_EVERY_S", "10")
-os.environ.setdefault("SNIPER_THERMAL_COOLDOWN_S", "15")
+os.environ.setdefault("SNIPER_THERMAL_MAX_TEMP_C", "76")
+os.environ.setdefault("SNIPER_THERMAL_RESUME_BELOW_C", "66")
+os.environ.setdefault("SNIPER_THERMAL_WARM_TEMP_C", "72")
+os.environ.setdefault("SNIPER_THERMAL_CHECK_EVERY_S", "5")
+os.environ.setdefault("SNIPER_THERMAL_COOLDOWN_S", "20")
+os.environ.setdefault("SNIPER_THERMAL_WARM_SLEEP_S", "4")
+os.environ.setdefault("SNIPER_THERMAL_CRITICAL_TEMP_C", "84")
+os.environ.setdefault("SNIPER_THERMAL_ABORT_ON_CRITICAL", "1")
+os.environ.setdefault("SNIPER_THERMAL_MAX_WAIT_S", "1800")
+os.environ.setdefault("SNIPER_CACHE_CRITICAL_RAM_PCT", "90")
+os.environ.setdefault("SNIPER_CACHE_CRITICAL_MIN_FREE_MB", "1536")
+os.environ.setdefault("SNIPER_DATASET_CRITICAL_RAM_PCT", "90")
+os.environ.setdefault("SNIPER_DATASET_CRITICAL_MIN_FREE_MB", "1536")
 os.environ.setdefault("PF_OHLC_CACHE", "1")
 os.environ.setdefault("PF_OHLC_CACHE_REFRESH", "0")
 os.environ.setdefault("PF_PREFER_PURE_FOR_THREADS", "0")
@@ -92,6 +101,8 @@ class TrainSniperWFSettings:
     # sizing (use RAM/VRAM)
     max_rows_entry: int = 6_000_000
     entry_ratio_neg_per_pos: float = 6.0
+    use_full_entry_pool: bool = True
+    full_pool_max_rows_entry: int = 8_000_000
 
     # device
 
@@ -153,6 +164,8 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         entry_params=entry_params,
         max_rows_entry=int(settings.max_rows_entry),
         entry_ratio_neg_per_pos=float(settings.entry_ratio_neg_per_pos),
+        use_full_entry_pool=bool(getattr(settings, "use_full_entry_pool", True)),
+        full_pool_max_rows_entry=int(getattr(settings, "full_pool_max_rows_entry", 8_000_000)),
         use_feature_cache=bool(settings.use_feature_cache),
         asset_class=str(settings.asset_class or "crypto"),
         symbols=tuple(settings.symbols),

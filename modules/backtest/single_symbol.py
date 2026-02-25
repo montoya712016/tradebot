@@ -127,9 +127,8 @@ class SingleSymbolDemoSettings:
     print_signal_diagnostics: bool = True
     # Thresholds são definidos manualmente em config/thresholds.py.
     override_tau_entry: float | None = None
-    override_tau_danger: float | None = None
-    # Danger desativado por enquanto
-    use_danger_model: bool = False
+    disable_entry_calibration: bool = False
+    long_only: bool = False
     # Contrato usado para cache/simulação
     contract: TradeContract | None = None
 
@@ -167,12 +166,48 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
 
     run_dir = _find_latest_wf_dir(settings.run_dir, asset_class=asset)
     periods = load_period_models(run_dir)
+    if bool(getattr(settings, "disable_entry_calibration", False)):
+        periods = [
+            replace(
+                pm,
+                entry_calib={"type": "identity"},
+                entry_calib_map={k: {"type": "identity"} for k in (pm.entry_calib_map or {}).keys()},
+            )
+            for pm in periods
+        ]
+        print("[backtest-single] entry calibration disabled (identity)", flush=True)
     # aplica overrides (opcional)
     periods = apply_threshold_overrides(
         periods,
         tau_entry=settings.override_tau_entry,
-        tau_danger=settings.override_tau_danger,
     )
+    if bool(getattr(settings, "long_only", False)):
+        filtered_periods = []
+        for pm in periods:
+            entry_models = dict(pm.entry_models or {})
+            if "long" in entry_models:
+                entry_models = {"long": entry_models["long"]}
+            entry_cols_map = dict(pm.entry_cols_map or {})
+            if "long" in entry_cols_map:
+                entry_cols_map = {"long": list(entry_cols_map["long"])}
+            entry_calib_map = dict(pm.entry_calib_map or {})
+            if "long" in entry_calib_map:
+                entry_calib_map = {"long": dict(entry_calib_map["long"])}
+            tau_entry_map = dict(pm.tau_entry_map or {})
+            if "long" in tau_entry_map:
+                tau_entry_map = {"long": float(tau_entry_map["long"])}
+            filtered_periods.append(
+                replace(
+                    pm,
+                    entry_model=(entry_models.get("long") or pm.entry_model),
+                    entry_models=entry_models,
+                    entry_cols_map=entry_cols_map,
+                    entry_calib_map=entry_calib_map,
+                    tau_entry_map=tau_entry_map,
+                )
+            )
+        periods = filtered_periods
+        print("[backtest-single] mode=long_only (short model disabled)", flush=True)
 
     # garante cache do símbolo e carrega df (features+labels+ohlc)
     contract = settings.contract or _default_contract_for_asset(asset)
@@ -200,48 +235,36 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         raise RuntimeError(f"Poucos candles para simular: rows={len(df)}")
 
     # scores WF (sem vazamento)
-    p_entry_map, p_danger, p_exit, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+    p_entry_map, _p_danger_unused, _p_exit_unused, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+    p_long = np.asarray(p_entry_map.get("long", np.full(len(df), np.nan, dtype=np.float32)), dtype=np.float32)
+    p_short = np.asarray(p_entry_map.get("short", np.full(len(df), np.nan, dtype=np.float32)), dtype=np.float32)
+    if bool(getattr(settings, "long_only", False)):
+        p_short = np.full(len(df), np.nan, dtype=np.float32)
     p_entry = select_entry_mid(p_entry_map)
     tau_entry = float(settings.override_tau_entry) if settings.override_tau_entry is not None else float(used.tau_entry)
-    tau_danger = float(settings.override_tau_danger) if settings.override_tau_danger is not None else float(used.tau_danger)
-    if not bool(settings.use_danger_model):
-        p_danger = np.zeros(len(p_entry), dtype=np.float32)
-        tau_danger = 1.0
+    p_danger = np.zeros(len(p_entry), dtype=np.float32)
 
     # `simulate_sniper_from_scores` recebe um `PeriodModel` em `thresholds`.
     # Se houver override, cria uma cópia do período usado com thresholds alterados.
     thresholds = used
-    if (settings.override_tau_entry is not None) or (settings.override_tau_danger is not None):
+    if settings.override_tau_entry is not None:
         thresholds = replace(
             used,
             tau_entry=float(tau_entry),
-            tau_danger=float(tau_danger),
-            # mantém consistência dos thresholds derivados
+            # mantem consistencia dos thresholds derivados
             tau_add=float(used.tau_add),
-            tau_danger_add=float(used.tau_danger_add),
         )
 
-    if settings.print_signal_diagnostics and bool(settings.use_danger_model):
-        pe = np.asarray(p_entry, dtype=np.float64)
-        pdg = np.asarray(p_danger, dtype=np.float64)
-        print(f"[diag] tau_entry={tau_entry:.4f} tau_danger={tau_danger:.4f}")
-        # Importante: a regra é "entra se p_danger < tau_danger" (tau_danger alto = mais permissivo)
-        m_valid = np.isfinite(pe) & np.isfinite(pdg)
-        m_entry = m_valid & (pe >= float(tau_entry))
-        pass_all = float(np.mean(pdg[m_valid] < float(tau_danger))) if np.any(m_valid) else float("nan")
-        pass_when_entry = float(np.mean(pdg[m_entry] < float(tau_danger))) if np.any(m_entry) else float("nan")
-        print(f"[diag] danger_pass_rate(all)={pass_all:.2%} | danger_pass_rate(when p_entry>=tau_entry)={pass_when_entry:.2%}")
-
     # sinais usados pela estrategia (para plot/diagnostico)
-    pe = np.asarray(p_entry, dtype=np.float64)
-    pdg = np.asarray(p_danger, dtype=np.float64)
-    entry_sig = (pe >= float(tau_entry))
-    danger_sig = (pdg >= float(tau_danger))
-    entry_ok = entry_sig if not bool(settings.use_danger_model) else (entry_sig & (~danger_sig))
+    pe_long = np.asarray(p_long, dtype=np.float64)
+    pe_short = np.asarray(p_short, dtype=np.float64)
+    entry_sig = (pe_long >= float(tau_entry)) if bool(getattr(settings, "long_only", False)) else ((pe_long >= float(tau_entry)) | (pe_short >= float(tau_entry)))
+    entry_ok = entry_sig
 
     res = simulate_sniper_from_scores(
         df,
-        p_entry=p_entry,
+        p_entry=p_long,
+        p_entry_short=(None if bool(getattr(settings, "long_only", False)) else p_short),
         p_danger=p_danger,
         thresholds=thresholds,
         periods=periods,
@@ -293,11 +316,10 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             trades=res.trades,
             equity=np.asarray(res.equity_curve, dtype=np.float64),
             p_entry=np.asarray(p_entry, dtype=np.float64),
-            p_danger=np.asarray(p_danger, dtype=np.float64),
+            p_entry_long=np.asarray(p_long, dtype=np.float64),
+            p_entry_short=np.asarray(p_short, dtype=np.float64),
             entry_sig=np.asarray(entry_ok, dtype=bool),
-            danger_sig=np.asarray(danger_sig, dtype=bool),
             tau_entry=tau_entry,
-            tau_danger=tau_danger,
             title=f"{symbol} | days={settings.days} | ret={ret_total:+.2%} | trades={len(res.trades)}",
             save_path=settings.plot_out,
             show=True,

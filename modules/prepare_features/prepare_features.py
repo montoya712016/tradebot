@@ -43,7 +43,7 @@ FEATURE_KEYS = [
     "keltner","cci","adx","time_since","zlog","slope_reserr",
     "vol_ratio","regime","liquidity","rev_speed","vol_z","shadow","range_ratio",
     # novos blocos de contexto recente
-    "runs","hh_hl","ema_cross","breakout","mom_short","wick_stats",
+    "runs","hh_hl","ema_cross","breakout","mom_short","wick_stats","eff",
 ]
 
 
@@ -85,6 +85,7 @@ FLAGS: Dict[str, bool] = {
     "breakout":     False,
     "mom_short":    False,
     "wick_stats":   False,
+    "eff":          False,
     "label":        False,
     "plot_candles": True,
 }

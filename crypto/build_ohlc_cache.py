@@ -26,11 +26,25 @@ _add_repo_paths()
 from train.sniper_trainer import TrainConfig, _select_symbols  # type: ignore
 from prepare_features.data import load_ohlc_1m_series  # type: ignore
 from prepare_features.data import _ohlc_cache_paths  # type: ignore
-from utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # type: ignore
-from utils.thermal_guard import ThermalGuard  # type: ignore
+from utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # type: ignore
 
 
-_THERMAL_GUARD = ThermalGuard.from_env()
+_GUARD = GuardedRunner(
+    log_prefix="[ohlc-cache]",
+    env_prefix="OHLC_CACHE",
+    defaults=GuardedParallelDefaults(
+        max_ram_pct=78.0,
+        min_free_mb=3072.0,
+        per_worker_mem_mb=768.0,
+        critical_ram_pct=92.0,
+        critical_min_free_mb=1024.0,
+        abort_on_critical_ram=True,
+        min_workers=1,
+        poll_interval_s=0.3,
+        log_every_s=20.0,
+        throttle_sleep_s=3.0,
+    ),
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -66,14 +80,6 @@ def _cache_ok(sym: str) -> bool:
         return cache_path.stat().st_size > 4096
     except Exception:
         return False
-
-
-def _thermal_wait(where: str) -> None:
-    _THERMAL_GUARD.wait_until_safe(
-        where=where,
-        force_sample=False,
-        logger=lambda msg: print(f"[ohlc-cache] {msg}", flush=True),
-    )
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -125,16 +131,9 @@ def run_build(
     skipped = 0
 
     if int(workers) <= 0:
-        workers = _env_int("OHLC_CACHE_WORKERS", min(12, int(os.cpu_count() or 4)))
+        workers = _env_int("OHLC_CACHE_WORKERS", min(4, int(os.cpu_count() or 4)))
     workers = max(1, int(workers))
-    policy = AdaptiveParallelPolicy(
-        max_ram_pct=_env_float("OHLC_CACHE_RAM_PCT", 85.0),
-        min_free_mb=_env_float("OHLC_CACHE_MIN_FREE_MB", 1536.0),
-        per_worker_mem_mb=_env_float("OHLC_CACHE_PER_WORKER_MB", 512.0),
-        min_workers=1,
-        poll_interval_s=0.3,
-        log_every_s=20.0,
-    )
+    policy = _GUARD.make_policy()
     print(
         f"[ohlc-cache] workers={workers} ram_cap={policy.max_ram_pct:.1f}% "
         f"min_free_mb={policy.min_free_mb:.0f} per_worker_mb={policy.per_worker_mem_mb:.0f}",
@@ -142,14 +141,14 @@ def run_build(
     )
 
     def _worker(sym: str) -> dict[str, Any]:
-        _thermal_wait(f"ohlc:{sym}")
+        _GUARD.thermal_wait(f"ohlc:{sym}")
         if (not refresh) and _cache_ok(sym):
             return {"sym": sym, "skip": True, "rows": 0, "sec": 0.0}
         t1 = time.time()
         df = load_ohlc_1m_series(sym, days=int(days), remove_tail_days=0)
         return {"sym": sym, "skip": False, "rows": int(len(df)), "sec": float(time.time() - t1)}
 
-    for sym_submitted, fut in run_adaptive_thread_map(
+    for sym_submitted, fut in _GUARD.adaptive_map(
         symbols,
         _worker,
         max_workers=workers,
@@ -165,6 +164,9 @@ def run_build(
             else:
                 ok += 1
         except Exception as e:
+            if _GUARD.is_guard_error(e):
+                print(f"[ohlc-cache] ABORT guard {sym_submitted}: {type(e).__name__}: {e}", flush=True)
+                raise
             fail += 1
             print(f"[ohlc-cache] FAIL {sym_submitted}: {type(e).__name__}: {e}", flush=True)
         done += 1

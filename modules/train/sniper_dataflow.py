@@ -22,13 +22,9 @@ import threading
 import numpy as np
 import pandas as pd
 try:
-    from utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # type: ignore
+    from utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # type: ignore
 except Exception:
-    from modules.utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # type: ignore[import]
-try:
-    from utils.thermal_guard import ThermalGuard  # type: ignore
-except Exception:
-    from modules.utils.thermal_guard import ThermalGuard  # type: ignore[import]
+    from modules.utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # type: ignore[import]
 try:
     import psutil  # type: ignore
 except Exception:
@@ -55,15 +51,46 @@ except Exception:
 
 
 GLOBAL_FLAGS_FULL = build_flags(enable=FEATURE_KEYS, label=True)
-_THERMAL_GUARD = ThermalGuard.from_env()
+_CACHE_GUARD = GuardedRunner(
+    log_prefix="[sniper-data]",
+    env_prefix="SNIPER_CACHE",
+    defaults=GuardedParallelDefaults(
+        max_ram_pct=78.0,
+        min_free_mb=3072.0,
+        per_worker_mem_mb=1024.0,
+        critical_ram_pct=90.0,
+        critical_min_free_mb=1536.0,
+        abort_on_critical_ram=True,
+        min_workers=1,
+        poll_interval_s=0.3,
+        log_every_s=20.0,
+        throttle_sleep_s=3.0,
+    ),
+)
+_DATASET_GUARD = GuardedRunner(
+    log_prefix="[sniper-data]",
+    env_prefix="SNIPER_DATASET",
+    defaults=GuardedParallelDefaults(
+        max_ram_pct=80.0,
+        min_free_mb=3072.0,
+        per_worker_mem_mb=1024.0,
+        critical_ram_pct=90.0,
+        critical_min_free_mb=1536.0,
+        abort_on_critical_ram=True,
+        min_workers=1,
+        poll_interval_s=0.3,
+        log_every_s=20.0,
+        throttle_sleep_s=3.0,
+    ),
+)
 
 
 def _thermal_wait(where: str) -> None:
-    _THERMAL_GUARD.wait_until_safe(
-        where=where,
-        force_sample=False,
-        logger=lambda msg: print(f"[sniper-data] {msg}", flush=True),
-    )
+    _CACHE_GUARD.thermal_wait(where)
+
+
+def _is_guard_error_text(err: str | None) -> bool:
+    return _CACHE_GUARD.is_guard_error(err)
 
 def _stock_helper_bundle() -> tuple[dict | None, object | None, object | None, object | None, object | None]:
     try:
@@ -138,24 +165,24 @@ def _list_feature_columns(df: pd.DataFrame) -> List[str]:
 
 
 def _entry_label_specs(contract: TradeContract) -> list[dict[str, str]]:
-    windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
-    if len(windows) < 1:
-        raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
-    windows = windows[:1]
-    names = ["mid"]
-    specs: list[dict[str, str]] = []
-    for name, w in zip(names, windows):
-        suf = f"{int(w)}m"
-        specs.append(
-            {
-                "name": name,
-                "label_col": f"sniper_entry_label_{suf}",
-                "weight_col": f"sniper_entry_weight_{suf}",
-                "exit_code_col": f"sniper_exit_code_{suf}",
-                "suffix": suf,
-            }
-        )
-    return specs
+    # Novo contrato: labels/weights explicitamente por lado (long/short), independentes do legacy sniper_entry_*.
+    # Mantemos compatibilidade no restante do pipeline via alias entry_mid -> entry_long.
+    return [
+        {
+            "name": "long",
+            "label_col": "sniper_price_label_long",
+            "weight_col": "sniper_price_weight_long",
+            "exit_code_col": "",
+            "suffix": "long",
+        },
+        {
+            "name": "short",
+            "label_col": "sniper_price_label_short",
+            "weight_col": "sniper_price_weight_short",
+            "exit_code_col": "",
+            "suffix": "short",
+        },
+    ]
 
 
 @dataclass
@@ -680,19 +707,14 @@ def ensure_feature_cache(
                     mw = min(8, int(os.cpu_count() or 8))
         mw = max(1, int(mw))
         # Nota: o gargalo aqui é misto (I/O MySQL + CPU features). Threads ajudam porque há muito I/O/espera.
-        cache_policy = AdaptiveParallelPolicy(
+        cache_policy = _CACHE_GUARD.make_policy(
             max_ram_pct=float(os.getenv("SNIPER_CACHE_RAM_PCT", str(float(abort_ram_pct) if abort_ram_pct > 0 else 85.0)) or "85"),
-            min_free_mb=float(os.getenv("SNIPER_CACHE_MIN_FREE_MB", "1536") or "1536"),
-            per_worker_mem_mb=float(os.getenv("SNIPER_CACHE_PER_WORKER_MB", "768") or "768"),
-            min_workers=1,
-            poll_interval_s=0.3,
-            log_every_s=20.0,
         )
         print(
             f"[cache] workers={mw} ram_cap={cache_policy.max_ram_pct:.1f}% min_free_mb={cache_policy.min_free_mb:.0f} per_worker_mb={cache_policy.per_worker_mem_mb:.0f}",
             flush=True,
         )
-        for sym_submitted, fut in run_adaptive_thread_map(
+        for sym_submitted, fut in _CACHE_GUARD.adaptive_map(
             to_build,
             _build_one,
             max_workers=mw,
@@ -702,6 +724,11 @@ def ensure_feature_cache(
             _print_progress(sym_submitted)
             sym, path, err = fut.result()
             if err:
+                if _is_guard_error_text(err):
+                    skipped.append(sym)
+                    sys.stderr.write("\n")
+                    sys.stderr.flush()
+                    raise RuntimeError(f"[cache] ABORT guard em {sym}: {err}")
                 skipped.append(sym)
                 sys.stderr.write("\n")
                 sys.stderr.flush()
@@ -716,6 +743,11 @@ def ensure_feature_cache(
             _print_progress(sym)
             sym, path, err = _build_one(sym)
             if err:
+                if _is_guard_error_text(err):
+                    skipped.append(sym)
+                    sys.stderr.write("\n")
+                    sys.stderr.flush()
+                    raise RuntimeError(f"[cache] ABORT guard em {sym}: {err}")
                 skipped.append(sym)
                 sys.stderr.write("\n")
                 sys.stderr.flush()
@@ -780,13 +812,13 @@ def _read_cache_meta_end_ts(symbol: str, cache_dir: Path) -> pd.Timestamp | None
 
 
 def _max_label_lookahead_bars(contract: TradeContract, candle_sec: int) -> int:
-    windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
-    if windows:
-        w_min = float(max(windows))
-        label_bars = int(max(1, round((w_min * 60.0) / float(max(1, candle_sec)))))
-    else:
-        label_bars = 0
-    return int(max(label_bars, contract.danger_horizon_bars(candle_sec)))
+    # Novo label baseado em medias futuras usa janela independente do contrato (PF_LABEL_FUTURE_MIN).
+    try:
+        pf_future_min = float(_env_int("PF_LABEL_FUTURE_MIN", 0) or 0)
+    except Exception:
+        pf_future_min = 0.0
+    pf_label_bars = int(max(0, round((pf_future_min * 60.0) / float(max(1, candle_sec))))) if pf_future_min > 0 else 0
+    return int(max(pf_label_bars, contract.danger_horizon_bars(candle_sec)))
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1067,7 +1099,7 @@ def prepare_sniper_dataset(
             sym_arr = np.zeros(int(ts.shape[0]), dtype=np.int32)
         return X, y, w, ts, sym_arr
 
-    preferred_name = "mid" if any(str(s["name"]) == "mid" for s in entry_specs) else str(entry_specs[0]["name"])
+    preferred_name = "long" if any(str(s["name"]) == "long" for s in entry_specs) else str(entry_specs[0]["name"])
 
     total_pos = 0
     total_neg = 0
@@ -1201,8 +1233,8 @@ def prepare_sniper_dataset(
         entry_batches[name] = SniperBatch(X=Xe, y=ye, w=we, ts=tse, sym_id=syme, feature_cols=list(feat_cols))
 
     entry_short = entry_batches.get("short")
-    entry_mid = entry_batches.get("mid", entry_short)
-    entry_long = entry_batches.get("long", entry_mid)
+    entry_long = entry_batches.get("long")
+    entry_mid = entry_batches.get("mid", entry_long if entry_long is not None else entry_short)
     entry_batch = entry_mid if entry_mid is not None else SniperBatch(
         X=np.empty((0, 0), dtype=np.float32),
         y=np.empty((0,), dtype=np.float32),
@@ -1480,7 +1512,7 @@ def prepare_sniper_dataset_from_cache(
             frames_local[name] = (entry_df, feat_cols)
         return sym_idx, symbol, frames_local
 
-    preferred_name = "mid" if any(str(s["name"]) == "mid" for s in entry_specs) else str(entry_specs[0]["name"])
+    preferred_name = "long" if any(str(s["name"]) == "long" for s in entry_specs) else str(entry_specs[0]["name"])
     total_pos = 0
     total_neg = 0
     batch_flush_n = 8
@@ -1547,19 +1579,12 @@ def prepare_sniper_dataset_from_cache(
             env_mw = os.getenv("SNIPER_DATASET_WORKERS", "").strip()
             mw = int(env_mw) if env_mw else min(8, int(os.cpu_count() or 4))
         mw = max(1, mw)
-        dataset_policy = AdaptiveParallelPolicy(
-            max_ram_pct=float(os.getenv("SNIPER_DATASET_RAM_PCT", "85") or "85"),
-            min_free_mb=float(os.getenv("SNIPER_DATASET_MIN_FREE_MB", "2048") or "2048"),
-            per_worker_mem_mb=float(os.getenv("SNIPER_DATASET_PER_WORKER_MB", "1024") or "1024"),
-            min_workers=1,
-            poll_interval_s=0.3,
-            log_every_s=20.0,
-        )
+        dataset_policy = _DATASET_GUARD.make_policy()
         print(
             f"[sniper-data] dataset_workers={mw} ram_cap={dataset_policy.max_ram_pct:.1f}% min_free_mb={dataset_policy.min_free_mb:.0f} per_worker_mb={dataset_policy.per_worker_mem_mb:.0f}",
             flush=True,
         )
-        for pair_submitted, fut in run_adaptive_thread_map(
+        for pair_submitted, fut in _DATASET_GUARD.adaptive_map(
             list(enumerate(symbols)),
             lambda pair: _process_symbol(pair[0], pair[1]),
             max_workers=mw,
@@ -1656,8 +1681,8 @@ def prepare_sniper_dataset_from_cache(
         entry_batches[name] = SniperBatch(X=Xe, y=ye, w=we, ts=tse, sym_id=syme, feature_cols=list(feat_cols))
 
     entry_short = entry_batches.get("short")
-    entry_mid = entry_batches.get("mid", entry_short)
-    entry_long = entry_batches.get("long", entry_mid)
+    entry_long = entry_batches.get("long")
+    entry_mid = entry_batches.get("mid", entry_long if entry_long is not None else entry_short)
     entry_batch = entry_mid if entry_mid is not None else SniperBatch(
         X=np.empty((0, 0), dtype=np.float32),
         y=np.empty((0,), dtype=np.float32),

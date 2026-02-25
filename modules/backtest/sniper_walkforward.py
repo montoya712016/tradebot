@@ -79,19 +79,23 @@ def _load_booster(path_json: Path) -> xgb.Booster:
 
 
 def _entry_specs() -> list[tuple[str, int]]:
-    windows = list(getattr(DEFAULT_TRADE_CONTRACT, "entry_label_windows_minutes", []) or [])
-    if len(windows) < 1:
-        raise ValueError("entry_label_windows_minutes deve ter ao menos 1 valor")
-    return [("mid", int(windows[0]))]
+    # Novo pipeline: modelos por lado (long/short). O segundo valor é apenas compatível
+    # com chamadas antigas que esperavam (name, window).
+    return [("long", 0), ("short", 0)]
 
 
 def select_entry_mid(p_entry_map: dict[str, np.ndarray]) -> np.ndarray:
     if "mid" in p_entry_map:
         return p_entry_map["mid"]
-    if "short" in p_entry_map:
-        return p_entry_map["short"]
+    if ("long" in p_entry_map) and ("short" in p_entry_map):
+        a = np.asarray(p_entry_map["long"], dtype=np.float32)
+        b = np.asarray(p_entry_map["short"], dtype=np.float32)
+        if a.shape == b.shape:
+            return np.maximum(a, b)
     if "long" in p_entry_map:
         return p_entry_map["long"]
+    if "short" in p_entry_map:
+        return p_entry_map["short"]
     # fallback: primeiro disponível
     for v in p_entry_map.values():
         return v
@@ -116,14 +120,25 @@ def load_period_models(
         entry_models: dict[str, xgb.Booster] = {}
         entry_cols_map: dict[str, list[str]] = {}
         entry_calib_map: dict[str, dict] = {}
-        # tenta carregar modelos multi-janela
-        for name, w in _entry_specs():
-            mdir = pd_dir / f"entry_model_{int(w)}m" / "model_entry.json"
-            if mdir.exists():
-                entry_models[name] = _load_booster(mdir)
-                meta_key = f"entry_{int(w)}m"
+        # novo formato: modelos por lado
+        for name in ("long", "short"):
+            mpath = pd_dir / f"entry_model_{name}" / "model_entry.json"
+            if mpath.exists():
+                entry_models[name] = _load_booster(mpath)
+                meta_key = f"entry_{name}"
                 entry_cols_map[name] = list((meta.get(meta_key) or {}).get("feature_cols") or meta["entry"]["feature_cols"])
                 entry_calib_map[name] = dict((meta.get(meta_key) or {}).get("calibration") or meta["entry"].get("calibration") or {"type": "identity"})
+        # legado: multi-janela por sufixo em minutos
+        if not entry_models:
+            for name, w in _entry_specs():
+                if int(w) <= 0:
+                    continue
+                mdir = pd_dir / f"entry_model_{int(w)}m" / "model_entry.json"
+                if mdir.exists():
+                    entry_models[name] = _load_booster(mdir)
+                    meta_key = f"entry_{int(w)}m"
+                    entry_cols_map[name] = list((meta.get(meta_key) or {}).get("feature_cols") or meta["entry"]["feature_cols"])
+                    entry_calib_map[name] = dict((meta.get(meta_key) or {}).get("calibration") or meta["entry"].get("calibration") or {"type": "identity"})
         # fallback legado (single)
         if not entry_models:
             entry_models["mid"] = _load_booster(pd_dir / "entry_model" / "model_entry.json")
@@ -147,7 +162,7 @@ def load_period_models(
             tau_entry = float(meta["entry"].get("threshold", 0.5))
         tau_add = float(min(0.99, max(0.01, tau_entry * float(tau_add_multiplier))))
         tau_danger_add = 1.0
-        tau_entry_map = {"mid": float(tau_entry)}
+        tau_entry_map = {k: float(tau_entry) for k in (entry_models.keys() or ["mid"])}
 
         periods.append(
             PeriodModel(
@@ -242,7 +257,8 @@ def predict_scores_walkforward(
     import xgboost as xgb
     idx = pd.to_datetime(df.index)
     n = len(idx)
-    p_entry_map = {name: np.full(n, np.nan, dtype=np.float32) for name, _w in _entry_specs()}
+    spec_names = [name for name, _w in _entry_specs()]
+    p_entry_map = {name: np.full(n, np.nan, dtype=np.float32) for name in spec_names}
     p_danger = np.zeros(n, dtype=np.float32)  # danger removido
     # p_exit removido (mantido nulo para compatibilidade)
     p_exit = np.zeros(n, dtype=np.float32)
@@ -253,20 +269,26 @@ def predict_scores_walkforward(
     for pid, pm in enumerate(periods):
         mask = idx > pm.train_end_utc
         # só preenche onde ainda não foi preenchido (usa mid como proxy)
-        mask &= ~np.isfinite(p_entry_map.get("mid", np.full(n, np.nan, dtype=np.float32)))
+        proxy_key = "mid" if "mid" in p_entry_map else (spec_names[0] if spec_names else next(iter(p_entry_map.keys()), "mid"))
+        mask &= ~np.isfinite(p_entry_map.get(proxy_key, np.full(n, np.nan, dtype=np.float32)))
         if not mask.any():
             continue
         mask_np = np.asarray(mask, dtype=bool)
         rows = np.flatnonzero(mask_np)
         pdg = np.zeros(rows.size, dtype=np.float32)
         # entry por janela
-        for name, _w in _entry_specs():
+        pred_names = list(pm.entry_models.keys()) if pm.entry_models else list(p_entry_map.keys())
+        if not pred_names:
+            pred_names = ["mid"]
+        for name in pred_names:
             model = pm.entry_models.get(name, pm.entry_model)
             cols = pm.entry_cols_map.get(name, pm.entry_cols)
             X_e = _build_matrix_rows(df, cols, rows)
             pe = model.predict(xgb.DMatrix(X_e), validate_features=False).astype(np.float32, copy=False)
             calib = pm.entry_calib_map.get(name, pm.entry_calib)
             pe = _apply_calibration(pe.astype(np.float64), calib).astype(np.float32, copy=False)
+            if name not in p_entry_map:
+                p_entry_map[name] = np.full(n, np.nan, dtype=np.float32)
             p_entry_map[name][rows] = pe
         p_danger[rows] = pdg
         period_id[rows] = np.int16(pid)
@@ -393,6 +415,7 @@ def simulate_sniper_from_scores(
     df: pd.DataFrame,
     *,
     p_entry: np.ndarray,
+    p_entry_short: np.ndarray | None = None,
     p_danger: np.ndarray,
     p_exit: np.ndarray | None = None,
     thresholds: PeriodModel,
@@ -420,6 +443,7 @@ def simulate_sniper_from_scores(
     trades: List[SniperTrade] = []
 
     in_pos = False
+    pos_side = 1  # +1 long, -1 short
     entry_i = 0
     entry_price = 0.0
     avg_price = 0.0
@@ -459,15 +483,24 @@ def simulate_sniper_from_scores(
         if not np.isfinite(px) or px <= 0.0:
             eq_curve[i] = eq
             continue
-        pe = float(p_entry[i]) if np.isfinite(p_entry[i]) else 0.0
+        pe_long = float(p_entry[i]) if np.isfinite(p_entry[i]) else 0.0
+        pe_short = float(p_entry_short[i]) if (p_entry_short is not None and np.isfinite(p_entry_short[i])) else 0.0
 
         if not in_pos:
             exit_streak = 0
             if i + int(exit_min_hold) >= (n - 1):
                 eq_curve[i] = eq
                 continue
-            if (pe >= pm.tau_entry):
+            tau_long = float(pm.tau_entry_map.get("long", pm.tau_entry))
+            tau_short = float(pm.tau_entry_map.get("short", pm.tau_entry))
+            choose_long = (pe_long >= tau_long)
+            choose_short = (pe_short >= tau_short)
+            if choose_long and choose_short:
+                choose_long = pe_long >= pe_short
+                choose_short = not choose_long
+            if choose_long or choose_short:
                 in_pos = True
+                pos_side = 1 if choose_long else -1
                 entry_i = i
                 entry_price = px
                 avg_price = px
@@ -475,7 +508,7 @@ def simulate_sniper_from_scores(
                 total_size = size_sched[0]
                 num_adds = 0
                 if use_ema_exit:
-                    ema = float(entry_price) * (1.0 - ema_offset)
+                    ema = float(entry_price) * (1.0 - ema_offset if pos_side > 0 else 1.0 + ema_offset)
             eq_curve[i] = eq
             continue
 
@@ -485,12 +518,12 @@ def simulate_sniper_from_scores(
         exit_px = None
         if use_ema_exit:
             ema = ema + (ema_alpha * (px - ema))
-            if px < ema:
+            if (pos_side > 0 and px < ema) or (pos_side < 0 and px > ema):
                 exit_streak += 1
             else:
                 exit_streak = 0
 
-        if use_ema_exit and (px < ema) and (exit_streak >= exit_confirm):
+        if use_ema_exit and (((pos_side > 0 and px < ema) or (pos_side < 0 and px > ema))) and (exit_streak >= exit_confirm):
             reason = "EMA"
             exit_px = px
 
@@ -498,7 +531,10 @@ def simulate_sniper_from_scores(
             entries = 1 + num_adds
             sides = entries + 1
             costs = sides * (contract.fee_pct_per_side + contract.slippage_pct)
-            r_gross = (exit_px / avg_price) - 1.0
+            if pos_side > 0:
+                r_gross = (exit_px / avg_price) - 1.0
+            else:
+                r_gross = (avg_price / max(1e-12, exit_px)) - 1.0
             r_net = float(r_gross) - float(costs)
             eq = eq * (1.0 + r_net)
             trades.append(
@@ -518,6 +554,7 @@ def simulate_sniper_from_scores(
                 )
             )
             in_pos = False
+            pos_side = 1
             exit_streak = 0
             entry_i = 0
             entry_price = 0.0
@@ -534,7 +571,8 @@ def simulate_sniper_from_scores(
             if trigger > 0 and lo <= trigger:
                 next_size = size_sched[num_adds + 1]
                 risk_after = 0.0
-                if (pe >= pm.tau_add) and (risk_after <= contract.risk_max_cycle_pct + 1e-9):
+                pe_add = pe_long if pos_side > 0 else pe_short
+                if (pe_add >= pm.tau_add) and (risk_after <= contract.risk_max_cycle_pct + 1e-9):
                     new_total = total_size + next_size
                     avg_price = (avg_price * total_size + trigger * next_size) / new_total
                     total_size = new_total
@@ -549,7 +587,10 @@ def simulate_sniper_from_scores(
         entries = 1 + num_adds
         sides = entries + 1
         costs = sides * (contract.fee_pct_per_side + contract.slippage_pct)
-        r_gross = (exit_px / avg_price) - 1.0 if avg_price > 0 else 0.0
+        if avg_price > 0:
+            r_gross = ((exit_px / avg_price) - 1.0) if pos_side > 0 else ((avg_price / max(1e-12, exit_px)) - 1.0)
+        else:
+            r_gross = 0.0
         r_net = float(r_gross) - float(costs)
         eq = eq * (1.0 + r_net)
         trades.append(

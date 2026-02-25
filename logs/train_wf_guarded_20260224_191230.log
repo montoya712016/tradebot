@@ -1,0 +1,198 @@
+[ohlc-cache] symbols=174 days=0 refresh=0 mcap=[100000000..150000000000]
+[ohlc-cache] workers=2 ram_cap=72.0% min_free_mb=4096 per_worker_mb=768
+[ohlc-cache] 1/174   0.6% ETA 4m19s | SOLUSDT
+[ohlc-cache] 2/174   1.1% ETA 2m09s | XRPUSDT
+[ohlc-cache] 3/174   1.7% ETA 1m25s | TRXUSDT
+[ohlc-cache] 4/174   2.3% ETA 1m04s | DOGEUSDT
+[ohlc-cache] 5/174   2.9% ETA 51s | ADAUSDT
+[ohlc-cache] 6/174   3.4% ETA 42s | WBETHUSDT
+[ohlc-cache] 7/174   4.0% ETA 36s | LINKUSDT
+[ohlc-cache] 8/174   4.6% ETA 31s | USDEUSDT
+[ohlc-cache] 9/174   5.2% ETA 28s | XLMUSDT
+[ohlc-cache] 10/174   5.7% ETA 25s | BCHUSDT
+[ohlc-cache] 11/174   6.3% ETA 22s | SUIUSDT
+[ohlc-cache] 12/174   6.9% ETA 20s | AVAXUSDT
+[ohlc-cache] 13/174   7.5% ETA 19s | LTCUSDT
+[ohlc-cache] 14/174   8.0% ETA 17s | HBARUSDT
+[ohlc-cache] 15/174   8.6% ETA 16s | SHIBUSDT
+[ohlc-cache] 16/174   9.2% ETA 15s | TONUSDT
+[ohlc-cache] 17/174   9.8% ETA 14s | DOTUSDT
+[ohlc-cache] 18/174  10.3% ETA 13s | WLFIUSDT
+[ohlc-cache] 19/174  10.9% ETA 12s | ZECUSDT
+[ohlc-cache] 20/174  11.5% ETA 12s | UNIUSDT
+[ohlc-cache] 21/174  12.1% ETA 11s | TAOUSDT
+[ohlc-cache] 22/174  12.6% ETA 10s | AAVEUSDT
+[ohlc-cache] 23/174  13.2% ETA 10s | ENAUSDT
+[ohlc-cache] 24/174  13.8% ETA 9s | PEPEUSDT
+[ohlc-cache] 25/174  14.4% ETA 9s | NEARUSDT
+[ohlc-cache] 26/174  14.9% ETA 9s | ETCUSDT
+[ohlc-cache] 27/174  15.5% ETA 8s | APTUSDT
+[ohlc-cache] 28/174  16.1% ETA 8s | ONDOUSDT
+[ohlc-cache] 29/174  16.7% ETA 8s | ASTERUSDT
+[ohlc-cache] 30/174  17.2% ETA 7s | POLUSDT
+[ohlc-cache] 31/174  17.8% ETA 7s | WLDUSDT
+[ohlc-cache] 32/174  18.4% ETA 7s | ARBUSDT
+[ohlc-cache] 33/174  19.0% ETA 6s | ICPUSDT
+[ohlc-cache] 34/174  19.5% ETA 6s | ALGOUSDT
+[ohlc-cache] 35/174  20.1% ETA 6s | ATOMUSDT
+[ohlc-cache] 36/174  20.7% ETA 6s | VETUSDT
+[ohlc-cache] 37/174  21.3% ETA 6s | SKYUSDT
+[ohlc-cache] 38/174  21.8% ETA 5s | PUMPUSDT
+[ohlc-cache] 39/174  22.4% ETA 5s | BFUSDUSDT
+[ohlc-cache] 40/174  23.0% ETA 5s | PENGUUSDT
+[ohlc-cache] 41/174  23.6% ETA 5s | RENDERUSDT
+[ohlc-cache] 42/174  24.1% ETA 5s | SEIUSDT
+[ohlc-cache] 43/174  24.7% ETA 5s | QNTUSDT
+[ohlc-cache] 44/174  25.3% ETA 5s | TRUMPUSDT
+[ohlc-cache] 45/174  25.9% ETA 4s | NEXOUSDT
+[ohlc-cache] 46/174  26.4% ETA 4s | JUPUSDT
+[ohlc-cache] 47/174  27.0% ETA 4s | BONKUSDT
+[ohlc-cache] 48/174  27.6% ETA 4s | FILUSDT
+[ohlc-cache] 49/174  28.2% ETA 4s | IMXUSDT
+[ohlc-cache] 50/174  28.7% ETA 4s | MORPHOUSDT
+[ohlc-cache] 51/174  29.3% ETA 4s | CAKEUSDT
+[ohlc-cache] 52/174  29.9% ETA 4s | TIAUSDT
+[ohlc-cache] 53/174  30.5% ETA 3s | INJUSDT
+[ohlc-cache] 54/174  31.0% ETA 3s | 2ZUSDT
+[ohlc-cache] 55/174  31.6% ETA 3s | LDOUSDT
+[ohlc-cache] 56/174  32.2% ETA 3s | STXUSDT
+[ohlc-cache] 57/174  32.8% ETA 3s | OPUSDT
+[ohlc-cache] 58/174  33.3% ETA 3s | CRVUSDT
+[ohlc-cache] 59/174  33.9% ETA 3s | FLOKIUSDT
+[ohlc-cache] 60/174  34.5% ETA 3s | GRTUSDT
+[ohlc-cache] 61/174  35.1% ETA 3s | XPLUSDT
+[ohlc-cache] 62/174  35.6% ETA 3s | PYTHUSDT
+[ohlc-cache] 63/174  36.2% ETA 3s | FETUSDT
+[ohlc-cache] 64/174  36.8% ETA 3s | KAIAUSDT
+[ohlc-cache] 65/174  37.4% ETA 3s | XTZUSDT
+[ohlc-cache] 66/174  37.9% ETA 3s | SUSDT
+[ohlc-cache] 67/174  38.5% ETA 2s | IOTAUSDT
+[ohlc-cache] 68/174  39.1% ETA 2s | CFXUSDT
+[ohlc-cache] 69/174  39.7% ETA 2s | ETHFIUSDT
+[ohlc-cache] 70/174  40.2% ETA 2s | THETAUSDT
+[ohlc-cache] 71/174  40.8% ETA 2s | PENDLEUSDT
+[ohlc-cache] 72/174  41.4% ETA 2s | TWTUSDT
+[ohlc-cache] 73/174  42.0% ETA 2s | JASMYUSDT
+[ohlc-cache] 74/174  42.5% ETA 2s | WIFUSDT
+[ohlc-cache] 75/174  43.1% ETA 2s | STRKUSDT
+[ohlc-cache] 76/174  43.7% ETA 2s | DASHUSDT
+[ohlc-cache] 77/174  44.3% ETA 2s | VIRTUALUSDT
+[ohlc-cache] 78/174  44.8% ETA 2s | SANDUSDT
+[ohlc-cache] 79/174  45.4% ETA 2s | GALAUSDT
+[ohlc-cache] 80/174  46.0% ETA 2s | ENSUSDT
+[ohlc-cache] 81/174  46.6% ETA 2s | RAYUSDT
+[ohlc-cache] 82/174  47.1% ETA 2s | AUSDT
+[ohlc-cache] 83/174  47.7% ETA 2s | MANAUSDT
+[ohlc-cache] 84/174  48.3% ETA 2s | FLOWUSDT
+[ohlc-cache] 85/174  48.9% ETA 2s | SUNUSDT
+[ohlc-cache] 86/174  49.4% ETA 2s | SNXUSDT
+[ohlc-cache] 87/174  50.0% ETA 2s | JTOUSDT
+[ohlc-cache] 88/174  50.6% ETA 2s | EIGENUSDT
+[ohlc-cache] 89/174  51.1% ETA 1s | SYRUPUSDT
+[ohlc-cache] 90/174  51.7% ETA 1s | WALUSDT
+[ohlc-cache] 91/174  52.3% ETA 1s | 0GUSDT
+[ohlc-cache] 92/174  52.9% ETA 1s | APEUSDT
+[ohlc-cache] 93/174  53.4% ETA 1s | DEXEUSDT
+[ohlc-cache] 94/174  54.0% ETA 1s | NEOUSDT
+[ohlc-cache] 95/174  54.6% ETA 1s | FFUSDT
+[ohlc-cache] 96/174  55.2% ETA 1s | COMPUSDT
+[ohlc-cache] 97/174  55.7% ETA 1s | WUSDT
+[ohlc-cache] 98/174  56.3% ETA 1s | RSRUSDT
+[ohlc-cache] 99/174  56.9% ETA 1s | GNOUSDT
+[ohlc-cache] 100/174  57.5% ETA 1s | JSTUSDT
+[ohlc-cache] 101/174  58.0% ETA 1s | CHZUSDT
+[ohlc-cache] 102/174  58.6% ETA 1s | ARKUSDT
+[ohlc-cache] 103/174  59.2% ETA 1s | RUNEUSDT
+[ohlc-cache] 104/174  59.8% ETA 1s | XECUSDT
+[ohlc-cache] 105/174  60.3% ETA 1s | XUSDUSDT
+[ohlc-cache] 106/174  60.9% ETA 1s | EGLDUSDT
+[ohlc-cache] 107/174  61.5% ETA 1s | FORMUSDT
+[ohlc-cache] 108/174  62.1% ETA 1s | DCRUSDT
+[ohlc-cache] 109/174  62.6% ETA 1s | BERAUSDT
+[ohlc-cache] 110/174  63.2% ETA 1s | BATUSDT
+[ohlc-cache] 111/174  63.8% ETA 1s | AXSUSDT
+[ohlc-cache] 112/174  64.4% ETA 1s | ARUSDT
+[ohlc-cache] 113/174  64.9% ETA 1s | DYDXUSDT
+[ohlc-cache] 114/174  65.5% ETA 1s | KAITOUSDT
+[ohlc-cache] 115/174  66.1% ETA 1s | 1INCHUSDT
+[ohlc-cache] 116/174  66.7% ETA 1s | ZKUSDT
+[ohlc-cache] 117/174  67.2% ETA 1s | LUNCUSDT
+[ohlc-cache] 118/174  67.8% ETA 1s | SUPERUSDT
+[ohlc-cache] 119/174  68.4% ETA 1s | LINEAUSDT
+[ohlc-cache] 120/174  69.0% ETA 1s | LPTUSDT
+[ohlc-cache] 121/174  69.5% ETA 1s | PLUMEUSDT
+[ohlc-cache] 122/174  70.1% ETA 1s | QTUMUSDT
+[ohlc-cache] 123/174  70.7% ETA 1s | AMPUSDT
+[ohlc-cache] 124/174  71.3% ETA 1s | MOVEUSDT
+[ohlc-cache] 125/174  71.8% ETA 1s | AXLUSDT
+[ohlc-cache] 126/174  72.4% ETA 1s | ZROUSDT
+[ohlc-cache] 127/174  73.0% ETA 1s | SFPUSDT
+[ohlc-cache] 128/174  73.6% ETA 1s | ZENUSDT
+[ohlc-cache] 129/174  74.1% ETA 1s | TFUELUSDT
+[ohlc-cache] 130/174  74.7% ETA 1s | CVXUSDT
+[ohlc-cache] 131/174  75.3% ETA 1s | KMNOUSDT
+[ohlc-cache] 132/174  75.9% ETA 1s | ARKMUSDT
+[ohlc-cache] 133/174  76.4% ETA 0s | GLMUSDT
+[ohlc-cache] 134/174  77.0% ETA 0s | PROMUSDT
+[ohlc-cache] 135/174  77.6% ETA 0s | SAHARAUSDT
+[ohlc-cache] 136/174  78.2% ETA 0s | PROVEUSDT
+[ohlc-cache] 137/174  78.7% ETA 0s | ZRXUSDT
+[ohlc-cache] 138/174  79.3% ETA 0s | GASUSDT
+[ohlc-cache] 139/174  79.9% ETA 0s | AVNTUSDT
+[ohlc-cache] 140/174  80.5% ETA 0s | TURBOUSDT
+[ohlc-cache] 141/174  81.0% ETA 0s | CKBUSDT
+[ohlc-cache] 142/174  81.6% ETA 0s | YFIUSDT
+[ohlc-cache] 143/174  82.2% ETA 0s | RVNUSDT
+[ohlc-cache] 144/174  82.8% ETA 0s | ZILUSDT
+[ohlc-cache] 145/174  83.3% ETA 0s | KAVAUSDT
+[ohlc-cache] 146/174  83.9% ETA 0s | STGUSDT
+[ohlc-cache] 147/174  84.5% ETA 0s | BARDUSDT
+[ohlc-cache] 148/174  85.1% ETA 0s | BIOUSDT
+[ohlc-cache] 149/174  85.6% ETA 0s | AWEUSDT
+[ohlc-cache] 150/174  86.2% ETA 0s | CELOUSDT
+[ohlc-cache] 151/174  86.8% ETA 0s | ASTRUSDT
+[ohlc-cache] 152/174  87.4% ETA 0s | EULUSDT
+[ohlc-cache] 153/174  87.9% ETA 0s | TUSDT
+[ohlc-cache] 154/174  88.5% ETA 0s | PNUTUSDT
+[ohlc-cache] 155/174  89.1% ETA 0s | MINAUSDT
+[ohlc-cache] 156/174  89.7% ETA 0s | BLURUSDT
+[ohlc-cache] 157/174  90.2% ETA 0s | OMUSDT
+[ohlc-cache] 158/174  90.8% ETA 0s | ROSEUSDT
+[ohlc-cache] 159/174  91.4% ETA 0s | COWUSDT
+[ohlc-cache] 160/174  92.0% ETA 0s | HOTUSDT
+[ohlc-cache] 161/174  92.5% ETA 0s | VTHOUSDT
+[ohlc-cache] 162/174  93.1% ETA 0s | SCUSDT
+[ohlc-cache] 163/174  93.7% ETA 0s | DGBUSDT
+[ohlc-cache] 164/174  94.3% ETA 0s | SKLUSDT
+[ohlc-cache] 165/174  94.8% ETA 0s | IOTXUSDT
+[ohlc-cache] 166/174  95.4% ETA 0s | ORDIUSDT
+[ohlc-cache] 167/174  96.0% ETA 0s | GMXUSDT
+[ohlc-cache] 168/174  96.6% ETA 0s | EDUUSDT
+[ohlc-cache] 169/174  97.1% ETA 0s | POLYXUSDT
+[ohlc-cache] 170/174  97.7% ETA 0s | ILVUSDT
+[ohlc-cache] 171/174  98.3% ETA 0s | SUSHIUSDT
+[ohlc-cache] 172/174  98.9% ETA 0s | UMAUSDT
+[ohlc-cache] 173/174  99.4% ETA 0s | NMRUSDT
+[ohlc-cache] 174/174 100.0% ETA 0s | ANKRUSDT
+[ohlc-cache] done ok=0 skip=174 fail=0 sec=1.63
+[train-wf-crypto] ohlc prewarm: ok=0 skip=174 fail=0 sec=1.628023386001587
+[train-wf] offsets_years=6 step=180d periodos=13 max_symbols=0 total_days=0 device=cuda:0
+[train-wf] entry_metric=aucpr
+[sniper-train] símbolos=174 asset=crypto (max_symbols=0)
+[sniper-train] cache: garantindo features+labels 1x (total_days=0)
+[cache] features sniper: dir=D:\astra\cache_sniper\features_pf_1m fmt=parquet refresh=False asset=crypto | total=174 hit=63 build=111
+[cache] workers=2 ram_cap=72.0% min_free_mb=4096 per_worker_mb=1024
+[cache] [--------------------------]   0/111   0.0% ETA 48m49s | XTZUSDT
+[cache] [--------------------------]   2/111   1.8% ETA 27m47s | SUSDT
+[cache] [#-------------------------]   3/111   2.7% ETA 28m49s | CFXUSDT
+[cache] [#-------------------------]   4/111   3.6% ETA 23m02s | IOTAUSDT
+[cache] [#-------------------------]   6/111   5.4% ETA 19m07s | PENDLEUSDT
+[cache] [##------------------------]   7/111   6.3% ETA 17m44s | THETAUSDT
+[cache] [##------------------------]   8/111   7.2% ETA 17m19s | TWTUSDT
+[cache] [##------------------------]   9/111   8.1% ETA 16m01s | JASMYUSDT
+[cache] [###-----------------------]  11/111   9.9% ETA 13m40s | STRKUSDT
+[cache] [###-----------------------]  12/111  10.8% ETA 12m54s | VIRTUALUSDT
+[cache] [###-----------------------]  13/111  11.7% ETA 13m34s | DASHUSDT
+[cache] [###-----------------------]  14/111  12.6% ETA 12m55s | SANDUSDT
+[cache] [####----------------------]  15/111  13.5% ETA 13m01s | GALAUSDT
+[cache] [####----------------------]  17/111  15.3% ETA 11m48s | AUSDT

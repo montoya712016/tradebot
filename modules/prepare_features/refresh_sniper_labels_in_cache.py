@@ -49,19 +49,25 @@ else:
 from config.symbols import default_top_market_cap_path, load_market_caps  # noqa: E402
 from train.sniper_dataflow import _cache_dir, _cache_format, _symbol_cache_paths  # type: ignore  # noqa: E402
 from prepare_features.labels import apply_trade_contract_labels  # noqa: E402
-from utils.adaptive_parallel import AdaptiveParallelPolicy, run_adaptive_thread_map  # noqa: E402
-from utils.thermal_guard import ThermalGuard  # noqa: E402
+from utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # noqa: E402
 
 
-_THERMAL_GUARD = ThermalGuard.from_env()
-
-
-def _thermal_wait(where: str) -> None:
-    _THERMAL_GUARD.wait_until_safe(
-        where=where,
-        force_sample=False,
-        logger=lambda msg: print(f"[labels-refresh] {msg}", flush=True),
-    )
+_GUARD = GuardedRunner(
+    log_prefix="[labels-refresh]",
+    env_prefix="SNIPER_LABELS",
+    defaults=GuardedParallelDefaults(
+        max_ram_pct=78.0,
+        min_free_mb=3072.0,
+        per_worker_mem_mb=768.0,
+        critical_ram_pct=92.0,
+        critical_min_free_mb=1024.0,
+        abort_on_critical_ram=True,
+        min_workers=1,
+        poll_interval_s=0.5,
+        log_every_s=10.0,
+        throttle_sleep_s=3.0,
+    ),
+)
 
 
 @dataclass
@@ -182,13 +188,12 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
     if workers <= 0:
         workers = int(os.getenv("SNIPER_LABELS_REFRESH_WORKERS", "0") or "0")
     if workers <= 0:
-        workers = min(8, max(1, (os.cpu_count() or 4) // 2))
+        workers = min(4, max(1, (os.cpu_count() or 4) // 2))
     workers = max(1, min(32, workers))
-    policy = AdaptiveParallelPolicy(
-        max_ram_pct=float(getattr(s, "max_ram_pct", 85.0)),
-        min_free_mb=float(getattr(s, "min_free_mb", 1024.0)),
-        per_worker_mem_mb=float(getattr(s, "per_worker_mem_mb", 512.0)),
-        min_workers=1,
+    policy = _GUARD.make_policy(
+        max_ram_pct=float(getattr(s, "max_ram_pct", 78.0)),
+        min_free_mb=float(getattr(s, "min_free_mb", 3072.0)),
+        per_worker_mem_mb=float(getattr(s, "per_worker_mem_mb", 768.0)),
         poll_interval_s=0.5,
         log_every_s=10.0,
     )
@@ -239,7 +244,7 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
         last_len = max(last_len, len(line))
 
     def _process_symbol(sym: str) -> dict:
-        _thermal_wait(f"refresh_symbol:{sym}")
+        _GUARD.thermal_wait(f"refresh_symbol:{sym}")
         data_path, meta_path = _symbol_cache_paths(sym, cache_dir, fmt)
         if not data_path.exists():
             return {"sym": sym, "ok": False, "skip": True}
@@ -288,7 +293,7 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
             pass
         return {"sym": sym, "ok": True, "skip": False}
 
-    for sym_submitted, fut in run_adaptive_thread_map(
+    for sym_submitted, fut in _GUARD.adaptive_map(
         symbols,
         _process_symbol,
         max_workers=workers,
@@ -302,6 +307,9 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
             if bool(out.get("ok", False)):
                 ok += 1
         except Exception as e:
+            if _GUARD.is_guard_error(e):
+                print(f"[labels-refresh] ABORT guard {sym_submitted}: {type(e).__name__}: {e}", flush=True)
+                raise
             fail += 1
             print(f"[labels-refresh] FAIL {sym_submitted}: {type(e).__name__}: {e}", flush=True)
         done_count += 1
