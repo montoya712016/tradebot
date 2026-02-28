@@ -27,6 +27,7 @@ from train.sniper_trainer import TrainConfig, _select_symbols  # type: ignore
 from prepare_features.data import load_ohlc_1m_series  # type: ignore
 from prepare_features.data import _ohlc_cache_paths  # type: ignore
 from utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # type: ignore
+from utils.progress import LineProgressPrinter  # type: ignore
 
 
 _GUARD = GuardedRunner(
@@ -82,20 +83,6 @@ def _cache_ok(sym: str) -> bool:
         return False
 
 
-def _fmt_eta(seconds: float) -> str:
-    if seconds <= 0:
-        return "0s"
-    sec = int(round(seconds))
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    s = sec % 60
-    if h > 0:
-        return f"{h}h{m:02d}m"
-    if m > 0:
-        return f"{m}m{s:02d}s"
-    return f"{s}s"
-
-
 def run_build(
     *,
     max_symbols: int = 0,
@@ -129,6 +116,7 @@ def run_build(
     ok = 0
     fail = 0
     skipped = 0
+    prog = LineProgressPrinter(prefix="ohlc-cache", total=total, width=26, stream=sys.stderr, min_interval_s=1.0)
 
     if int(workers) <= 0:
         workers = _env_int("OHLC_CACHE_WORKERS", min(4, int(os.cpu_count() or 4)))
@@ -170,14 +158,9 @@ def run_build(
             fail += 1
             print(f"[ohlc-cache] FAIL {sym_submitted}: {type(e).__name__}: {e}", flush=True)
         done += 1
-        elapsed = time.time() - t0
-        eta = (elapsed / max(1, done)) * max(0, total - done)
-        pct = (100.0 * done / max(1, total))
-        print(
-            f"[ohlc-cache] {done}/{total} {pct:5.1f}% ETA {_fmt_eta(eta)} | {cur}",
-            flush=True,
-        )
+        prog.update(done, current=cur, force=True)
 
+    prog.close()
     dt = time.time() - t0
     print(f"[ohlc-cache] done ok={ok} skip={skipped} fail={fail} sec={dt:.2f}", flush=True)
     return {

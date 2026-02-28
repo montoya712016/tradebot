@@ -93,20 +93,11 @@ except Exception:
         _pushover_load_default = None
         _pushover_send = None
 
+from utils.progress import progress as _progress_base
 
-# ------------------------------
-# Progress helper (tqdm optional)
-# ------------------------------
+
 def _progress(it: Iterable, *, total: int | None = None, desc: str = "") -> Iterable:
-    try:
-        from tqdm import tqdm  # type: ignore
-
-        return tqdm(it, total=total, desc=desc)
-    except Exception:
-        # fallback minimalista
-        if desc:
-            print(f"[prog] {desc} ...", flush=True)
-        return it
+    return _progress_base(it, total=total, desc=desc, prefix="prog", fallback="print")
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:

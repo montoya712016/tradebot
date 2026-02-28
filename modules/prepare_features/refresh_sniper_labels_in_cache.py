@@ -23,7 +23,6 @@ import sys
 import time
 import uuid
 
-import numpy as np
 import pandas as pd
 
 # permitir rodar como script direto (sem PYTHONPATH)
@@ -50,6 +49,7 @@ from config.symbols import default_top_market_cap_path, load_market_caps  # noqa
 from train.sniper_dataflow import _cache_dir, _cache_format, _symbol_cache_paths  # type: ignore  # noqa: E402
 from prepare_features.labels import apply_trade_contract_labels  # noqa: E402
 from utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # noqa: E402
+from utils.progress import LineProgressPrinter  # noqa: E402
 
 
 _GUARD = GuardedRunner(
@@ -180,8 +180,6 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
     ok = 0
     fail = 0
     total = len(symbols)
-    last_len = 0
-    last_progress_ts = 0.0
     done_count = 0
 
     workers = int(getattr(s, "workers", 0) or 0)
@@ -202,46 +200,16 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
         flush=True,
     )
 
-    def _bar(done: int, total: int, width: int = 26) -> str:
-        total = max(1, int(total))
-        done = int(max(0, min(done, total)))
-        n = int(round(width * (done / total)))
-        return ("#" * n) + ("-" * (width - n))
-
-    def _fmt_eta(seconds: float) -> str:
-        if not np.isfinite(seconds) or seconds <= 0:
-            return "0s"
-        sec = int(round(seconds))
-        h = sec // 3600
-        m = (sec % 3600) // 60
-        s2 = sec % 60
-        if h > 0:
-            return f"{h}h{m:02d}m"
-        if m > 0:
-            return f"{m}m{s2:02d}s"
-        return f"{s2}s"
+    prog = LineProgressPrinter(
+        prefix="labels-refresh",
+        total=total,
+        width=26,
+        stream=sys.stderr,
+        min_interval_s=5.0,
+    )
 
     def _print_progress(current_sym: str) -> None:
-        nonlocal last_len
-        nonlocal last_progress_ts
-        done = done_count
-        pct = 100.0 * done / max(1, total)
-        elapsed = time.perf_counter() - t0
-        rate = elapsed / max(1, done)
-        eta = rate * max(0, total - done)
-        line = (
-            f"[labels-refresh] [{_bar(done, total)}] {done:>3}/{total:<3} "
-            f"{pct:5.1f}% ETA {_fmt_eta(eta)} | {current_sym}"
-        )
-        if sys.stderr.isatty():
-            sys.stderr.write("\r" + line + (" " * max(0, last_len - len(line))))
-            sys.stderr.flush()
-        else:
-            now = time.perf_counter()
-            if now - last_progress_ts >= 5.0:
-                print(line, flush=True)
-                last_progress_ts = now
-        last_len = max(last_len, len(line))
+        prog.update(done_count, current=current_sym)
 
     def _process_symbol(sym: str) -> dict:
         _GUARD.thermal_wait(f"refresh_symbol:{sym}")
@@ -318,8 +286,7 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
 
     dt = time.perf_counter() - t0
     if s.verbose:
-        sys.stderr.write("\n")
-        sys.stderr.flush()
+        prog.close()
     print(f"[labels-refresh] done ok={ok} fail={fail} sec={dt:.2f}", flush=True)
     return {
         "ok": int(ok),

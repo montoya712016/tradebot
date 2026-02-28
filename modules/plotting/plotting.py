@@ -1141,6 +1141,155 @@ def plot_all(
     return fig
 
 
+def plot_time_series(
+    df: pd.DataFrame,
+    *,
+    columns: list[str] | tuple[str, ...] | None = None,
+    title: str = "Time Series",
+    y_title: str = "value",
+    save_path: str | Path | None = None,
+    show: bool = True,
+    template: str = DARK_TEMPLATE,
+) -> Any:
+    """
+    Plot simples de séries temporais (linhas) usando o mesmo tema centralizado.
+    """
+    if df is None or df.empty:
+        raise ValueError("df vazio para plot_time_series")
+    data = df.copy()
+    if not isinstance(data.index, pd.DatetimeIndex):
+        try:
+            data.index = pd.to_datetime(data.index)
+        except Exception:
+            pass
+    use_cols = [str(c) for c in (columns or list(data.columns)) if str(c) in data.columns]
+    if not use_cols:
+        raise ValueError("nenhuma coluna valida para plot_time_series")
+
+    fig = go.Figure()
+    for c in use_cols:
+        y = pd.to_numeric(data[c], errors="coerce")
+        if y.notna().sum() == 0:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=y.to_numpy(dtype=float, copy=False),
+                mode="lines",
+                name=str(c),
+                line=dict(width=1.6, color=_color_for_name(str(c))),
+            )
+        )
+
+    fig.update_layout(
+        title=title,
+        template=template,
+        paper_bgcolor=DARK_BG,
+        plot_bgcolor=DARK_BG,
+        font=dict(color=DARK_FONT),
+        hovermode="x unified",
+        legend=dict(orientation="h"),
+    )
+    fig.update_xaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="tempo")
+    fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text=str(y_title))
+
+    if save_path:
+        from plotly.io import write_html
+
+        out = Path(save_path).expanduser().resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        write_html(fig, file=str(out), auto_open=bool(show), include_plotlyjs="cdn")
+    elif show:
+        fig.show()
+    return fig
+
+
+def plot_equity_and_correlation(
+    equity: pd.Series,
+    *,
+    corr_df: pd.DataFrame | None = None,
+    corr_columns: list[str] | tuple[str, ...] | None = None,
+    title: str = "WF Equity + Correlation Filter",
+    save_path: str | Path | None = None,
+    show: bool = True,
+    template: str = DARK_TEMPLATE,
+) -> Any:
+    """
+    Plot 2 painéis: equity no topo e métricas de correlação/filtro embaixo.
+    """
+    if equity is None or len(equity) == 0:
+        raise ValueError("equity vazio para plot_equity_and_correlation")
+    eq = equity.copy()
+    if not isinstance(eq.index, pd.DatetimeIndex):
+        eq.index = pd.to_datetime(eq.index)
+    eq = eq.sort_index()
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.65, 0.35],
+        subplot_titles=("Equity", "Correlation/Filter"),
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=eq.index,
+            y=eq.to_numpy(dtype=float, copy=False),
+            mode="lines",
+            name="equity",
+            line=dict(width=1.8, color=_color_for_name("equity")),
+        ),
+        row=1,
+        col=1,
+    )
+
+    if corr_df is not None and len(corr_df) > 0:
+        cdf = corr_df.copy()
+        if not isinstance(cdf.index, pd.DatetimeIndex):
+            cdf.index = pd.to_datetime(cdf.index)
+        cdf = cdf.sort_index()
+        use_cols = [str(c) for c in (corr_columns or list(cdf.columns)) if str(c) in cdf.columns]
+        for c in use_cols:
+            y = pd.to_numeric(cdf[c], errors="coerce")
+            if y.notna().sum() == 0:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=cdf.index,
+                    y=y.to_numpy(dtype=float, copy=False),
+                    mode="lines",
+                    name=str(c),
+                    line=dict(width=1.4, color=_color_for_name(str(c))),
+                ),
+                row=2,
+                col=1,
+            )
+
+    fig.update_layout(
+        title=title,
+        template=template,
+        paper_bgcolor=DARK_BG,
+        plot_bgcolor=DARK_BG,
+        font=dict(color=DARK_FONT),
+        hovermode="x unified",
+        legend=dict(orientation="h"),
+    )
+    fig.update_xaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="tempo", row=2, col=1)
+    fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="equity", row=1, col=1)
+    fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="corr/filter", row=2, col=1)
+
+    if save_path:
+        from plotly.io import write_html
+
+        out = Path(save_path).expanduser().resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        write_html(fig, file=str(out), auto_open=bool(show), include_plotlyjs="cdn")
+    elif show:
+        fig.show()
+    return fig
+
+
 def plot_backtest_single(
     df: pd.DataFrame,
     *,

@@ -26,6 +26,10 @@ try:
 except Exception:
     from modules.utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # type: ignore[import]
 try:
+    from utils.progress import LineProgressPrinter  # type: ignore
+except Exception:
+    from modules.utils.progress import LineProgressPrinter  # type: ignore[import]
+try:
     import psutil  # type: ignore
 except Exception:
     psutil = None  # type: ignore
@@ -577,22 +581,6 @@ def ensure_feature_cache(
         flush=True,
     )
 
-    def _fmt_eta_s(seconds: float) -> str:
-        s = int(max(0.0, float(seconds)))
-        if s < 60:
-            return f"{s:02d}s"
-        m, s = divmod(s, 60)
-        if m < 60:
-            return f"{m:02d}m{s:02d}s"
-        h, m = divmod(m, 60)
-        return f"{h:d}h{m:02d}m"
-
-    def _bar(done: int, total: int, width: int = 26) -> str:
-        total = max(1, int(total))
-        done = int(max(0, min(done, total)))
-        n = int(round(width * (done / total)))
-        return ("#" * n) + ("-" * (width - n))
-
     def _build_one(sym: str) -> tuple[str, Path | None, str | None]:
         # retorna (sym, path|None, err|None)
         _thermal_wait(f"feature_cache_build:{sym}")
@@ -658,8 +646,6 @@ def ensure_feature_cache(
             gc.collect()
             return sym, None, f"{type(e).__name__}: {e}"
 
-    t_build0 = time.perf_counter()
-    last_len = 0
     n_total = int(len(to_build))
     done = 0
 
@@ -669,25 +655,17 @@ def ensure_feature_cache(
         progress_every_s = float(v) if v else 5.0
     except Exception:
         progress_every_s = 5.0
-    last_progress_ts = 0.0
+    prog_cache = LineProgressPrinter(
+        prefix="cache",
+        total=n_total,
+        width=26,
+        stream=sys.stderr,
+        min_interval_s=max(1.0, progress_every_s),
+        pad_seconds=True,
+    )
 
     def _print_progress(current_sym: str) -> None:
-        nonlocal last_len
-        nonlocal last_progress_ts
-        elapsed = time.perf_counter() - t_build0
-        avg = elapsed / max(1, done)
-        eta = avg * max(0, n_total - done)
-        pct = 100.0 * done / max(1, n_total)
-        line = f"[cache] [{_bar(done, n_total)}] {done:>3}/{n_total:<3} {pct:5.1f}% ETA {_fmt_eta_s(eta)} | {current_sym}"
-        if sys.stderr.isatty():
-            sys.stderr.write("\r" + line + (" " * max(0, last_len - len(line))))
-            sys.stderr.flush()
-        else:
-            now = time.perf_counter()
-            if now - last_progress_ts >= max(1.0, progress_every_s):
-                print(line, flush=True)
-                last_progress_ts = now
-        last_len = max(last_len, len(line))
+        prog_cache.update(done, current=current_sym)
 
     if parallel and n_total > 0:
         if max_workers is not None and int(max_workers) > 0:
@@ -758,8 +736,7 @@ def ensure_feature_cache(
             _print_progress(sym)
 
     if to_build:
-        sys.stderr.write("\n")
-        sys.stderr.flush()
+        prog_cache.close()
 
     if timings:
         try:
@@ -973,20 +950,13 @@ def prepare_sniper_dataset(
     symbols_skipped: List[str] = []
     total_syms = len(symbols)
 
-    def _fmt_eta(seconds: float) -> str:
-        if seconds < 0:
-            seconds = 0.0
-        m, s = divmod(int(seconds + 0.5), 60)
-        h, m = divmod(m, 60)
-        if h:
-            return f"{h:d}h{m:02d}m"
-        if m:
-            return f"{m:d}m{s:02d}s"
-        return f"{s:d}s"
-
-    start_time = time.time()
-
-    last_len = 0
+    prog_ds = LineProgressPrinter(
+        prefix="sniper-ds",
+        total=total_syms,
+        width=24,
+        stream=sys.stdout,
+        min_interval_s=0.2,
+    )
 
     def _print_progress(
         i: int,
@@ -997,13 +967,6 @@ def prepare_sniper_dataset(
         pos_total: int | None = None,
         neg_total: int | None = None,
     ) -> None:
-        nonlocal last_len
-        w = 24
-        done = min(max(int(round(w * (i / total_syms))), 0), w)
-        bar = "#" * done + "-" * (w - done)
-        elapsed = max(time.time() - start_time, 0.0)
-        eta_sec = ((elapsed / i) * (total_syms - i)) if i > 0 else 0.0
-        eta = _fmt_eta(eta_sec)
         if pos_n is None or neg_n is None:
             counts = "p- n-"
         else:
@@ -1012,11 +975,7 @@ def prepare_sniper_dataset(
             totals = "pt- nt-"
         else:
             totals = f"pt{pos_total} nt{neg_total}"
-        line = f"[sniper-ds] [{bar}] {i}/{total_syms} | {sym} | eta {eta} | {counts} | {totals}"
-        if len(line) < last_len:
-            line = line + (" " * (last_len - len(line)))
-        last_len = max(last_len, len(line))
-        print(line, end="\r", flush=True)
+        prog_ds.update(int(i), current=sym, extra=f"{counts} | {totals}", force=True)
 
     def _sample_df(
         df_in: pd.DataFrame,
@@ -1198,7 +1157,7 @@ def prepare_sniper_dataset(
         )
         if (sym_idx + 1) % 10 == 0:
             gc.collect()
-    print("", flush=True)
+    prog_ds.close()
     # flush remaining buffers
     for name, buf in entry_buf_map.items():
         if not buf:
@@ -1335,20 +1294,13 @@ def prepare_sniper_dataset_from_cache(
     symbols_skipped: List[str] = []
     total_syms = len(symbols)
 
-    def _fmt_eta(seconds: float) -> str:
-        if seconds < 0:
-            seconds = 0.0
-        m, s = divmod(int(seconds + 0.5), 60)
-        h, m = divmod(m, 60)
-        if h:
-            return f"{h:d}h{m:02d}m"
-        if m:
-            return f"{m:d}m{s:02d}s"
-        return f"{s:d}s"
-
-    start_time = time.time()
-
-    last_len = 0
+    prog_ds = LineProgressPrinter(
+        prefix="sniper-ds",
+        total=total_syms,
+        width=24,
+        stream=sys.stdout,
+        min_interval_s=0.2,
+    )
 
     def _print_progress(
         i: int,
@@ -1359,12 +1311,6 @@ def prepare_sniper_dataset_from_cache(
         pos_total: int | None = None,
         neg_total: int | None = None,
     ) -> None:
-        nonlocal last_len
-        w = 24
-        done = min(max(int(round(w * (i / total_syms))), 0), w)
-        bar = "#" * done + "-" * (w - done)
-        elapsed = max(time.time() - start_time, 0.0)
-        eta = _fmt_eta((elapsed / i) * (total_syms - i)) if i > 0 else "?"
         if pos_n is None or neg_n is None:
             counts = "p- n-"
         else:
@@ -1373,11 +1319,7 @@ def prepare_sniper_dataset_from_cache(
             totals = "pt- nt-"
         else:
             totals = f"pt{pos_total} nt{neg_total}"
-        line = f"[sniper-ds] [{bar}] {i}/{total_syms} | {sym} | eta {eta} | {counts} | {totals}"
-        if len(line) < last_len:
-            line = line + (" " * (last_len - len(line)))
-        last_len = max(last_len, len(line))
-        print(line, end="\r", flush=True)
+        prog_ds.update(int(i), current=sym, extra=f"{counts} | {totals}", force=True)
 
     def _sample_df(
         df_in: pd.DataFrame,
@@ -1646,7 +1588,7 @@ def prepare_sniper_dataset_from_cache(
             )
             if done % 5 == 0:
                 gc.collect()
-    print("", flush=True)
+    prog_ds.close()
     # flush remaining buffers
     for name, buf in entry_buf_map.items():
         if not buf:

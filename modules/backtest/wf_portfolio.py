@@ -28,12 +28,19 @@ def _ensure_modules_on_sys_path() -> None:
     if __package__ not in (None, ""):
         return
     here = Path(__file__).resolve()
+    repo_root = None
+    modules_dir = None
     for p in here.parents:
         if p.name.lower() == "modules":
-            sp = str(p)
-            if sp not in sys.path:
-                sys.path.insert(0, sp)
-            return
+            modules_dir = p
+            repo_root = p.parent
+            break
+    for cand in (repo_root, modules_dir):
+        if cand is None:
+            continue
+        sp = str(cand)
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
 
 
 _ensure_modules_on_sys_path()
@@ -48,13 +55,15 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward
+from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward, select_entry_mid
 from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL, _cache_dir, _cache_format
 from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract
 from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 from config.symbols import load_top_market_cap_symbols
-from utils.paths import resolve_generated_path
+from utils.paths import resolve_generated_path, models_root_for_asset
+from utils.progress import fmt_eta, progress as _progress_base
+from plotting.plotting import plot_equity_and_correlation
 
 try:
     from utils.pushover_notify import load_default as _pushover_load_default, send_pushover as _pushover_send
@@ -97,42 +106,50 @@ def _set_thread_limits(n: int) -> int:
 
 
 def _progress(it, *, total: int | None = None, desc: str = ""):
-    """
-    Barra de progresso (tqdm opcional). Fallback com ETA simples.
-    """
-    try:
-        from tqdm import tqdm  # type: ignore
-
-        return tqdm(it, total=total, desc=desc)
-    except Exception:
-        # fallback: imprime progresso bÃ¡sico (sem spammar)
-        t0 = time.perf_counter()
-        last = 0.0
-
-        def _gen():
-            nonlocal last
-            i = 0
-            n = int(total) if total is not None else None
-            for x in it:
-                i += 1
-                now = time.perf_counter()
-                if now - last >= 1.0:
-                    last = now
-                    if n:
-                        pct = 100.0 * i / max(1, n)
-                        avg = (now - t0) / max(1, i)
-                        eta = avg * max(0, n - i)
-                        print(f"[wf] {desc}: {i}/{n} ({pct:5.1f}%) ETA {eta/60.0:5.1f}m", flush=True)
-                    else:
-                        print(f"[wf] {desc}: {i}", flush=True)
-                yield x
-
-        return _gen()
+    return _progress_base(it, total=total, desc=desc, prefix="wf", fallback="eta")
 
 
-def _load_contract_from_json(path: str | None) -> TradeContract:
+def _best_run_contract() -> TradeContract:
+    base = DEFAULT_TRADE_CONTRACT
+    return TradeContract(
+        timeframe_sec=60,
+        entry_label_windows_minutes=(120,),
+        entry_label_min_profit_pcts=(0.032,),
+        entry_label_weight_alpha=0.5,
+        exit_ema_span=120,
+        exit_ema_init_offset_pct=0.002,
+        fee_pct_per_side=base.fee_pct_per_side,
+        slippage_pct=base.slippage_pct,
+        max_adds=base.max_adds,
+        add_spacing_pct=base.add_spacing_pct,
+        add_sizing=base.add_sizing,
+        risk_max_cycle_pct=base.risk_max_cycle_pct,
+        dd_intermediate_limit_pct=base.dd_intermediate_limit_pct,
+        danger_drop_pct=base.danger_drop_pct,
+        danger_recovery_pct=base.danger_recovery_pct,
+        danger_timeout_hours=base.danger_timeout_hours,
+        danger_fast_minutes=base.danger_fast_minutes,
+        danger_drop_pct_critical=base.danger_drop_pct_critical,
+        danger_stabilize_recovery_pct=base.danger_stabilize_recovery_pct,
+        danger_stabilize_bars=base.danger_stabilize_bars,
+    )
+
+
+def _default_contract_for_asset(asset_class: str) -> TradeContract:
+    asset = str(asset_class or "crypto").lower()
+    if asset == "stocks":
+        try:
+            from stocks.trade_contract import DEFAULT_TRADE_CONTRACT as STOCKS_CONTRACT  # type: ignore
+
+            return STOCKS_CONTRACT
+        except Exception:
+            return DEFAULT_TRADE_CONTRACT
+    return _best_run_contract()
+
+
+def _load_contract_from_json(path: str | None, *, base_contract: TradeContract) -> TradeContract:
     if not path:
-        return DEFAULT_TRADE_CONTRACT
+        return base_contract
     p = Path(path).expanduser().resolve()
     data = json.loads(p.read_text(encoding="utf-8"))
     if isinstance(data, dict) and isinstance(data.get("contract"), dict):
@@ -148,7 +165,35 @@ def _load_contract_from_json(path: str | None) -> TradeContract:
     for k in ("max_adds", "danger_stabilize_bars"):
         if k in overrides:
             overrides[k] = int(overrides[k])
-    return replace(DEFAULT_TRADE_CONTRACT, **overrides)
+    return replace(base_contract, **overrides)
+
+
+def _find_latest_wf_dir(run_dir: str | None, *, asset_class: str = "crypto") -> Path:
+    if run_dir:
+        p = Path(run_dir).expanduser().resolve()
+        if not p.is_dir():
+            raise RuntimeError(f"run_dir invalido: {p}")
+        return p
+
+    roots: list[Path] = []
+    try:
+        roots.append(models_root_for_asset(asset_class).resolve())
+    except Exception:
+        pass
+    # fallback para layout legado
+    roots.extend(
+        [
+            (Path(__file__).resolve().parents[2].parent / "models_sniper" / str(asset_class).lower()).resolve(),
+            Path(f"D:/astra/models_sniper/{str(asset_class).lower()}").resolve(),
+        ]
+    )
+    for root in roots:
+        if not root.is_dir():
+            continue
+        wf_list = sorted([p for p in root.glob("wf_*") if p.is_dir()], key=lambda p: p.stat().st_mtime)
+        if wf_list:
+            return wf_list[-1]
+    raise RuntimeError(f"Nenhum wf_* encontrado para asset_class={asset_class}")
 
 
 def _read_parquet_best_effort(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame | None:
@@ -206,6 +251,42 @@ def _list_cached_symbols() -> list[str]:
     return sorted(set(out))
 
 
+def _pick_symbols_from_run_dir_meta(run_dir: Path) -> list[str]:
+    pd_dirs = sorted([p for p in run_dir.iterdir() if p.is_dir() and p.name.startswith("period_") and p.name.endswith("d")])
+    if not pd_dirs:
+        return []
+    # Preferencia: period_0d (normalmente representa treino mais recente), fallback para menor offset.
+    pd_dirs.sort(key=lambda p: int(p.name.replace("period_", "").replace("d", "")))
+    candidates = []
+    p0 = run_dir / "period_0d" / "meta.json"
+    if p0.exists():
+        candidates.append(p0)
+    for pd_dir in pd_dirs:
+        mp = pd_dir / "meta.json"
+        if mp.exists() and mp not in candidates:
+            candidates.append(mp)
+
+    for meta_path in candidates:
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            for k in ("symbols_used", "symbols"):
+                vals = meta.get(k)
+                if isinstance(vals, list) and vals:
+                    out: list[str] = []
+                    seen: set[str] = set()
+                    for s in vals:
+                        su = str(s).strip().upper()
+                        if not su or su in seen:
+                            continue
+                        seen.add(su)
+                        out.append(su)
+                    if out:
+                        return out
+        except Exception:
+            continue
+    return []
+
+
 def _needed_feature_columns(periods) -> list[str]:
     cols: set[str] = {"open", "high", "low", "close", "volume"}
     for pm in periods:
@@ -214,6 +295,22 @@ def _needed_feature_columns(periods) -> list[str]:
             cols.update([str(c) for c in (v or [])])
         cols.update([str(c) for c in (getattr(pm, "exit_cols", None) or [])])
     return sorted(cols)
+
+
+def _entry_calibration_summary(periods) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for pm in periods or []:
+        cmap = dict(getattr(pm, "entry_calib_map", {}) or {})
+        if not cmap:
+            c = dict(getattr(pm, "entry_calib", {}) or {})
+            t = str(c.get("type", "identity")).strip().lower() or "identity"
+            out[t] = int(out.get(t, 0) + 1)
+            continue
+        for c in cmap.values():
+            cc = dict(c or {})
+            t = str(cc.get("type", "identity")).strip().lower() or "identity"
+            out[t] = int(out.get(t, 0) + 1)
+    return out
 
 
 def _entry_specs_from_contract(contract: TradeContract) -> list[tuple[str, int]]:
@@ -252,9 +349,11 @@ def _prepare_symbol_frame_for_window(
     except RuntimeError:
         return df.iloc[0:0].copy()
     df = df.copy()
-    for name, w in _entry_specs_from_contract(contract):
-        if name in pe_map:
-            df[f"__p_entry_{int(w)}m"] = np.asarray(pe_map[name], dtype=np.float32)
+    # O portfolio opera com score "mid" (blend long/short) por barra.
+    # Alguns WFs antigos nao possuem chave "mid" explicita em pe_map.
+    pe_mid = np.asarray(select_entry_mid(pe_map), dtype=np.float32)
+    for _name, w in _entry_specs_from_contract(contract):
+        df[f"__p_entry_{int(w)}m"] = pe_mid
     df["__period_id"] = np.asarray(pid, dtype=np.int16)
     # MantÃ©m somente OHLCV + colunas nÃ£o-cycle do Exit + colunas internas
     keep: set[str] = {"open", "high", "low", "close", "volume", "__period_id"}
@@ -284,20 +383,6 @@ def _max_drawdown_from_curve(eq: pd.Series) -> float:
     peak = np.maximum.accumulate(x)
     dd = 1.0 - (x / np.maximum(1e-12, peak))
     return float(np.max(dd)) if len(dd) else 0.0
-
-
-def _fmt_hms(seconds: float) -> str:
-    try:
-        s = int(max(0.0, float(seconds)))
-    except Exception:
-        s = 0
-    if s < 60:
-        return f"{s:d}s"
-    m, s = divmod(s, 60)
-    if m < 60:
-        return f"{m:d}m{s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h:d}h{m:02d}m"
 
 
 def _mk_progress_cb(step_start: pd.Timestamp, step_end: pd.Timestamp) -> Callable[[pd.Timestamp], None]:
@@ -330,7 +415,7 @@ def _mk_progress_cb(step_start: pd.Timestamp, step_end: pd.Timestamp) -> Callabl
         else:
             eta = 0.0
         print(
-            f"\r[wf] progresso step: {pct:5.1f}% | elapsed={_fmt_hms(elapsed)} ETA={_fmt_hms(eta)} | t={pd.to_datetime(t)}",
+            f"\r[wf] progresso step: {pct:5.1f}% | elapsed={fmt_eta(elapsed)} ETA={fmt_eta(eta)} | t={pd.to_datetime(t)}",
             end="",
             flush=True,
         )
@@ -339,18 +424,26 @@ def _mk_progress_cb(step_start: pd.Timestamp, step_end: pd.Timestamp) -> Callabl
 
 
 def main() -> None:
+    step_ds_format = "wf_v2"
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", type=str, required=False, default="D:/astra/models_sniper/crypto/wf_002")
-    ap.add_argument("--symbols", type=str, default="", help="CSV. Se vazio, usa top_market_cap.txt")
+    ap.add_argument("--run-dir", type=str, required=False, default=None)
+    ap.add_argument("--symbols", type=str, default="", help="CSV explicito de simbolos. Se vazio, usa universo do treino (meta do run_dir).")
+    ap.add_argument(
+        "--symbols-source",
+        type=str,
+        default="train_meta",
+        choices=["train_meta", "top_market_cap"],
+        help="Fonte de simbolos quando --symbols estiver vazio.",
+    )
     ap.add_argument("--max-symbols", type=int, default=0)
     ap.add_argument(
         "--min-market-cap",
         type=float,
         default=50_000_000,
-        help="Market cap mЧnimo (USD) para entrar no universo via top_market_cap.txt.",
+        help="Market cap minimo (USD) para entrar no universo via top_market_cap.txt.",
     )
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--years", type=int, default=6)
+    ap.add_argument("--years", type=int, default=2)
     ap.add_argument("--step-days", type=int, default=180)
     # IMPORTANTE: para backtest "verÃ­dico" em 1m, use 1.
     # Valores >1 fazem downsample (ex.: 5 => ~5m) e alteram a escala temporal efetiva do sistema.
@@ -358,7 +451,7 @@ def main() -> None:
     ap.add_argument("--refresh-cache", action="store_true")
     ap.add_argument("--strict-cache-total-days", action="store_true")
 
-    ap.add_argument("--tau-entry", type=float, default=0.775)
+    ap.add_argument("--tau-entry", type=float, default=0.70)
     ap.add_argument("--tau-exit", type=float, default=DEFAULT_THRESHOLD_OVERRIDES.tau_exit)
 
     # Universo: usar histÃ³rico ao invÃ©s de sÃ³ o step atual (mais robusto)
@@ -387,7 +480,7 @@ def main() -> None:
         help="Otimiza thresholds por step para aplicar no step seguinte. "
         "'entry_grid' faz grid search apenas em tau_entry (tau_exit fica fixo).",
     )
-    ap.add_argument("--tau-opt-lookback-days", type=int, default=730, help="Janela histÃ³rica (dias) para otimizar tau (ex.: 730 ~ 2 anos).")
+    ap.add_argument("--tau-opt-lookback-days", type=int, default=720, help="Janela histÃ³rica (dias) para otimizar tau (ex.: 730 ~ 2 anos).")
     ap.add_argument("--tau-opt-bar-stride", type=int, default=10, help="Downsample sÃ³ para otimizaÃ§Ã£o de tau (reduz custo).")
     ap.add_argument("--tau-opt-symbols", type=int, default=40, help="Qtd mÃ¡x de sÃ­mbolos usados para otimizar tau (subset dos selecionados).")
     ap.add_argument("--tau-opt-entry-min", type=float, default=0.60, help="MÃ­nimo do grid de tau_entry.")
@@ -402,12 +495,22 @@ def main() -> None:
     ap.add_argument("--min-trade-exposure", type=float, default=0.04)
     ap.add_argument("--exit-min-hold-bars", type=int, default=0)
     ap.add_argument("--exit-confirm-bars", type=int, default=2)
+    ap.add_argument("--corr-filter", action="store_true", help="Ativa filtro de correlacao na selecao de candidatos por timestamp.")
+    ap.add_argument("--corr-window-bars", type=int, default=144, help="Janela passada (barras) para calcular correlacao no timestamp.")
+    ap.add_argument("--corr-min-obs", type=int, default=96, help="Minimo de observacoes para aceitar correlacao.")
+    ap.add_argument("--corr-max-market", type=float, default=0.85, help="Max corr com retorno medio de mercado (abs se --corr-abs).")
+    ap.add_argument("--corr-max-pair", type=float, default=0.92, help="Max corr entre candidatos aceitos no mesmo timestamp.")
+    ap.add_argument("--corr-keep-top-n", type=int, default=1, help="Quantidade de top scores sempre aceitos antes do filtro.")
+    ap.add_argument("--corr-signed", dest="corr_abs", action="store_false", help="Usa correlacao assinada em vez de absoluta.")
+    ap.add_argument("--corr-debug", action="store_true", help="Loga resumo de filtro de correlacao por batch.")
+    ap.set_defaults(corr_abs=True)
 
     # Universo dinÃ¢mico (walk-forward):
     # - step 0: opera TODOS os sÃ­mbolos disponÃ­veis no step
     # - step i: opera o universo "selecionado" no step i-1
     # - em todos os steps: ainda assim simula TODOS os sÃ­mbolos do step para selecionar o prÃ³ximo
-    ap.add_argument("--no-dynamic-universe", action="store_true", help="Desativa seleÃ§Ã£o walk-forward de universo.")
+    ap.add_argument("--dynamic-universe", action="store_true", help="Ativa seleÃ§Ã£o walk-forward de universo (default: desativado).")
+    ap.add_argument("--no-dynamic-universe", action="store_true", help="Legado: desativa seleÃ§Ã£o walk-forward de universo.")
     ap.add_argument(
         "--active-target",
         type=int,
@@ -420,6 +523,12 @@ def main() -> None:
         type=int,
         default=0,
         help="(Opcional) MÃ­nimo de trades por sÃ­mbolo para aplicar filtros. 0 = nÃ£o filtra por trades.",
+    )
+    ap.add_argument(
+        "--universe-min-trades-step",
+        type=int,
+        default=1,
+        help="MÃ­nimo de trades no step atual (eval) para elegibilidade no prÃ³ximo step. 0 desativa.",
     )
     ap.add_argument(
         "--universe-use-effective-metrics",
@@ -479,9 +588,16 @@ def main() -> None:
     ap.add_argument("--no-plot", action="store_true", help="NÃ£o exibir/salvar grÃ¡fico ao final.")
     ap.add_argument("--plot-save-only", action="store_true", help="Salva grafico mas nao chama plt.show().")
     ap.add_argument("--contract-json", type=str, default="", help="JSON com overrides do TradeContract.")
+    ap.add_argument(
+        "--require-calibration",
+        action="store_true",
+        help="Falha o run se nao encontrar calibracao de entrada nao-identity nos periodos do WF.",
+    )
     args = ap.parse_args()
 
-    contract = _load_contract_from_json(getattr(args, "contract_json", "") or "")
+    asset_class = "crypto"
+    base_contract = _default_contract_for_asset(asset_class)
+    contract = _load_contract_from_json(getattr(args, "contract_json", "") or "", base_contract=base_contract)
 
     _set_thread_limits(int(getattr(args, "xgb_threads", 8) or 8))
 
@@ -507,46 +623,32 @@ def main() -> None:
         except Exception:
             return
 
-    # Auto-detect run_dir
-    if args.run_dir is None:
-        try:
-            asset = os.getenv("SNIPER_ASSET_CLASS", "crypto").strip().lower()
-            paths_to_check = [
-                Path(f"D:/astra/models_sniper/{asset}"),
-                Path(__file__).resolve().parents[2].parent / "models_sniper" / asset,
-                Path.cwd().parent / "models_sniper" / asset,
-                Path.cwd() / "models_sniper" / asset,
-            ]
-            for models_root in paths_to_check:
-                if models_root.is_dir():
-                    wf_list = sorted([p for p in models_root.glob("wf_*") if p.is_dir()], key=lambda p: p.stat().st_mtime)
-                    if wf_list:
-                        args.run_dir = str(wf_list[-1])
-                        break
-        except Exception:
-            pass
-    if args.run_dir is None:
-        raise RuntimeError("NÃ£o foi possÃ­vel encontrar wf_* automaticamente; passe --run-dir.")
-
-    run_dir = Path(args.run_dir).expanduser().resolve()
-    if not run_dir.is_dir():
-        raise RuntimeError(f"run_dir invÃ¡lido: {run_dir}")
+    run_dir = _find_latest_wf_dir(getattr(args, "run_dir", None), asset_class=asset_class)
     print(f"[wf] run_dir={run_dir}", flush=True)
 
     # Cache de features (histÃ³rico suficiente para os steps)
     total_days_cache = int(args.years) * 365 + int(args.step_days) * 2 + 60
     syms_arg = [s.strip().upper() for s in str(getattr(args, "symbols", "")).split(",") if s.strip()]
+    symbols_source = str(getattr(args, "symbols_source", "train_meta") or "train_meta").strip().lower()
     if not syms_arg:
-        syms_arg = load_top_market_cap_symbols(
-            limit=int(args.limit) if int(args.limit) > 0 else None,
-            min_cap=float(getattr(args, "min_market_cap", 0.0) or 0.0) or None,
-        )
-        syms_arg = [s.strip().upper() for s in syms_arg if str(s).strip()]
-        if not bool(getattr(args, "refresh_cache", False)):
-            cached = set(_list_cached_symbols())
-            if cached:
-                missing = [s for s in syms_arg if s not in cached]
-                print(f"[wf] symbols: total={len(syms_arg)} cache={len(cached)} missing={len(missing)}", flush=True)
+        if symbols_source == "train_meta":
+            syms_arg = _pick_symbols_from_run_dir_meta(run_dir)
+            if syms_arg:
+                print(f"[wf] symbols source=train_meta count={len(syms_arg)}", flush=True)
+            else:
+                print("[wf][warn] symbols source=train_meta vazio; fallback para top_market_cap.", flush=True)
+        if not syms_arg:
+            syms_arg = load_top_market_cap_symbols(
+                limit=int(args.limit) if int(args.limit) > 0 else None,
+                min_cap=float(getattr(args, "min_market_cap", 0.0) or 0.0) or None,
+            )
+            syms_arg = [s.strip().upper() for s in syms_arg if str(s).strip()]
+            print(f"[wf] symbols source=top_market_cap count={len(syms_arg)}", flush=True)
+    if not bool(getattr(args, "refresh_cache", False)):
+        cached = set(_list_cached_symbols())
+        if cached:
+            missing = [s for s in syms_arg if s not in cached]
+            print(f"[wf] symbols: total={len(syms_arg)} cache={len(cached)} missing={len(missing)}", flush=True)
     if int(args.max_symbols) > 0:
         syms_arg = syms_arg[: int(args.max_symbols)]
     if not syms_arg:
@@ -571,6 +673,15 @@ def main() -> None:
 
     # Carrega perÃ­odos/modelos (CPU)
     periods_base = load_period_models(run_dir)
+    calib_summary = _entry_calibration_summary(periods_base)
+    calib_summary_s = ", ".join([f"{k}:{v}" for k, v in sorted(calib_summary.items())]) if calib_summary else "none"
+    print(f"[wf] entry_calibration={calib_summary_s}", flush=True)
+    non_identity = int(sum(v for k, v in calib_summary.items() if k != "identity"))
+    if non_identity <= 0:
+        msg = "[wf][warn] nenhum calibrador nao-identity encontrado; scores de entrada estao sem calibracao efetiva."
+        if bool(getattr(args, "require_calibration", False)):
+            raise RuntimeError(msg + " (use outro run_dir ou remova --require-calibration)")
+        print(msg, flush=True)
     # forÃ§a device=cpu
     try:
         for pm in (periods_base or []):
@@ -643,6 +754,20 @@ def main() -> None:
         min_trade_exposure=float(args.min_trade_exposure),
         exit_min_hold_bars=int(args.exit_min_hold_bars),
         exit_confirm_bars=int(args.exit_confirm_bars),
+        corr_filter_enabled=bool(getattr(args, "corr_filter", False)),
+        corr_window_bars=int(getattr(args, "corr_window_bars", 144) or 144),
+        corr_min_obs=int(getattr(args, "corr_min_obs", 96) or 96),
+        corr_max_with_market=float(getattr(args, "corr_max_market", 0.85) or 0.85),
+        corr_max_pair=float(getattr(args, "corr_max_pair", 0.92) or 0.92),
+        corr_keep_top_n=int(getattr(args, "corr_keep_top_n", 1) or 0),
+        corr_abs=bool(getattr(args, "corr_abs", True)),
+        corr_debug=bool(getattr(args, "corr_debug", False)),
+    )
+    print(
+        f"[wf] corr_filter={cfg.corr_filter_enabled} window={cfg.corr_window_bars} "
+        f"min_obs={cfg.corr_min_obs} max_mkt={cfg.corr_max_with_market:.3f} "
+        f"max_pair={cfg.corr_max_pair:.3f} keep_top_n={cfg.corr_keep_top_n} abs={cfg.corr_abs}",
+        flush=True,
     )
 
     if pushover_on:
@@ -661,8 +786,9 @@ def main() -> None:
     eval_symbol_metrics_csv = out_dir / "wf_eval_symbol_metrics.csv"
     eval_symbol_metrics_full_csv = out_dir / "wf_eval_symbol_metrics_full.csv"
     universe_csv = out_dir / "wf_universe.csv"
+    corr_trace_csv = out_dir / "wf_corr_trace.csv"
     # evita append duplicado quando vocÃª re-roda o script
-    for p in (trades_csv, symbol_stats_csv, eval_trades_csv, eval_symbol_metrics_csv, eval_symbol_metrics_full_csv, universe_csv):
+    for p in (trades_csv, symbol_stats_csv, eval_trades_csv, eval_symbol_metrics_csv, eval_symbol_metrics_full_csv, universe_csv, corr_trace_csv):
         try:
             if p.exists():
                 p.unlink(missing_ok=True)
@@ -673,7 +799,7 @@ def main() -> None:
     stride = max(1, int(args.bar_stride))
     min_span = pd.Timedelta(minutes=int(min_bars) * int(stride))
 
-    dynamic_universe_on = not bool(getattr(args, "no_dynamic_universe", False))
+    dynamic_universe_on = bool(getattr(args, "dynamic_universe", False)) and (not bool(getattr(args, "no_dynamic_universe", False)))
     prev_selected: list[str] = []  # universo selecionado no step anterior (para operar step atual)
     prev_active: list[str] = []  # universo realmente operado no step anterior (para churn quando hÃ¡ teto)
     ewm_score: dict[str, float] = {}  # score suavizado por sÃ­mbolo (para ranking do prÃ³ximo step)
@@ -735,7 +861,7 @@ def main() -> None:
             if meta_p.exists():
                 try:
                     meta = json.loads(meta_p.read_text(encoding="utf-8"))
-                    if str(meta.get("format")) == "wf_v1" and str(meta.get("t_start")) == str(ws) and str(meta.get("t_end")) == str(we):
+                    if str(meta.get("format")) == step_ds_format and str(meta.get("t_start")) == str(ws) and str(meta.get("t_end")) == str(we):
                         meta_syms = [str(x).upper() for x in (meta.get("symbols") or [])]
                         if meta_syms == [str(x).upper() for x in syms_build] and any(ds_dir.glob("*.parquet")):
                             need_rebuild = False
@@ -778,7 +904,7 @@ def main() -> None:
                 frames_mem[sym] = df_step
             if use_disk and disk_ok:
                 meta_p.write_text(
-                    json.dumps({"format": "wf_v1", "t_start": str(ws), "t_end": str(we), "symbols": list(syms_build)}, ensure_ascii=False, indent=2),
+                    json.dumps({"format": step_ds_format, "t_start": str(ws), "t_end": str(we), "symbols": list(syms_build)}, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
 
@@ -890,6 +1016,14 @@ def main() -> None:
                 exit_min_hold_bars=int(cfg.exit_min_hold_bars),
                 exit_confirm_bars=int(cfg.exit_confirm_bars),
                 rank_mode=str(getattr(cfg, "rank_mode", "p_entry")),
+                corr_filter_enabled=bool(getattr(cfg, "corr_filter_enabled", False)),
+                corr_window_bars=int(getattr(cfg, "corr_window_bars", 144)),
+                corr_min_obs=int(getattr(cfg, "corr_min_obs", 96)),
+                corr_max_with_market=float(getattr(cfg, "corr_max_with_market", 0.85)),
+                corr_max_pair=float(getattr(cfg, "corr_max_pair", 0.92)),
+                corr_keep_top_n=int(getattr(cfg, "corr_keep_top_n", 0)),
+                corr_abs=bool(getattr(cfg, "corr_abs", True)),
+                corr_debug=bool(getattr(cfg, "corr_debug", False)),
             )
             pres_eval = simulate_portfolio(sym_data, cfg=cfg_eval, contract=contract, candle_sec=60)  # type: ignore[arg-type]
             eval_trades = list(getattr(pres_eval, "trades", []) or [])
@@ -940,6 +1074,7 @@ def main() -> None:
 
             # mÃ©tricas por sÃ­mbolo (eval)
             min_tr = int(getattr(args, "universe_min_trades", 0) or 0)
+            min_tr_step = int(getattr(args, "universe_min_trades_step", 1) or 0)
             use_eff = bool(getattr(args, "universe_use_effective_metrics", True))
             k_tr = float(getattr(args, "universe_trade_weight_k", 20.0) or 20.0)
             k_tr = float(max(0.0, k_tr))
@@ -951,6 +1086,12 @@ def main() -> None:
             hist_mode = str(getattr(args, "universe_history_mode", "step") or "step").strip().lower()
             hist_days = int(getattr(args, "universe_history_days", 730) or 730)
             by_sym: dict[str, list[tuple[pd.Timestamp, float]]] = {}
+            trades_step_map: dict[str, int] = {}
+            for tr in eval_trades:
+                sym = str(getattr(tr, "symbol", "") or "").upper()
+                if not sym:
+                    continue
+                trades_step_map[sym] = int(trades_step_map.get(sym, 0) + 1)
             if hist_mode == "step":
                 for tr in eval_trades:
                     sym = str(getattr(tr, "symbol", "") or "").upper()
@@ -994,6 +1135,7 @@ def main() -> None:
                             "window_end": str(we),
                             "symbol": sym,
                             "trades": 0,
+                            "trades_step": int(trades_step_map.get(sym, 0)),
                             "win_rate": 0.0,
                             "profit_factor": 0.0,
                             "ret_total": 0.0,
@@ -1052,6 +1194,7 @@ def main() -> None:
                         "window_end": str(we),
                         "symbol": sym,
                         "trades": int(arr.size),
+                        "trades_step": int(trades_step_map.get(sym, 0)),
                         "win_rate": float(win),
                         "win_rate_eff": float(win_eff),
                         "profit_factor": float(pf),
@@ -1092,11 +1235,13 @@ def main() -> None:
                 encoding="utf-8",
             )
 
-            # SeleÃ§Ã£o para o PRÃ“XIMO step (filtro por PF>=1 + confiabilidade por nÂº de trades)
+            # Selecao para o PROXIMO step:
+            # sem filtros (PF/win/DD/score/trades), para isolar analise da correlacao.
             min_pf = float(getattr(args, "universe_min_pf", 1.0) or 1.0)
             min_win = float(getattr(args, "universe_min_win", 0.30) or 0.30)
             max_dd_f = float(getattr(args, "universe_max_dd", 1.0) or 1.0)
             min_tr = int(getattr(args, "universe_min_trades", 0) or 0)
+            min_tr_step = int(getattr(args, "universe_min_trades_step", 1) or 0)
             min_score = float(getattr(args, "universe_min_score", 0.0) or 0.0)
             max_changes = int(getattr(args, "universe_max_changes", 0) or 0)
             min_active = int(getattr(args, "universe_min_active", 0) or 0)
@@ -1105,14 +1250,7 @@ def main() -> None:
             pf_col = "profit_factor_eff" if (use_eff and ("profit_factor_eff" in dfm_rank.columns)) else "profit_factor"
             win_col = "win_rate_eff" if (use_eff and ("win_rate_eff" in dfm_rank.columns)) else "win_rate"
 
-            sel_mask = (dfm_rank[pf_col].astype(float) >= float(min_pf))
-            if int(min_tr) > 0:
-                sel_mask &= (dfm_rank["trades"].astype(int) >= int(min_tr))
-            sel_mask &= (dfm_rank[win_col].astype(float) >= float(min_win))
-            sel_mask &= (dfm_rank["max_dd"].astype(float) <= float(max_dd_f))
-            # filtro por score (penaliza baixa atividade + "PF bom por acaso")
-            if "score_raw" in dfm_rank.columns and float(min_score) > 0:
-                sel_mask &= (dfm_rank["score_raw"].astype(float) >= float(min_score))
+            sel_mask = pd.Series(np.ones(len(dfm_rank), dtype=bool), index=dfm_rank.index)
             selected_next = [str(s).upper() for s in dfm_rank.loc[sel_mask, "symbol"].astype(str).tolist() if str(s).strip()]
 
             # aplica teto (se houver) com churn limitado (se configurado)
@@ -1134,12 +1272,19 @@ def main() -> None:
                 # Prefere sÃ­mbolos que tiveram trades no step (evita completar com "no-signal").
                 try:
                     trades_map = {str(r["symbol"]).upper(): int(r["trades"]) for _, r in dfm_rank[["symbol", "trades"]].iterrows()}
+                    trades_step_rank = (
+                        {str(r["symbol"]).upper(): int(r["trades_step"]) for _, r in dfm_rank[["symbol", "trades_step"]].iterrows()}
+                        if "trades_step" in dfm_rank.columns
+                        else {}
+                    )
                 except Exception:
                     trades_map = {}
+                    trades_step_rank = {}
                 ranked_rest = [s for s in ranked_all if s not in sel_set]
-                ranked_with_tr = [s for s in ranked_rest if int(trades_map.get(s, 0) or 0) > 0]
+                ranked_with_tr = [s for s in ranked_rest if int(trades_step_rank.get(s, 0) or 0) > 0]
+                ranked_mid_tr = [s for s in ranked_rest if int(trades_step_rank.get(s, 0) or 0) <= 0 and int(trades_map.get(s, 0) or 0) > 0]
                 ranked_zero_tr = [s for s in ranked_rest if int(trades_map.get(s, 0) or 0) <= 0]
-                add = ranked_with_tr + ranked_zero_tr
+                add = ranked_with_tr + ranked_mid_tr + ranked_zero_tr
                 selected_next = list(selected_next) + add[: max(0, need)]
 
             # fallback de seguranÃ§a: se o filtro eliminar tudo, NÃƒO zera o universo (evita colapsar trades).
@@ -1470,7 +1615,7 @@ def main() -> None:
                     pass
                 print(
                     f"[wf] selected_next_step: n={len(prev_selected)} "
-                    f"(min_trades={min_tr} min_pf={min_pf:.2f} min_win={min_win:.2f} max_dd={max_dd_f:.2f} min_score={min_score:.2f})",
+                    f"(filtros_desativados=True; ranking_only)",
                     flush=True,
                 )
             except Exception:
@@ -1609,6 +1754,11 @@ def main() -> None:
         max_dd = float(getattr(pres, "max_dd", 0.0) or 0.0)
         if max_dd <= 0.0:
             max_dd = _max_drawdown_from_curve(eq_ser)
+        corr_diag = dict(getattr(pres, "diagnostics", {}) or {})
+        corr_accept = float(corr_diag.get("corr_accept_ratio", np.nan)) if bool(getattr(cfg, "corr_filter_enabled", False)) else np.nan
+        corr_kept = int(corr_diag.get("corr_total_kept", 0) or 0) if bool(getattr(cfg, "corr_filter_enabled", False)) else 0
+        corr_rej = int(corr_diag.get("corr_total_rejected", 0) or 0) if bool(getattr(cfg, "corr_filter_enabled", False)) else 0
+        corr_batches = int(corr_diag.get("corr_batches", 0) or 0) if bool(getattr(cfg, "corr_filter_enabled", False)) else 0
 
         row = {
             "step_idx": int(step_idx),
@@ -1629,13 +1779,22 @@ def main() -> None:
             "trades": int(len(trades)),
             "win_rate": float(win_rate),
             "profit_factor": float(pf),
+            "corr_batches": int(corr_batches),
+            "corr_kept": int(corr_kept),
+            "corr_rejected": int(corr_rej),
+            "corr_accept_ratio": float(corr_accept) if np.isfinite(corr_accept) else np.nan,
         }
         rows.append(row)
 
         print(
             f"[wf] step={step_idx+1}/{len(windows)} done: ret={row['ret_pct']:+.2f}% dd={row['max_dd']:.1%} "
             f"pf={row['profit_factor']:.2f} win={row['win_rate']:.2f} trades={row['trades']} "
-            f"syms_active={row['symbols_active']}/{row['symbols_step']}",
+            f"syms_active={row['symbols_active']}/{row['symbols_step']}"
+            + (
+                f" corr_acc={row['corr_accept_ratio']:.2f} kept={row['corr_kept']} rej={row['corr_rejected']}"
+                if bool(getattr(cfg, "corr_filter_enabled", False))
+                else ""
+            ),
             flush=True,
         )
         if pushover_on and pushover_steps:
@@ -1652,6 +1811,22 @@ def main() -> None:
             eq_join = pd.concat(equity_all).sort_index()
             eq_join = eq_join[~eq_join.index.duplicated(keep="last")]
             eq_join.to_csv(out_dir / "wf_equity_curve.csv", index=True, encoding="utf-8")
+        try:
+            corr_trace = getattr(pres, "corr_trace", None)
+            if corr_trace is not None and len(corr_trace) > 0:
+                cdf = corr_trace.copy()
+                cdf["step_idx"] = int(step_idx)
+                cdf["window_start"] = str(ws)
+                cdf["window_end"] = str(we)
+                cdf.to_csv(
+                    corr_trace_csv,
+                    mode="a",
+                    header=not corr_trace_csv.exists(),
+                    index=True,
+                    encoding="utf-8",
+                )
+        except Exception as e:
+            print(f"[wf][warn] falhou ao salvar wf_corr_trace.csv: {type(e).__name__}: {e}", flush=True)
 
         # aplica taus planejados (para o prÃ³ximo step)
         if float(tau_e_next) != float(tau_e) or float(tau_x_next) != float(tau_x):
@@ -1673,16 +1848,14 @@ def main() -> None:
         except Exception:
             _notify(f"WF backtest concluÃ­do: steps={len(windows)}")
 
-    # Plot final: evoluÃ§Ã£o do capital / profit ao longo do tempo
+    # Plot final: evolucao do capital / profit ao longo do tempo
     if not bool(getattr(args, "no_plot", False)):
         try:
-            if bool(getattr(args, "plot_save_only", False)):
-                os.environ.setdefault("MPLBACKEND", "Agg")
             eq_path = out_dir / "wf_equity_curve.csv"
             if eq_path.exists():
                 eq_df = pd.read_csv(eq_path)
                 if "equity" in eq_df.columns and len(eq_df) > 0:
-                    # primeira coluna Ã© o index salvo (timestamp)
+                    # primeira coluna e o index salvo (timestamp)
                     ts_col = str(eq_df.columns[0])
                     t = pd.to_datetime(eq_df[ts_col])
                     eq = pd.Series(eq_df["equity"].to_numpy(np.float64, copy=False), index=t, name="equity").sort_index()
@@ -1692,33 +1865,28 @@ def main() -> None:
                 eq = None
 
             if eq is not None and len(eq) > 1:
-                try:
-                    import matplotlib.pyplot as plt  # type: ignore
-
-                    fig, ax = plt.subplots(1, 1, figsize=(12, 5))
-                    ax.plot(eq.index, eq.values, color="#2E86AB", linewidth=1.6)
-                    ax.set_title("Evolução do capital (equity)")
-                    ax.set_ylabel("Equity")
-                    ax.grid(True, alpha=0.25)
-
-                    fig.tight_layout()
-                    out_png = out_dir / "wf_equity.png"
+                out_html = out_dir / "wf_equity.html"
+                corr_df = None
+                if bool(getattr(args, "corr_filter", False)) and corr_trace_csv.exists():
                     try:
-                        fig.savefig(out_png, dpi=140)
-                        print(f"[wf] grÃ¡fico salvo: {out_png}", flush=True)
-                    except Exception:
-                        pass
-                    if not bool(getattr(args, "plot_save_only", False)):
-                        try:
-                            plt.show()
-                        except Exception:
-                            pass
-                except Exception:
-                    print(
-                        "[wf][plot][warn] matplotlib nÃ£o estÃ¡ disponÃ­vel; grÃ¡fico nÃ£o foi exibido/salvo. "
-                        "VocÃª ainda pode usar wf_equity_curve.csv para plotar.",
-                        flush=True,
-                    )
+                        cc = pd.read_csv(corr_trace_csv)
+                        ts_col = str(cc.columns[0])
+                        cc[ts_col] = pd.to_datetime(cc[ts_col], errors="coerce")
+                        cc = cc.dropna(subset=[ts_col]).set_index(ts_col).sort_index()
+                        keep_cols = [c for c in ("accept_ratio", "kept_avg_pair_corr", "kept_avg_market_corr") if c in cc.columns]
+                        if keep_cols:
+                            corr_df = cc[keep_cols].copy()
+                    except Exception as e:
+                        print(f"[wf][plot][warn] nao foi possivel carregar corr trace: {type(e).__name__}: {e}", flush=True)
+                plot_equity_and_correlation(
+                    eq,
+                    corr_df=corr_df,
+                    corr_columns=["accept_ratio", "kept_avg_pair_corr", "kept_avg_market_corr"],
+                    title="Evolucao do capital + filtro de correlacao",
+                    save_path=out_html,
+                    show=not bool(getattr(args, "plot_save_only", False)),
+                )
+                print(f"[wf] grafico salvo: {out_html}", flush=True)
         except Exception as e:
             print(f"[wf][plot][warn] falhou ao gerar grÃ¡fico: {type(e).__name__}: {e}", flush=True)
 

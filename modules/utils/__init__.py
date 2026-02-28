@@ -2,6 +2,7 @@
 
 from .thermal_guard import ThermalGuard, ThermalGuardConfig, ThermalSample
 from .guarded_runner import GuardedRunner, GuardedParallelDefaults
+from .progress import progress, fmt_eta, ascii_bar, LineProgressPrinter
 
 __all__ = [
     "ThermalGuard",
@@ -9,4 +10,8 @@ __all__ = [
     "ThermalSample",
     "GuardedRunner",
     "GuardedParallelDefaults",
+    "progress",
+    "fmt_eta",
+    "ascii_bar",
+    "LineProgressPrinter",
 ]
