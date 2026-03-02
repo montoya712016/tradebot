@@ -24,6 +24,10 @@ _add_repo_paths()
 from train.train_sniper_wf import TrainSniperWFSettings, run  # type: ignore
 from crypto.trade_contract import TradeContract  # type: ignore
 from crypto.build_ohlc_cache import run_build as run_ohlc_build  # type: ignore
+from prepare_features.refresh_sniper_labels_in_cache import (  # type: ignore
+    RefreshLabelsSettings,
+    run as run_labels_refresh,
+)
 
 
 def _env_str(name: str, default: str) -> str:
@@ -36,6 +40,7 @@ def main() -> None:
     total_days = 0
     mcap_min_usd = 100_000_000.0
     mcap_max_usd = 150_000_000_000.0
+    refresh_labels_before_train = True
 
     # Sem flag: sempre prewarm de OHLCV antes do treino.
     pre = run_ohlc_build(
@@ -55,6 +60,23 @@ def main() -> None:
         exit_ema_span=120,
         exit_ema_init_offset_pct=0.002,
     )
+    if bool(refresh_labels_before_train):
+        os.environ["SNIPER_ASSET_CLASS"] = "crypto"
+        ref = run_labels_refresh(
+            RefreshLabelsSettings(
+                contract=contract,
+                candle_sec=60,
+                mcap_min_usd=float(mcap_min_usd),
+                mcap_max_usd=float(mcap_max_usd),
+                max_symbols=int(max_symbols),
+                verbose=True,
+            )
+        )
+        print(
+            f"[train-wf-crypto] labels refresh: ok={ref.get('ok')} fail={ref.get('fail')} total={ref.get('total')} sec={ref.get('seconds')}",
+            flush=True,
+        )
+
     settings = TrainSniperWFSettings(
         asset_class="crypto",
         entry_metric_mode=metric_mode,

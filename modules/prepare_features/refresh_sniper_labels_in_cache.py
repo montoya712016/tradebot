@@ -225,6 +225,27 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
 
         # recalcula labels (somente sniper_*)
         df_lab = apply_trade_contract_labels(df[["close", "high", "low"]].copy(), contract=s.contract, candle_sec=int(s.candle_sec))
+        # remove residuos legados de short (pipeline atual long-only)
+        for c in (
+            "sniper_price_label_short",
+            "sniper_price_weight_short",
+            "sniper_price_weight_timing_short",
+            "sniper_price_profit_core_short",
+            "sniper_price_trend_short",
+            "sniper_price_mr_short",
+            "sniper_entry_weight_hybrid",
+        ):
+            if c in df.columns:
+                try:
+                    del df[c]
+                except Exception:
+                    pass
+        for c in list(df.columns):
+            if c.startswith("sniper_entry_weight_hybrid_"):
+                try:
+                    del df[c]
+                except Exception:
+                    pass
         cols = [
             "sniper_entry_label",
             "sniper_entry_weight",

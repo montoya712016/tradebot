@@ -41,18 +41,14 @@ FEATURE_PALETTE = [
 PRICE_LABEL_STYLES = {
     "sniper_price_label": {"color": "rgba(0,220,80,0.95)", "dash": "dash"},
     "sniper_price_label_long": {"color": "rgba(0,220,80,0.95)", "dash": "dash"},
-    "sniper_price_label_short": {"color": "rgba(220,40,40,0.95)", "dash": "dash"},
     "sniper_price_trend_long": {"color": "rgba(0,200,0,0.9)", "dash": "dash"},
-    "sniper_price_trend_short": {"color": "rgba(220,40,40,0.9)", "dash": "dash"},
     "sniper_price_mr_long": {"color": "rgba(0,230,255,0.95)", "dash": "dot"},
-    "sniper_price_mr_short": {"color": "rgba(255,140,0,0.95)", "dash": "dot"},
 }
 
 # Fixed palette for weight subplot (avoid hash-based colors).
 PRICE_WEIGHT_STYLES = {
     # final side weights
     "sniper_price_weight_long": {"color": "#22c55e"},   # green
-    "sniper_price_weight_short": {"color": "#ef4444"},  # red
     # context components
     "sniper_price_weight_eff": {"color": "#60a5fa"},    # blue
     "sniper_price_weight_adx": {"color": "#c084fc"},    # violet
@@ -60,7 +56,6 @@ PRICE_WEIGHT_STYLES = {
     # future-quality components
     "sniper_price_weight_future_eff": {"color": "#06b6d4"},  # cyan
     "sniper_price_weight_timing_long": {"color": "#86efac"}, # light green
-    "sniper_price_weight_timing_short": {"color": "#fca5a5"},# light red
 }
 
 try:
@@ -977,7 +972,7 @@ def plot_all(
                         name=col,
                         gap_threshold=gap_threshold,
                     )
-            for col in ("sniper_price_weight_long", "sniper_price_weight_short"):
+            for col in ("sniper_price_weight_long",):
                 if col in df.columns:
                     _add_line(
                         fig,
@@ -1034,9 +1029,21 @@ def plot_all(
         _plot_prefix("mom_short", ("slope_diff_",))
         _plot_prefix("wick_stats", ("wick_lower_", "wick_upper_", "wick_"))
         _plot_prefix("eff", ("eff_",))
-        _plot_prefix("entry_weights", ("sniper_entry_weight_",))
         if "entry_weights" in row_map:
-            for col in ("sniper_price_weight_long", "sniper_price_weight_short"):
+            for col in df.columns:
+                # Evita plotar alias sem sufixo de janela (ex.: sniper_entry_weight_hybrid),
+                # pois ele costuma duplicar exatamente a curva *_360m.
+                if col.startswith("sniper_entry_weight_") and col.endswith("m"):
+                    _add_line(
+                        fig,
+                        row=row_map["entry_weights"],
+                        x=x,
+                        y=_safe_series(df, col),
+                        name=col,
+                        gap_threshold=gap_threshold,
+                    )
+        if "entry_weights" in row_map:
+            for col in ("sniper_price_weight_long",):
                 if col in df.columns:
                     _add_line(
                         fig,

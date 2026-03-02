@@ -53,11 +53,15 @@ def _ensure_contract_labels(
     *,
     contract: TradeContract,
     candle_sec: int,
-    entry_label_col: str = "sniper_price_label_long",
+    entry_label_col: str = "sniper_entry_label",
+    entry_weight_col: str = "",
     exit_code_col: str = "",
 ) -> None:
-    # Novo contrato de labels: para dataset de entry basta a coluna de label solicitada.
-    if str(entry_label_col) not in df.columns:
+    # Se faltar label (ou weight solicitado), gera labels do contrato.
+    need_rebuild = str(entry_label_col) not in df.columns
+    if str(entry_weight_col):
+        need_rebuild = need_rebuild or (str(entry_weight_col) not in df.columns)
+    if need_rebuild:
         apply_trade_contract_labels(df, contract=contract, candle_sec=candle_sec)
 
 
@@ -66,7 +70,8 @@ def build_sniper_datasets(
     *,
     contract: TradeContract | None = None,
     candle_sec: int | None = None,
-    entry_label_col: str = "sniper_price_label_long",
+    entry_label_col: str = "sniper_entry_label",
+    entry_weight_col: str = "",
     exit_code_col: str = "",
     max_add_starts: int = 20_000,
     max_exit_starts: int = 8_000,
@@ -79,7 +84,7 @@ def build_sniper_datasets(
 ) -> SniperDataset:
     """
     Constrói quatro dataframes:
-        - entry: todas as barras com o label de entry informado (ex.: sniper_price_label_long/short)
+        - entry: todas as barras com o label de entry informado (ex.: sniper_entry_label ou sniper_entry_label_360m)
         - add: vazio (adds removidos)
         - danger: vazio (danger removido)
         - exit: vazio (exit model removido)
@@ -92,6 +97,7 @@ def build_sniper_datasets(
         contract=contract,
         candle_sec=candle_sec,
         entry_label_col=str(entry_label_col),
+        entry_weight_col=str(entry_weight_col),
         exit_code_col=str(exit_code_col),
     )
 

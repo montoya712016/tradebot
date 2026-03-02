@@ -704,13 +704,67 @@ def apply_trade_contract_labels(
     contract: TradeContract | None = None,
     candle_sec: int | None = None,
 ) -> pd.DataFrame:
-    """Gera labels/weights simetricos (long/short) com foco em lucro futuro."""
+    """Gera labels de contrato (legacy) + labels/weights de qualidade (novo)."""
     if contract is None:
         contract = DEFAULT_TRADE_CONTRACT
 
     candle_seconds = candle_sec or contract.timeframe_sec
     candle_seconds = max(1, int(candle_seconds))
     close = df["close"].to_numpy(np.float64, copy=False)
+    low = df["low"].to_numpy(np.float64, copy=False) if "low" in df.columns else close
+
+    # Legacy contract-based entry labels (funcionavam melhor no pipeline antigo).
+    windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
+    profits = list(getattr(contract, "entry_label_min_profit_pcts", []) or [])
+    if len(windows) < 1:
+        windows = [360]
+    if len(profits) < 1:
+        profits = [0.02]
+    if len(windows) != len(profits):
+        raise ValueError("entry_label_windows_minutes e entry_label_min_profit_pcts devem ter o mesmo tamanho (>=1)")
+
+    gap_next = None
+    forbid_gap = bool(getattr(contract, "forbid_exit_on_gap", False))
+    gap_hours = float(getattr(contract, "gap_hours_forbidden", 0.0) or 0.0)
+    if forbid_gap and gap_hours > 0 and isinstance(df.index, pd.DatetimeIndex):
+        idx = pd.to_datetime(df.index)
+        gth = pd.Timedelta(hours=gap_hours)
+        n = len(idx)
+        gap_next = np.full(n, -1, dtype=np.int32)
+        next_gap = -1
+        for i in range(n - 1, 0, -1):
+            if idx[i] - idx[i - 1] >= gth:
+                next_gap = i
+            gap_next[i - 1] = next_gap
+
+    first_suffix = ""
+    for w_min, pmin in zip(windows, profits):
+        hb = int(max(1, round((float(w_min) * 60.0) / float(candle_seconds))))
+        entry_label, mae_pct, exit_code, exit_wait, weight = _simulate_entry_contract_numba(
+            close,
+            low,
+            0,
+            float(pmin),
+            int(hb),
+            float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
+            float(getattr(contract, "entry_label_weight_alpha", 1.0) or 1.0),
+        )
+        if gap_next is not None:
+            exit_bar = np.arange(exit_wait.size, dtype=np.int64) + exit_wait.astype(np.int64)
+            hit_gap = (gap_next >= 0) & (gap_next <= exit_bar)
+            if hit_gap.any():
+                entry_label = entry_label.copy()
+                exit_code = exit_code.copy()
+                entry_label[hit_gap] = 0
+                exit_code[hit_gap] = -4
+        suffix = f"{int(w_min)}m"
+        if not first_suffix:
+            first_suffix = suffix
+        df[f"sniper_entry_label_{suffix}"] = pd.Series(entry_label.astype(np.uint8), index=df.index)
+        df[f"sniper_mae_pct_{suffix}"] = pd.Series(mae_pct.astype(np.float32), index=df.index)
+        df[f"sniper_exit_code_{suffix}"] = pd.Series(exit_code.astype(np.int8), index=df.index)
+        df[f"sniper_exit_wait_bars_{suffix}"] = pd.Series(exit_wait.astype(np.int32), index=df.index)
+        df[f"sniper_entry_weight_{suffix}"] = pd.Series(weight.astype(np.float32), index=df.index)
 
     # Future evaluation windows (minutes):
     # - avg_early: [future_avg_start_min .. future_avg_split_min]
@@ -773,28 +827,6 @@ def apply_trade_contract_labels(
         return out.astype(np.float32, copy=False)
 
     w_adx = _avg_scores(["adx_15", "adx_30", "adx_120"], 12.0, 35.0)
-    atr_floor = _avg_scores(["atr_pct_30", "atr_pct_60"], 0.03, 0.35)
-    if "atr_pct_5760" in df.columns and ("atr_pct_30" in df.columns or "atr_pct_60" in df.columns):
-        a_parts = []
-        for c in ("atr_pct_30", "atr_pct_60"):
-            if c in df.columns:
-                a_parts.append(pd.to_numeric(df[c], errors="coerce").to_numpy(np.float64, copy=False))
-        if a_parts:
-            mat_a = np.vstack(a_parts).astype(np.float64, copy=False)
-            valid_a = np.isfinite(mat_a)
-            den_a = valid_a.sum(axis=0).astype(np.float64)
-            num_a = np.where(valid_a, mat_a, 0.0).sum(axis=0)
-            a_short = np.divide(num_a, np.where(den_a > 0, den_a, 1.0))
-            a_short[den_a <= 0] = 0.0
-        else:
-            a_short = np.zeros(len(df), dtype=np.float64)
-        a_long = pd.to_numeric(df["atr_pct_5760"], errors="coerce").to_numpy(np.float64, copy=False)
-        atr_ratio = np.divide(a_short, np.where(np.abs(a_long) > 1e-9, a_long, np.nan))
-        atr_ratio = np.clip((atr_ratio - 0.6) / 1.4, 0.0, 1.0)
-        atr_ratio[~np.isfinite(atr_ratio)] = 0.0
-        w_atr = (0.55 * atr_floor.astype(np.float64) + 0.45 * atr_ratio).astype(np.float32, copy=False)
-    else:
-        w_atr = atr_floor.astype(np.float32, copy=False)
 
     fut_eff_score = np.clip((fut_eff.astype(np.float64) - future_eff_min) / max(1e-9, (0.50 - future_eff_min)), 0.0, 1.0)
     fut_eff_score[~np.isfinite(fut_eff_score)] = 0.0
@@ -806,36 +838,37 @@ def apply_trade_contract_labels(
     m_full_short_score = np.clip(((-mean_full.astype(np.float64)) - future_mean_profit_thr) / max(1e-9, future_mean_profit_thr), 0.0, 1.0)
     timing_short = np.clip(0.60 * m_early_short_score + 0.40 * m_full_short_score, 0.0, 1.0)
 
-    # Weight design (prioridade):
-    # 1) excedente de retorno medio futuro (timing_*), 2) future_eff, 3) ADX (suporte), 4) ATR (fraco).
-    # eff passado fica como feature/contexto; no weight usamos apenas future_eff.
+    # Weight design (long-only):
+    # - pontos TRUE: premiar alta eficiencia + alto retorno futuro + ADX alto
+    # - pontos FALSE: premiar baixa eficiencia + baixo retorno futuro + ADX baixo
+    # Escala alvo: 1x .. 7x
     adx_support = np.clip(w_adx.astype(np.float64), 0.0, 1.0)
-    atr_support = np.clip(w_atr.astype(np.float64), 0.0, 1.0)
-    context_support = np.clip(0.85 * adx_support + 0.15 * atr_support, 0.0, 1.0)
+    adx_low = np.clip(1.0 - adx_support, 0.0, 1.0)
     bad_future_eff = np.clip(1.0 - fut_eff_score, 0.0, 1.0)
 
-    future_q_long = np.clip(0.65 * timing_long + 0.25 * fut_eff_score + 0.10 * context_support, 0.0, 1.0)
-    future_q_short = np.clip(0.65 * timing_short + 0.25 * fut_eff_score + 0.10 * context_support, 0.0, 1.0)
+    # retorno "bom" e "ruim" (baixo) ao redor do threshold
+    ret_good = np.clip(0.60 * m_early_long_score + 0.40 * m_full_long_score, 0.0, 1.0)
+    ret_bad = np.clip(
+        0.60 * np.clip((future_mean_profit_thr - mean_early.astype(np.float64)) / max(1e-9, future_mean_profit_thr), 0.0, 1.0)
+        + 0.40 * np.clip((future_mean_profit_thr - mean_full.astype(np.float64)) / max(1e-9, future_mean_profit_thr), 0.0, 1.0),
+        0.0,
+        1.0,
+    )
 
-    # "Hard negative" signal for each side:
-    # - for long, a very strong short-like outcome should also receive high weight
-    # - for short, a very strong long-like outcome should also receive high weight
-    hard_neg_q_long = np.clip(0.65 * timing_short + 0.25 * bad_future_eff + 0.10 * context_support, 0.0, 1.0)
-    hard_neg_q_short = np.clip(0.65 * timing_long + 0.25 * bad_future_eff + 0.10 * context_support, 0.0, 1.0)
+    # score de dificuldade/importancia para cada classe
+    score_pos = np.clip(0.40 * fut_eff_score + 0.35 * ret_good + 0.25 * adx_support, 0.0, 1.0)
+    score_neg = np.clip(0.40 * bad_future_eff + 0.35 * ret_bad + 0.25 * adx_low, 0.0, 1.0)
 
-    # Base weight is small; boost strongly for excellent positives, and moderately for very informative negatives.
-    base_w = 0.06 + 0.10 * context_support
-    pos_bonus_long = labels_long.astype(np.float64) * (0.35 + 2.05 * np.power(future_q_long, 1.35))
-    pos_bonus_short = labels_short.astype(np.float64) * (0.35 + 2.05 * np.power(future_q_short, 1.35))
+    # escala 1x..7x com forte seletividade (topos raros)
+    def _sharp01(x: np.ndarray, start: float = 0.55, power: float = 3.2) -> np.ndarray:
+        z = np.clip((x - float(start)) / max(1e-9, (1.0 - float(start))), 0.0, 1.0)
+        return np.power(z, float(power))
 
-    # Only the excess hard-negative strength above a floor gets extra weight (avoids inflating all negatives).
-    hard_neg_excess_long = np.clip((hard_neg_q_long - 0.20) / 0.80, 0.0, 1.0)
-    hard_neg_excess_short = np.clip((hard_neg_q_short - 0.20) / 0.80, 0.0, 1.0)
-    neg_bonus_long = (1.0 - labels_long.astype(np.float64)) * (0.10 + 0.95 * np.power(hard_neg_excess_long, 1.20))
-    neg_bonus_short = (1.0 - labels_short.astype(np.float64)) * (0.10 + 0.95 * np.power(hard_neg_excess_short, 1.20))
-
-    w_long = np.clip(base_w + pos_bonus_long + neg_bonus_long, 0.05, 3.00).astype(np.float32)
-    w_short = np.clip(base_w + pos_bonus_short + neg_bonus_short, 0.05, 3.00).astype(np.float32)
+    w_pos = 1.0 + 6.0 * _sharp01(score_pos, start=0.58, power=3.0)
+    w_neg = 1.0 + 6.0 * _sharp01(score_neg, start=0.58, power=3.0)
+    lbl_long_f = labels_long.astype(np.float64)
+    w_long = np.where(lbl_long_f >= 0.5, w_pos, w_neg)
+    w_long = np.clip(w_long, 1.0, 7.0).astype(np.float32, copy=False)
 
     for c in (
         "sniper_price_label",
@@ -845,6 +878,10 @@ def apply_trade_contract_labels(
         "sniper_price_weight_atr",
         "sniper_price_weight_future_eff",
         "sniper_price_weight_timing",
+        "sniper_price_label_short",
+        "sniper_price_weight_short",
+        "sniper_price_weight_timing_short",
+        "sniper_price_profit_core_short",
         "sniper_price_profit_core",
         "sniper_price_trend_long",
         "sniper_price_trend_short",
@@ -858,9 +895,7 @@ def apply_trade_contract_labels(
                 pass
 
     df["sniper_price_label_long"] = pd.Series(labels_long.astype(np.uint8), index=df.index)
-    df["sniper_price_label_short"] = pd.Series(labels_short.astype(np.uint8), index=df.index)
     df["sniper_price_weight_long"] = pd.Series(w_long, index=df.index)
-    df["sniper_price_weight_short"] = pd.Series(w_short, index=df.index)
     # Keep only future-eff quality component in weight diagnostics (past eff belongs to features).
     if "sniper_price_weight_eff" in df.columns:
         try:
@@ -868,12 +903,53 @@ def apply_trade_contract_labels(
         except Exception:
             pass
     df["sniper_price_weight_adx"] = pd.Series(w_adx.astype(np.float32), index=df.index)
-    df["sniper_price_weight_atr"] = pd.Series(w_atr.astype(np.float32), index=df.index)
     df["sniper_price_weight_future_eff"] = pd.Series(fut_eff_score.astype(np.float32), index=df.index)
     df["sniper_price_weight_timing_long"] = pd.Series(timing_long.astype(np.float32), index=df.index)
-    df["sniper_price_weight_timing_short"] = pd.Series(timing_short.astype(np.float32), index=df.index)
     df["sniper_price_profit_core_long"] = pd.Series(profit_core_long.astype(np.uint8), index=df.index)
-    df["sniper_price_profit_core_short"] = pd.Series(profit_core_short.astype(np.uint8), index=df.index)
+
+    # Peso final de treino (1x..7x), direto (sem coluna intermediaria "hybrid"):
+    # combina evidência de qualidade (score_pos/score_neg) com o peso legado do contrato.
+    for w_min in windows:
+        suffix = f"{int(w_min)}m"
+        base_col = f"sniper_entry_weight_{suffix}"
+        if base_col not in df.columns:
+            continue
+        base = pd.to_numeric(df[base_col], errors="coerce").to_numpy(np.float32, copy=False)
+        base_norm = np.clip((base.astype(np.float64) - 0.10) / 0.90, 0.0, 1.0)
+        quality = np.where(lbl_long_f >= 0.5, score_pos, score_neg)
+        mix = np.clip(0.80 * quality + 0.20 * base_norm, 0.0, 1.0)
+        mix_sharp = _sharp01(mix, start=0.60, power=3.2)
+        w_final = (1.0 + 6.0 * mix_sharp).astype(np.float32, copy=False)
+        w_final = np.clip(w_final, 1.0, 7.0).astype(np.float32, copy=False)
+        df[base_col] = pd.Series(w_final, index=df.index)
+
+    # Compatibilidade legado: primeira janela em colunas canônicas.
+    if not first_suffix:
+        first_suffix = f"{int(windows[0])}m"
+    for c in (
+        "sniper_entry_label",
+        "sniper_mae_pct",
+        "sniper_exit_code",
+        "sniper_exit_wait_bars",
+        "sniper_entry_weight",
+        "sniper_entry_weight_hybrid",
+    ):
+        if c in df.columns:
+            try:
+                del df[c]
+            except Exception:
+                pass
+    for c in list(df.columns):
+        if c.startswith("sniper_entry_weight_hybrid_"):
+            try:
+                del df[c]
+            except Exception:
+                pass
+    df["sniper_entry_label"] = df[f"sniper_entry_label_{first_suffix}"].astype(np.uint8)
+    df["sniper_mae_pct"] = df[f"sniper_mae_pct_{first_suffix}"].astype(np.float32)
+    df["sniper_exit_code"] = df[f"sniper_exit_code_{first_suffix}"].astype(np.int8)
+    df["sniper_exit_wait_bars"] = df[f"sniper_exit_wait_bars_{first_suffix}"].astype(np.int32)
+    df["sniper_entry_weight"] = df[f"sniper_entry_weight_{first_suffix}"].astype(np.float32)
 
     def _diag_dict(diag: np.ndarray) -> dict:
         return {
@@ -894,7 +970,6 @@ def apply_trade_contract_labels(
     try:
         df.attrs["price_label_diag"] = {
             "single_long": _diag_dict(diag_long),
-            "single_short": _diag_dict(diag_short),
             "params": {
                 "future_window_end_min": int(future_window_end_min),
                 "future_avg_start_min": int(future_avg_start_min),

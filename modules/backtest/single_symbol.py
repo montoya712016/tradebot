@@ -278,9 +278,13 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     eq_end = float(res.equity_curve[-1]) if len(res.equity_curve) else 1.0
     ret_total = eq_end - 1.0
     dt = time.perf_counter() - t0
+    win_rate = float(getattr(res, "win_rate", 0.0) or 0.0)
+    pf = float(getattr(res, "profit_factor", 0.0) or 0.0)
+    pf_s = ("inf" if np.isinf(pf) else f"{pf:.2f}")
     print(
         f"SINGLE sym={symbol} days={settings.days} trades={len(res.trades)} "
-        f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={float(res.max_dd):.2%} sec={dt:.2f}"
+        f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={float(res.max_dd):.2%} "
+        f"win={win_rate:.2%} pf={pf_s} sec={dt:.2f}"
     )
 
     ema_exit = np.full(len(df), np.nan, dtype=np.float32)

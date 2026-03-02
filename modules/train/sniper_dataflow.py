@@ -169,22 +169,17 @@ def _list_feature_columns(df: pd.DataFrame) -> List[str]:
 
 
 def _entry_label_specs(contract: TradeContract) -> list[dict[str, str]]:
-    # Novo contrato: labels/weights explicitamente por lado (long/short), independentes do legacy sniper_entry_*.
-    # Mantemos compatibilidade no restante do pipeline via alias entry_mid -> entry_long.
+    # Label principal (legacy) com weight final direto.
+    windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
+    w = int(windows[0]) if windows else 360
+    suffix = f"{w}m"
     return [
         {
             "name": "long",
-            "label_col": "sniper_price_label_long",
-            "weight_col": "sniper_price_weight_long",
+            "label_col": f"sniper_entry_label_{suffix}",
+            "weight_col": f"sniper_entry_weight_{suffix}",
             "exit_code_col": "",
-            "suffix": "long",
-        },
-        {
-            "name": "short",
-            "label_col": "sniper_price_label_short",
-            "weight_col": "sniper_price_weight_short",
-            "exit_code_col": "",
-            "suffix": "short",
+            "suffix": suffix,
         },
     ]
 
@@ -857,6 +852,7 @@ def _prepare_symbol(
             df_pf,
             contract=contract,
             entry_label_col=str(spec["label_col"]),
+            entry_weight_col=str(spec.get("weight_col") or ""),
             exit_code_col=str(spec["exit_code_col"]),
             seed=int(seed),
         )
@@ -1085,6 +1081,7 @@ def prepare_sniper_dataset(
                     df_pf,
                     contract=contract,
                     entry_label_col=str(spec["label_col"]),
+                    entry_weight_col=str(spec.get("weight_col") or ""),
                     exit_code_col=str(spec["exit_code_col"]),
                     seed=int(seed),
                 )
@@ -1426,6 +1423,7 @@ def prepare_sniper_dataset_from_cache(
                 df,
                 contract=contract,
                 entry_label_col=str(spec["label_col"]),
+                entry_weight_col=str(spec.get("weight_col") or ""),
                 exit_code_col=str(spec["exit_code_col"]),
                 seed=int(seed),
             )

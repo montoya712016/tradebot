@@ -24,7 +24,7 @@ class TradeContract:
     
     # Janelas de label para entrada (em minutos)
     entry_label_windows_minutes: Tuple[int, ...] = (360,)
-    entry_label_min_profit_pcts: Tuple[float, ...] = (0.02,)
+    entry_label_min_profit_pcts: Tuple[float, ...] = (0.032,)
     entry_label_weight_alpha: float = 0.01
     
     # Parâmetros de saída baseada em EMA

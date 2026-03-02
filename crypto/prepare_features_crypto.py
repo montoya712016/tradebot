@@ -287,9 +287,13 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         out_path=out_path,
         open_browser=True,
     )
+    print(f"[crypto] plot salvo: {out_path}", flush=True)
 
 
 def main() -> None:
+    # Habilita resumo de performance das features neste wrapper (rows/cols/tempo total + tempos por feature).
+    os.environ.setdefault("PF_LOG_SUMMARY", "1")
+
     _apply_crypto_windows()
     sym = 'XLMUSDT'
     days = 90
@@ -326,11 +330,12 @@ def main() -> None:
 
     print(f"[crypto] símbolo={sym} dias={days} features_on={feats_on}", flush=True)
 
-    # Calcula todas as features para habilitar os controles, mas inicia os painéis ocultos.
+    # Calcula todas as features para habilitar os controles no Feature Studio.
     flags_all = dict(flags)
     for k in flags_all:
         if k != "plot_candles":
             flags_all[k] = True
+    flags_all["feature_timings"] = True
 
     df = run_from_flags_dict(
         df_ohlc,
@@ -344,99 +349,46 @@ def main() -> None:
     )
     _plot_days_env = os.getenv("PF_CRYPTO_PLOT_DAYS", "").strip()
     plot_days = int(_plot_days_env or str(days))
-    print(f"[crypto] plot_days={plot_days} (PF_CRYPTO_PLOT_DAYS={'set' if _plot_days_env else 'default->days'})", flush=True)
+    print(f"[crypto] plot_days={plot_days}", flush=True)
     df_plot = df
     if plot_days > 0 and isinstance(df.index, pd.DatetimeIndex):
         cutoff = df.index.max() - pd.Timedelta(days=plot_days)
         df_plot = df.loc[df.index >= cutoff]
     try:
-        if "sniper_price_label_long" in df_plot.columns or "sniper_price_label_short" in df_plot.columns:
-            n_long = int(pd.to_numeric(df_plot.get("sniper_price_label_long"), errors="coerce").fillna(0).sum()) if "sniper_price_label_long" in df_plot.columns else 0
-            n_short = int(pd.to_numeric(df_plot.get("sniper_price_label_short"), errors="coerce").fillna(0).sum()) if "sniper_price_label_short" in df_plot.columns else 0
-            print(f"[crypto] label_count(plot): long={n_long} short={n_short}", flush=True)
-            for side in ("long", "short"):
-                wcol = f"sniper_price_weight_{side}"
-                if wcol in df_plot.columns:
-                    w = pd.to_numeric(df_plot[wcol], errors="coerce")
-                    print(
-                        f"[crypto] weight_stats(plot,{side}): mean={float(w.mean()):.3f} p90={float(w.quantile(0.9)):.3f} max={float(w.max()):.3f}",
-                        flush=True,
-                    )
-        elif "sniper_price_label" in df_plot.columns:
-            n1 = int(pd.to_numeric(df_plot["sniper_price_label"], errors="coerce").fillna(0).sum())
-            print(f"[crypto] label_count(plot): {n1}", flush=True)
-            if "sniper_price_weight" in df_plot.columns:
-                w = pd.to_numeric(df_plot["sniper_price_weight"], errors="coerce")
+        n_entry = int(pd.to_numeric(df_plot.get("sniper_entry_label"), errors="coerce").fillna(0).sum()) if "sniper_entry_label" in df_plot.columns else 0
+        print(f"[crypto] entry_count(plot,long): {n_entry}", flush=True)
+        for wcol in (
+            "sniper_entry_weight_360m",
+            "sniper_entry_weight",
+        ):
+            if wcol in df_plot.columns:
+                w = pd.to_numeric(df_plot[wcol], errors="coerce")
                 print(
-                    f"[crypto] weight_stats(plot): mean={float(w.mean()):.3f} p90={float(w.quantile(0.9)):.3f} max={float(w.max()):.3f}",
+                    f"[crypto] {wcol}(plot): mean={float(w.mean()):.3f} p90={float(w.quantile(0.9)):.3f} max={float(w.max()):.3f}",
                     flush=True,
                 )
-        else:
-            lbl_cols = [
-                "sniper_price_trend_long",
-                "sniper_price_trend_short",
-                "sniper_price_mr_long",
-                "sniper_price_mr_short",
-            ]
-            diag = {c: int(df_plot[c].sum()) for c in lbl_cols if c in df_plot.columns}
-            if diag:
-                print(f"[crypto] label_counts(plot): {diag}", flush=True)
+                break
     except Exception:
         pass
     try:
-        diag_full = dict(df.attrs.get("price_label_diag") or {})
-        if diag_full:
-            params = diag_full.pop("params", {})
-            if params:
-                print(f"[crypto] label_params: {params}", flush=True)
-            if "single" in diag_full:
-                print(f"[crypto] label_diag[single]: {diag_full['single']}", flush=True)
-                try:
-                    d = dict(diag_full["single"])
-                    profit_core = int(d.get("profit_core", 0))
-                    if profit_core > 0:
-                        cut_rates = {
-                            "profit_cut_future_eff": round(100.0 * int(d.get("profit_cut_future_eff", 0)) / profit_core, 2),
-                            "profit_cut_hit_fast": round(100.0 * int(d.get("profit_cut_hit_fast", 0)) / profit_core, 2),
-                            "profit_cut_early_ok": round(100.0 * int(d.get("profit_cut_early_ok", 0)) / profit_core, 2),
-                            "profit_cut_any": round(100.0 * int(d.get("profit_cut_any", 0)) / profit_core, 2),
-                            "profit_core_n": profit_core,
-                        }
-                        print(f"[crypto] label_profit_cuts[single]: {cut_rates}", flush=True)
-                except Exception:
-                    pass
-            elif "single_long" in diag_full or "single_short" in diag_full:
-                for side in ("single_long", "single_short"):
-                    if side not in diag_full:
-                        continue
-                    print(f"[crypto] label_diag[{side}]: {diag_full[side]}", flush=True)
-                    try:
-                        d = dict(diag_full[side])
-                        profit_core = int(d.get("profit_core", 0))
-                        if profit_core > 0:
-                            cut_rates = {
-                                "profit_cut_future_eff": round(100.0 * int(d.get("profit_cut_future_eff", 0)) / profit_core, 2),
-                                "profit_cut_mean_pair": round(100.0 * int(d.get("profit_cut_mean_pair", d.get("profit_cut_hit_fast", 0))) / profit_core, 2),
-                                "profit_cut_early_ok": round(100.0 * int(d.get("profit_cut_early_ok", 0)) / profit_core, 2),
-                                "profit_cut_any": round(100.0 * int(d.get("profit_cut_any", 0)) / profit_core, 2),
-                                "profit_core_n": profit_core,
-                            }
-                            print(f"[crypto] label_profit_cuts[{side}]: {cut_rates}", flush=True)
-                    except Exception:
-                        pass
-            else:
-                for side in ("trend_long", "trend_short", "mr_long", "mr_short"):
-                    if side in diag_full:
-                        print(f"[crypto] label_diag[{side}]: {diag_full[side]}", flush=True)
+        verbose_diag = os.getenv("PF_CRYPTO_VERBOSE_LABEL_DIAG", "").strip().lower() in {"1", "true", "yes", "on"}
+        if verbose_diag:
+            diag_full = dict(df.attrs.get("price_label_diag") or {})
+            if diag_full:
+                params = diag_full.get("params", {})
+                if params:
+                    print(f"[crypto] label_params: {params}", flush=True)
+                if "single_long" in diag_full:
+                    print(f"[crypto] label_diag[single_long]: {diag_full['single_long']}", flush=True)
     except Exception:
         pass
     interactive = os.getenv("PF_CRYPTO_PLOT_INTERACTIVE", "1").strip().lower() not in {"0", "false", "no", "off"}
     if interactive:
         _plot_interactive_features(df_plot.copy(), flags, int(candle_sec), title=f"{sym} Feature Studio")
     else:
-        plot_all(
+        fig = plot_all(
             df_plot,
-            flags,
+            flags_all,
             candle_sec=int(candle_sec),
             plot_candles=True,
             show=True,
@@ -444,6 +396,11 @@ def main() -> None:
             show_price_ema=True,
             price_ema_span=30,
         )
+        try:
+            if fig is None:
+                print("[crypto][warn] plot_all retornou None", flush=True)
+        except Exception:
+            pass
     try:
         print(f"OK: rows={len(df):,} | cols={len(df.columns):,}".replace(",", "."), flush=True)
     except Exception:
