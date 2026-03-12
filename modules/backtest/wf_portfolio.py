@@ -345,7 +345,7 @@ def _prepare_symbol_frame_for_window(
     if df.empty:
         return df
     try:
-        pe_map, _pdg, _pex, _used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+        pe_map, _pdg, pex, _used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
     except RuntimeError:
         return df.iloc[0:0].copy()
     df = df.copy()
@@ -354,9 +354,10 @@ def _prepare_symbol_frame_for_window(
     pe_mid = np.asarray(select_entry_mid(pe_map), dtype=np.float32)
     for _name, w in _entry_specs_from_contract(contract):
         df[f"__p_entry_{int(w)}m"] = pe_mid
+    df["__p_exit_span"] = np.asarray(pex, dtype=np.float32)
     df["__period_id"] = np.asarray(pid, dtype=np.int16)
     # MantÃ©m somente OHLCV + colunas nÃ£o-cycle do Exit + colunas internas
-    keep: set[str] = {"open", "high", "low", "close", "volume", "__period_id"}
+    keep: set[str] = {"open", "high", "low", "close", "volume", "__period_id", "__p_exit_span"}
     for _, w in _entry_specs_from_contract(contract):
         keep.add(f"__p_entry_{int(w)}m")
     for pm in periods:
@@ -424,7 +425,7 @@ def _mk_progress_cb(step_start: pd.Timestamp, step_end: pd.Timestamp) -> Callabl
 
 
 def main() -> None:
-    step_ds_format = "wf_v2"
+    step_ds_format = "wf_v3"
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", type=str, required=False, default=None)
     ap.add_argument("--symbols", type=str, default="", help="CSV explicito de simbolos. Se vazio, usa universo do treino (meta do run_dir).")
@@ -958,11 +959,16 @@ def main() -> None:
                 pe = np.zeros(int(len(df)), dtype=np.float32)
             n = int(len(df))
             pdg = np.zeros(n, dtype=np.float32)
+            pex = (
+                df["__p_exit_span"].to_numpy(np.float32, copy=False)
+                if "__p_exit_span" in df.columns
+                else np.full(n, np.nan, dtype=np.float32)
+            )
             sym_data[sym] = SymbolData(
                 df=df,
                 p_entry=pe,
                 p_danger=pdg,
-                p_exit=np.full(n, np.nan, dtype=np.float32),
+                p_exit=pex,
                 tau_entry=float(tau_e),
                 tau_add=float(tau_add),
                 tau_danger=1.0,
@@ -1389,9 +1395,14 @@ def main() -> None:
                         try:
                             pe = dfh[f"__p_entry_{mid_w}m"].to_numpy(np.float32, copy=False)
                             pid = dfh["__period_id"].to_numpy(np.int16, copy=False)
+                            pex = (
+                                dfh["__p_exit_span"].to_numpy(np.float32, copy=False)
+                                if "__p_exit_span" in dfh.columns
+                                else np.full(len(dfh), np.nan, dtype=np.float32)
+                            )
                         except Exception:
                             continue
-                        base_frames[str(sym).upper()] = (dfh, pe, pid)
+                        base_frames[str(sym).upper()] = (dfh, pe, pid, pex)
 
                     if base_frames:
                         # grid de tau_entry
@@ -1411,13 +1422,13 @@ def main() -> None:
                             ta = float(min(0.99, max(0.01, te * 1.10)))
 
                             sym_data_opt: dict[str, SymbolData] = {}
-                            for sym, (dfh, pe, pid) in base_frames.items():
+                            for sym, (dfh, pe, pid, pex) in base_frames.items():
                                 n = int(len(dfh))
                                 sym_data_opt[sym] = SymbolData(
                                     df=dfh,
                                     p_entry=pe,
                                     p_danger=np.zeros(n, dtype=np.float32),
-                                    p_exit=np.full(n, np.nan, dtype=np.float32),
+                                    p_exit=pex,
                                     tau_entry=float(te),
                                     tau_add=float(ta),
                                     tau_danger=1.0,

@@ -95,7 +95,7 @@ class SymbolData:
     df: pd.DataFrame  # precisa ter index + close/high/low
     p_entry: np.ndarray
     p_danger: np.ndarray
-    # p_exit unused (mantido por compatibilidade).
+    # p_exit = span EMA previsto (em barras) por timestamp.
     p_exit: np.ndarray
     # thresholds (podem ser overrides globais na simulação)
     tau_entry: float
@@ -372,10 +372,13 @@ def _simulate_one_trade(
         if exit_ema_span_override is not None
         else exit_ema_span_from_window(contract, int(candle_sec))
     )
-    use_ema_exit = ema_span > 0
-    ema_alpha = 2.0 / float(ema_span + 1) if use_ema_exit else 0.0
+    span_state = float(max(1, ema_span)) if ema_span > 0 else 0.0
+    ema_alpha = 2.0 / float(span_state + 1.0) if span_state > 0.0 else 0.0
     ema_offset = float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
-    ema = float(entry_price) * (1.0 - ema_offset) if use_ema_exit else 0.0
+    ema = float(entry_price) * (1.0 - ema_offset) if span_state > 0.0 else 0.0
+    span_smooth = 0.85
+    span_min = 2.0
+    span_max = float(max(2400, int(max(1, ema_span)) * 6))
     exit_streak = 0
     for j in range(entry_i + 1, j_limit + 1):
         px = float(close[j])
@@ -384,7 +387,22 @@ def _simulate_one_trade(
         hi = float(high[j]) if np.isfinite(high[j]) else px
         lo = float(low[j]) if np.isfinite(low[j]) else px
         time_in_trade = int(j - entry_i)
-        if use_ema_exit:
+        if span_state > 0.0:
+            try:
+                pred_span = float(sd.p_exit[j]) if (sd.p_exit is not None and j < len(sd.p_exit)) else np.nan
+            except Exception:
+                pred_span = np.nan
+            if np.isfinite(pred_span) and pred_span > 1.0:
+                if pred_span < span_min:
+                    pred_span = span_min
+                if pred_span > span_max:
+                    pred_span = span_max
+                span_state = float((span_smooth * span_state) + ((1.0 - span_smooth) * pred_span))
+                if span_state < span_min:
+                    span_state = span_min
+                if span_state > span_max:
+                    span_state = span_max
+                ema_alpha = 2.0 / float(span_state + 1.0)
             ema = ema + (ema_alpha * (px - ema))
             if px < ema:
                 exit_streak += 1
@@ -496,7 +514,10 @@ def simulate_portfolio(
             best_win = None
             if sd.entry_windows_minutes is not None and len(sd.entry_windows_minutes) > 0:
                 best_win = sd.entry_windows_minutes[0]
-            ema_span = int(max(1, round((float(best_win or 0.0) * 60.0) / float(max(1, candle_sec))))) if best_win else 0
+            if sd.p_exit is not None and i < len(sd.p_exit) and np.isfinite(sd.p_exit[i]) and float(sd.p_exit[i]) > 1.0:
+                ema_span = int(max(2, round(float(sd.p_exit[i]))))
+            else:
+                ema_span = int(max(1, round((float(best_win or 0.0) * 60.0) / float(max(1, candle_sec))))) if best_win else 0
 
             if pe >= float(sd.tau_entry):
                 sc = _rank_score(pe, 0.0, cfg.rank_mode)

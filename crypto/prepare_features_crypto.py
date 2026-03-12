@@ -7,6 +7,8 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import os
+from time import perf_counter
+import numpy as np
 import pandas as pd
 
 
@@ -34,13 +36,11 @@ from modules.prepare_features.plotting import plot_all
 from modules.prepare_features.feature_studio import render_feature_studio
 from crypto.trade_contract import DEFAULT_TRADE_CONTRACT as CRYPTO_CONTRACT
 from modules.prepare_features.prepare_features import (
-    DEFAULT_SYMBOL,
-    DEFAULT_DAYS,
-    DEFAULT_REMOVE_TAIL_DAYS,
     DEFAULT_CANDLE_SEC,
     DEFAULT_U_THRESHOLD,
     DEFAULT_GREY_ZONE,
 )
+from modules.prepare_features import labels as lblmod
 
 
 # Exemplo pronto (compatível com o estilo antigo) — pode importar direto como FLAGS
@@ -91,6 +91,12 @@ CFG_CRYPTO_WINDOWS = {
     "CUM_LOGRET_MIN": (1440,),
     "EFF_MIN": (30, 60, 120, 240),
 }
+
+
+def _entry_only_mode() -> bool:
+    pf_entry_only = os.getenv("PF_ENTRY_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
+    train_exit_on = os.getenv("SNIPER_TRAIN_EXIT_MODEL", "1").strip().lower() in {"1", "true", "yes", "on"}
+    return bool(pf_entry_only or (not train_exit_on))
 
 
 def _parse_tuple_env(name: str) -> tuple[int, ...] | None:
@@ -177,15 +183,164 @@ def _build_panels_from_flags(flags: dict[str, bool]) -> list[str]:
         panels.append("eff")
     if flags.get("label"):
         panels.append("entry_weights")
+        panels.append("oracle_equity")
+        if not _entry_only_mode():
+            panels.append("exit_regression")
     return panels
 
 
+def _add_oracle_equity_for_labels(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "close" not in df.columns:
+        return df
+    if "sniper_oracle_equity" in df.columns:
+        return df
+    out = df.copy()
+    lbl_col = "sniper_entry_label" if "sniper_entry_label" in out.columns else ""
+    wait_col = "sniper_exit_wait_bars" if "sniper_exit_wait_bars" in out.columns else ""
+    if (not lbl_col) or (not wait_col):
+        suffixes = [str(int(w)) + "m" for w in (getattr(CRYPTO_CONTRACT, "entry_label_windows_minutes", []) or [])]
+        for sfx in suffixes:
+            lc = f"sniper_entry_label_{sfx}"
+            wc = f"sniper_exit_wait_bars_{sfx}"
+            if (not lbl_col) and (lc in out.columns):
+                lbl_col = lc
+            if (not wait_col) and (wc in out.columns):
+                wait_col = wc
+    if (not lbl_col) or (not wait_col):
+        return out
+
+    close = pd.to_numeric(out["close"], errors="coerce").to_numpy(np.float64, copy=False)
+    lbl = pd.to_numeric(out[lbl_col], errors="coerce").fillna(0).to_numpy(np.float64, copy=False)
+    wait = pd.to_numeric(out[wait_col], errors="coerce").fillna(0).to_numpy(np.float64, copy=False)
+    n = int(len(out))
+    eq = np.full(n, np.nan, dtype=np.float64)
+    in_pos = np.zeros(n, dtype=np.float32)
+    fees = float(getattr(CRYPTO_CONTRACT, "fee_pct_per_side", 0.0) or 0.0)
+    slip = float(getattr(CRYPTO_CONTRACT, "slippage_pct", 0.0) or 0.0)
+    cost_rt = 2.0 * (max(0.0, fees) + max(0.0, slip))
+
+    equity = 1.0
+    pos = False
+    entry_px = np.nan
+    exit_i = -1
+    for i in range(n):
+        if pos:
+            in_pos[i] = 1.0
+            if i >= exit_i:
+                px_exit = close[i]
+                if np.isfinite(entry_px) and entry_px > 0.0 and np.isfinite(px_exit) and px_exit > 0.0:
+                    r = (px_exit / entry_px) - 1.0 - cost_rt
+                    equity *= max(1e-9, 1.0 + float(r))
+                pos = False
+                entry_px = np.nan
+                exit_i = -1
+                in_pos[i] = 0.0
+        if (not pos) and (lbl[i] > 0.5):
+            px_entry = close[i]
+            if np.isfinite(px_entry) and px_entry > 0.0:
+                w = int(round(wait[i])) if np.isfinite(wait[i]) else 0
+                if w < 1:
+                    w = 1
+                pos = True
+                entry_px = float(px_entry)
+                exit_i = int(min(n - 1, i + w))
+                in_pos[i] = 1.0
+        eq[i] = equity
+
+    out["sniper_oracle_equity"] = pd.Series(eq.astype(np.float32), index=out.index)
+    out["sniper_oracle_in_pos"] = pd.Series(in_pos.astype(np.float32), index=out.index)
+    return out
+
+
+def _add_dense_exit_target_for_plot(df: pd.DataFrame, candle_sec: int) -> pd.DataFrame:
+    if df is None or df.empty or "close" not in df.columns:
+        return df
+    try:
+        windows = list(getattr(CRYPTO_CONTRACT, "entry_label_windows_minutes", []) or [])
+        w_min = int(windows[0]) if windows else 360
+        suffix = f"{w_min}m"
+        dense_col = f"sniper_exit_span_target_dense_{suffix}"
+        dense_q25_col = f"sniper_exit_span_q25_dense_{suffix}"
+        dense_q50_col = f"sniper_exit_span_q50_dense_{suffix}"
+        dense_q75_col = f"sniper_exit_span_q75_dense_{suffix}"
+        if dense_col in df.columns and dense_q25_col in df.columns and dense_q75_col in df.columns:
+            return df
+
+        candle_seconds = max(1, int(candle_sec))
+        close = df["close"].to_numpy(np.float64, copy=False)
+        low = df["low"].to_numpy(np.float64, copy=False) if "low" in df.columns else close
+        entry_all = np.ones(len(df), dtype=np.float32)
+
+        exit_span_grid_min = lblmod._env_int_list(
+            "PF_EXIT_SPAN_GRID_MIN",
+            [
+                15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240,
+                255, 270, 285, 300, 315, 330, 345, 360, 375, 390, 405, 420, 435, 450, 465, 480,
+                495, 510, 525, 540, 555, 570, 585, 600, 615, 630, 645, 660, 675, 690, 705, 720,
+            ],
+        )
+        exit_min_hold_min = int(lblmod._env_int("PF_EXIT_LABEL_MIN_HOLD_MIN", 5))
+        exit_confirm_bars = int(lblmod._env_int("PF_EXIT_LABEL_CONFIRM_BARS", 2))
+        exit_ret_scale = float(lblmod._env_float("PF_EXIT_LABEL_RET_SCALE", 0.03))
+        exit_edge_scale = float(lblmod._env_float("PF_EXIT_LABEL_EDGE_SCALE", 0.01))
+        exit_softmax_temp = float(lblmod._env_float("PF_EXIT_LABEL_SOFTMAX_TEMP", 0.0025))
+        exit_eff_blend = float(lblmod._env_float("PF_EXIT_LABEL_EFF_BLEND", 0.35))
+        exit_window_tol_rel = float(lblmod._env_float("PF_EXIT_LABEL_WINDOW_TOL_REL", 0.25))
+        exit_window_tol_abs = float(lblmod._env_float("PF_EXIT_LABEL_WINDOW_TOL_ABS", 0.0015))
+        min_hold_bars = int(max(1, round((float(exit_min_hold_min) * 60.0) / float(candle_seconds))))
+        spans_bars = np.array(
+            [int(max(2, round((float(m) * 60.0) / float(candle_seconds)))) for m in exit_span_grid_min if int(m) > 0],
+            dtype=np.int32,
+        )
+        if spans_bars.size == 0:
+            spans_bars = np.array([int(max(2, round((60.0 * 60.0) / float(candle_seconds))))], dtype=np.int32)
+
+        horizon_min_cfg = int(lblmod._env_int("PF_EXIT_LABEL_HORIZON_MIN", int(w_min)))
+        exit_horizon_bars = int(max(1, round((float(horizon_min_cfg) * 60.0) / float(candle_seconds))))
+        dense_q25, dense_q50, dense_q75, _dense_w, _dense_entropy = lblmod._exit_span_quantiles_numba(
+            close,
+            low,
+            entry_all,
+            int(exit_horizon_bars),
+            int(min_hold_bars),
+            int(exit_confirm_bars),
+            spans_bars,
+            float(getattr(CRYPTO_CONTRACT, "exit_ema_init_offset_pct", 0.0) or 0.0),
+            float(getattr(CRYPTO_CONTRACT, "fee_pct_per_side", 0.0) or 0.0),
+            float(getattr(CRYPTO_CONTRACT, "slippage_pct", 0.0) or 0.0),
+            float(exit_ret_scale),
+            float(exit_edge_scale),
+            float(exit_softmax_temp),
+            float(exit_eff_blend),
+            float(exit_window_tol_rel),
+            float(exit_window_tol_abs),
+        )
+        out = df.copy()
+        out[dense_col] = pd.Series(dense_q50.astype(np.float32), index=out.index)
+        out[dense_q25_col] = pd.Series(dense_q25.astype(np.float32), index=out.index)
+        out[dense_q50_col] = pd.Series(dense_q50.astype(np.float32), index=out.index)
+        out[dense_q75_col] = pd.Series(dense_q75.astype(np.float32), index=out.index)
+        return out
+    except Exception:
+        return df
+
+
 def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_sec: int, *, title: str = "Crypto Feature Studio") -> None:
+    t0 = perf_counter()
+    dense_exit_on = (
+        (os.getenv("PF_CRYPTO_PLOT_DENSE_EXIT", "0").strip().lower() not in {"0", "false", "no", "off"})
+        and (not _entry_only_mode())
+    )
+    if dense_exit_on:
+        df = _add_dense_exit_target_for_plot(df, int(candle_sec))
+    df = _add_oracle_equity_for_labels(df)
     flags_all = dict(flags)
     for k in flags_all:
         if k != "plot_candles":
             flags_all[k] = True
+    flags_all["oracle_equity"] = True
 
+    show_entry_markers = os.getenv("PF_CRYPTO_SHOW_ENTRY_MARKERS", "1").strip().lower() not in {"0", "false", "no", "off"}
     fig = plot_all(
         df,
         flags_all,
@@ -195,9 +350,11 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         mark_gaps=True,
         show_price_ema=True,
         price_ema_span=30,
+        show_label_markers=show_entry_markers,
     )
     if fig is None:
         return
+    t_plot_all = perf_counter()
 
     for tr in fig.data:
         name = str(getattr(tr, "name", "") or "")
@@ -239,6 +396,8 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         "wick_stats": "wick_stats",
         "eff": "eff",
         "entry_weights": "label",
+        "oracle_equity": "oracle",
+        "exit_regression": "label",
     }
 
     trace_meta = []
@@ -269,6 +428,7 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         if tr["group"] == "price":
             continue
         groups.setdefault(tr["group"], []).append(tr)
+    t_meta = perf_counter()
 
     out_dir = Path(__file__).resolve().parents[1] / "data" / "generated" / "plots"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -287,16 +447,35 @@ def _plot_interactive_features(df: pd.DataFrame, flags: dict[str, bool], candle_
         out_path=out_path,
         open_browser=True,
     )
+    t_render = perf_counter()
+    print(
+        f"[crypto] plot_timing(s): plot_all={t_plot_all - t0:.2f} meta={t_meta - t_plot_all:.2f} "
+        f"render_html={t_render - t_meta:.2f} total={t_render - t0:.2f}",
+        flush=True,
+    )
     print(f"[crypto] plot salvo: {out_path}", flush=True)
 
 
 def main() -> None:
     # Habilita resumo de performance das features neste wrapper (rows/cols/tempo total + tempos por feature).
     os.environ.setdefault("PF_LOG_SUMMARY", "1")
+    # Pipeline padrao atual: entry-only (sem labels de exit).
+    os.environ.setdefault("PF_ENTRY_ONLY", "1")
+    # Label/weight alvo: label true para r_net > 0 com pouco peso para retornos marginais.
+    os.environ.setdefault("PF_ENTRY_LABEL_NET_PROFIT_THR", "0.0")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_RET_SCALE_POS", "0.04")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_RET_SCALE_NEG", "0.03")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_RET_DEADZONE", "0.002")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_POS_GAIN", "6.0")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_NEG_GAIN", "5.0")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_POS_POWER", "2.6")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_NEG_POWER", "2.2")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_MODE", "ret_pct_abs")
+    os.environ.setdefault("PF_ENTRY_WEIGHT_PCT_POWER", "1.0")
 
     _apply_crypto_windows()
     sym = 'XLMUSDT'
-    days = 90
+    days = 60
     tail = 0
     candle_sec = int(os.getenv("PF_CRYPTO_CANDLE_SEC", DEFAULT_CANDLE_SEC) or DEFAULT_CANDLE_SEC)
 
@@ -368,6 +547,20 @@ def main() -> None:
                     flush=True,
                 )
                 break
+        if "sniper_exit_span_target" in df_plot.columns:
+            xs = pd.to_numeric(df_plot["sniper_exit_span_target"], errors="coerce")
+            xnn = int(xs.notna().sum())
+            print(
+                f"[crypto] sniper_exit_span_target(plot): p50={float(xs.quantile(0.5)):.1f} "
+                f"p90={float(xs.quantile(0.9)):.1f} max={float(xs.max()):.1f} notna={xnn}",
+                flush=True,
+            )
+            if n_entry > 0 and xnn <= n_entry:
+                cov = float(xnn) / float(n_entry)
+                print(f"[crypto] exit_target coverage_vs_entry_true: {cov:.3f}", flush=True)
+            else:
+                cov_rows = float(xnn) / float(max(1, len(df_plot)))
+                print(f"[crypto] exit_target dense_coverage_rows: {cov_rows:.3f}", flush=True)
     except Exception:
         pass
     try:

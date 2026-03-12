@@ -246,28 +246,17 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
                     del df[c]
                 except Exception:
                     pass
-        cols = [
-            "sniper_entry_label",
-            "sniper_entry_weight",
-            "sniper_mae_pct",
-            "sniper_exit_code",
-            "sniper_exit_wait_bars",
-        ]
-        windows = list(getattr(s.contract, "entry_label_windows_minutes", []) or [])
-        for w in windows:
-            suf = f"{int(w)}m"
-            cols.extend(
-                [
-                    f"sniper_entry_label_{suf}",
-                    f"sniper_entry_weight_{suf}",
-                    f"sniper_mae_pct_{suf}",
-                    f"sniper_exit_code_{suf}",
-                    f"sniper_exit_wait_bars_{suf}",
-                ]
-            )
-        for c in cols:
-            if c in df_lab.columns:
-                df[c] = df_lab[c]
+        # Copia dinamicamente todos os labels sniper_* (inclui quantis/entropy/any e
+        # evita manter colunas legadas órfãs após mudanças de schema).
+        label_cols = sorted([c for c in df_lab.columns if str(c).startswith("sniper_")])
+        for c in list(df.columns):
+            if str(c).startswith("sniper_") and (c not in label_cols):
+                try:
+                    del df[c]
+                except Exception:
+                    pass
+        for c in label_cols:
+            df[c] = df_lab[c]
 
         _atomic_save_df(df, data_path)
         # atualiza meta com um carimbo (opcional)

@@ -9,7 +9,7 @@ if "NUMBA_CACHE_DIR" not in os.environ:
     _cache_dir = Path(__file__).resolve().parents[2].parent / "cache_sniper" / "numba"
     os.environ["NUMBA_CACHE_DIR"] = str(_cache_dir)
 
-from numba import njit
+from numba import njit, prange
 
 try:
     from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
@@ -20,15 +20,26 @@ except Exception:
         from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def _simulate_entry_contract_numba(
     close: np.ndarray,
     low: np.ndarray,
     horizon_bars: int,
-    min_profit_pct: float,
+    label_profit_thr_pct: float,
     exit_ema_span: int,
     exit_ema_init_offset_pct: float,
-    entry_weight_alpha: float,
+    fee_pct_per_side: float,
+    slippage_pct: float,
+    require_no_dip: int,
+    weight_ret_scale_pos: float,
+    weight_ret_scale_neg: float,
+    weight_ret_deadzone: float,
+    weight_pos_gain: float,
+    weight_neg_gain: float,
+    weight_pos_power: float,
+    weight_neg_power: float,
+    weight_mode: int,
+    weight_pct_power: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     n = close.size
     labels = np.zeros(n, np.uint8)
@@ -40,8 +51,38 @@ def _simulate_entry_contract_numba(
         horizon_bars = 0
     if exit_ema_span < 0:
         exit_ema_span = 0
+    cost_two_sides = 2.0 * (max(0.0, float(fee_pct_per_side)) + max(0.0, float(slippage_pct)))
+    thr = float(label_profit_thr_pct)
+    if not np.isfinite(thr):
+        thr = 0.0
+    ret_scale_pos = float(weight_ret_scale_pos)
+    if (not np.isfinite(ret_scale_pos)) or ret_scale_pos <= 1e-9:
+        ret_scale_pos = 0.04
+    ret_scale_neg = float(weight_ret_scale_neg)
+    if (not np.isfinite(ret_scale_neg)) or ret_scale_neg <= 1e-9:
+        ret_scale_neg = 0.03
+    ret_deadzone = float(weight_ret_deadzone)
+    if (not np.isfinite(ret_deadzone)) or ret_deadzone < 0.0:
+        ret_deadzone = 0.0
+    pos_gain = float(weight_pos_gain)
+    if (not np.isfinite(pos_gain)) or pos_gain < 0.0:
+        pos_gain = 6.0
+    neg_gain = float(weight_neg_gain)
+    if (not np.isfinite(neg_gain)) or neg_gain < 0.0:
+        neg_gain = 5.0
+    wpow_pos = float(weight_pos_power)
+    if (not np.isfinite(wpow_pos)) or wpow_pos <= 0.0:
+        wpow_pos = 2.6
+    wpow_neg = float(weight_neg_power)
+    if (not np.isfinite(wpow_neg)) or wpow_neg <= 0.0:
+        wpow_neg = 2.2
+    w_mode = int(weight_mode)
+    w_pct_pow = float(weight_pct_power)
+    if (not np.isfinite(w_pct_pow)) or w_pct_pow <= 0.0:
+        w_pct_pow = 1.0
+    no_dip = int(require_no_dip) != 0
 
-    for i in range(n):
+    for i in prange(n):
         px0 = close[i]
         if not np.isfinite(px0) or px0 <= 0.0:
             mae[i] = 0.0
@@ -67,9 +108,11 @@ def _simulate_entry_contract_numba(
         code = -3
         exit_bar = last_bar
         for j in range(i + 1, last_bar + 1):
-            lo = close[j]
-            if not np.isfinite(lo):
+            lo = low[j]
+            if (not np.isfinite(lo)) or lo <= 0.0:
                 lo = close[j]
+            if (not np.isfinite(lo)) or lo <= 0.0:
+                continue
             if lo < worst:
                 worst = lo
             cur_mae = (worst / px0) - 1.0
@@ -89,17 +132,48 @@ def _simulate_entry_contract_numba(
         exit_px = close[exit_bar]
         if not np.isfinite(exit_px) or exit_px <= 0.0:
             exit_px = px0
-        r = (exit_px / px0) - 1.0
-        scale = float(entry_weight_alpha) if float(entry_weight_alpha) > 1e-9 else 0.01
-        margin = abs(r - min_profit_pct)
-        if not np.isfinite(margin):
-            margin = 0.0
-        w = 0.1 + 0.9 * min(1.0, float(margin) / float(scale))
-        weights[i] = float(w)
-        if (not dipped_below_entry) and (r >= min_profit_pct):
+        r_net = (exit_px / px0) - 1.0 - cost_two_sides
+        if ((not no_dip) or (not dipped_below_entry)) and (r_net > thr):
             label = 1
         else:
             label = 0
+
+        # Peso simples por retorno liquido e label:
+        # - positivos: quanto maior retorno, maior peso
+        # - negativos: quanto pior retorno, maior peso (com ganho menor)
+        if w_mode == 1:
+            # Teste solicitado: peso proporcional ao retorno liquido em percentual.
+            # Ex.: 0.05% -> 0.05 ; 0.5% -> 0.5 ; 5% -> 5.0
+            rp = abs(r_net) * 100.0
+            if rp < 0.0:
+                rp = 0.0
+            if rp > 7.0:
+                rp = 7.0
+            if w_pct_pow != 1.0:
+                w = 7.0 * ((rp / 7.0) ** w_pct_pow)
+            else:
+                w = rp
+        else:
+            if label >= 1:
+                s = (r_net - ret_deadzone) / ret_scale_pos
+                if s < 0.0:
+                    s = 0.0
+                if s > 1.0:
+                    s = 1.0
+                # Peso continuo sem piso: retorno marginal ~0 => peso ~0.
+                w = pos_gain * (s ** wpow_pos)
+            else:
+                s = ((-r_net) - ret_deadzone) / ret_scale_neg
+                if s < 0.0:
+                    s = 0.0
+                if s > 1.0:
+                    s = 1.0
+                w = neg_gain * (s ** wpow_neg)
+        if w < 0.0:
+            w = 0.0
+        if w > 7.0:
+            w = 7.0
+        weights[i] = float(w)
 
         labels[i] = label
         mae[i] = best_mae
@@ -127,6 +201,67 @@ def _env_float(name: str, default: float) -> float:
         return float(v)
     except Exception:
         return float(default)
+
+
+def _env_str(name: str, default: str) -> str:
+    v = os.getenv(name, "")
+    s = str(v).strip()
+    return s if s else str(default)
+
+
+def _env_int_list(name: str, default: list[int]) -> list[int]:
+    v = os.getenv(name, "").strip()
+    if not v:
+        return [int(x) for x in default]
+    out: list[int] = []
+    try:
+        for tok in v.replace(";", ",").split(","):
+            t = tok.strip()
+            if not t:
+                continue
+            n = int(float(t))
+            if n > 0:
+                out.append(int(n))
+    except Exception:
+        return [int(x) for x in default]
+    if not out:
+        return [int(x) for x in default]
+    seen: set[int] = set()
+    uniq: list[int] = []
+    for n in out:
+        if n not in seen:
+            seen.add(n)
+            uniq.append(int(n))
+    return uniq
+
+
+@njit(cache=True)
+def _build_trade_active_mask_numba(
+    entry_label: np.ndarray,
+    exit_wait: np.ndarray,
+) -> np.ndarray:
+    n = int(entry_label.size)
+    out = np.zeros(n, dtype=np.float32)
+    if n <= 0:
+        return out
+    diff = np.zeros(n + 1, dtype=np.int32)
+    for i in range(n):
+        if entry_label[i] < 0.5:
+            continue
+        w = int(exit_wait[i])
+        if w < 0:
+            continue
+        j = i + w
+        if j >= n:
+            j = n - 1
+        diff[i] += 1
+        diff[j + 1] -= 1
+    acc = 0
+    for i in range(n):
+        acc += diff[i]
+        if acc > 0:
+            out[i] = 1.0
+    return out
 
 
 @njit(cache=True)
@@ -698,6 +833,320 @@ def _single_profit_label_both_numba(
     )
 
 
+@njit(cache=True, parallel=True)
+def _exit_span_target_numba(
+    close: np.ndarray,
+    low: np.ndarray,
+    entry_label: np.ndarray,
+    horizon_bars: int,
+    min_hold_bars: int,
+    confirm_bars: int,
+    spans_bars: np.ndarray,
+    ema_init_offset_pct: float,
+    fee_pct_per_side: float,
+    slippage_pct: float,
+    ret_scale: float,
+    edge_scale: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    n = close.size
+    target = np.full(n, np.nan, dtype=np.float32)
+    weight = np.ones(n, dtype=np.float32)
+    hb = max(1, int(horizon_bars))
+    hold_min = max(1, int(min_hold_bars))
+    conf_need = max(1, int(confirm_bars))
+    if spans_bars.size == 0:
+        return target, weight
+
+    cost_two_sides = 2.0 * (max(0.0, float(fee_pct_per_side)) + max(0.0, float(slippage_pct)))
+    ema_off = max(0.0, float(ema_init_offset_pct))
+    rscale = float(ret_scale) if float(ret_scale) > 1e-9 else 0.03
+    escale = float(edge_scale) if float(edge_scale) > 1e-9 else 0.01
+
+    for i in prange(n):
+        if entry_label[i] < 0.5:
+            continue
+        px = close[i]
+        if (not np.isfinite(px)) or px <= 0.0:
+            continue
+        j_last = i + hb
+        if j_last >= n:
+            j_last = n - 1
+        if j_last <= i + hold_min:
+            continue
+
+        best_r = -1e30
+        second_r = -1e30
+        best_span = int(spans_bars[0]) if spans_bars.size > 0 else 2
+
+        for k in range(spans_bars.size):
+            span = int(spans_bars[k])
+            if span < 2:
+                span = 2
+            alpha = 2.0 / float(span + 1)
+            ema = px * (1.0 - ema_off)
+            streak = 0
+            exit_j = j_last
+
+            for j in range(i + 1, j_last + 1):
+                pj = close[j]
+                if (not np.isfinite(pj)) or pj <= 0.0:
+                    continue
+                ema = ema + (alpha * (pj - ema))
+                if j < i + hold_min:
+                    continue
+                if pj < ema:
+                    streak += 1
+                else:
+                    streak = 0
+                if streak >= conf_need:
+                    exit_j = j
+                    break
+
+            exit_px = close[exit_j]
+            if (not np.isfinite(exit_px)) or exit_px <= 0.0:
+                exit_px = px
+            r_net = (exit_px / px) - 1.0 - cost_two_sides
+
+            if r_net > best_r:
+                second_r = best_r
+                best_r = r_net
+                best_span = span
+            elif r_net > second_r:
+                second_r = r_net
+
+        target[i] = float(best_span)
+        edge = 0.0
+        if second_r > -1e20:
+            edge = best_r - second_r
+        if edge < 0.0:
+            edge = 0.0
+        edge_n = edge / escale
+        if edge_n < 0.0:
+            edge_n = 0.0
+        if edge_n > 1.0:
+            edge_n = 1.0
+        abs_n = abs(best_r) / rscale
+        if abs_n < 0.0:
+            abs_n = 0.0
+        if abs_n > 1.0:
+            abs_n = 1.0
+        conf = 0.65 * edge_n + 0.35 * abs_n
+        if conf < 0.0:
+            conf = 0.0
+        if conf > 1.0:
+            conf = 1.0
+        w = 1.0 + 6.0 * (conf ** 2.4)
+        if w < 1.0:
+            w = 1.0
+        if w > 7.0:
+            w = 7.0
+        weight[i] = float(w)
+
+    return target, weight
+
+
+@njit(cache=True, parallel=True)
+def _exit_span_quantiles_numba(
+    close: np.ndarray,
+    low: np.ndarray,
+    entry_label: np.ndarray,
+    horizon_bars: int,
+    min_hold_bars: int,
+    confirm_bars: int,
+    spans_bars: np.ndarray,
+    ema_init_offset_pct: float,
+    fee_pct_per_side: float,
+    slippage_pct: float,
+    ret_scale: float,
+    edge_scale: float,
+    softmax_temp: float,
+    eff_blend: float,
+    window_tol_rel: float,
+    window_tol_abs: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n = close.size
+    q25 = np.full(n, np.nan, dtype=np.float32)
+    q50 = np.full(n, np.nan, dtype=np.float32)
+    q75 = np.full(n, np.nan, dtype=np.float32)
+    weight = np.ones(n, dtype=np.float32)
+    entropy_n = np.full(n, np.nan, dtype=np.float32)
+    hb = max(1, int(horizon_bars))
+    hold_min = max(1, int(min_hold_bars))
+    conf_need = max(1, int(confirm_bars))
+    if spans_bars.size == 0:
+        return q25, q50, q75, weight, entropy_n
+
+    cost_two_sides = 2.0 * (max(0.0, float(fee_pct_per_side)) + max(0.0, float(slippage_pct)))
+    ema_off = max(0.0, float(ema_init_offset_pct))
+    rscale = float(ret_scale) if float(ret_scale) > 1e-9 else 0.03
+    escale = float(edge_scale) if float(edge_scale) > 1e-9 else 0.01
+    _ = softmax_temp
+    eff_l = float(eff_blend)
+    if eff_l < 0.0:
+        eff_l = 0.0
+    if eff_l > 1.0:
+        eff_l = 1.0
+    tol_rel = float(window_tol_rel)
+    if tol_rel < 0.0:
+        tol_rel = 0.0
+    tol_abs = float(window_tol_abs)
+    if tol_abs < 0.0:
+        tol_abs = 0.0
+
+    m = int(spans_bars.size)
+    for i in prange(n):
+        if entry_label[i] < 0.5:
+            continue
+        px = close[i]
+        if (not np.isfinite(px)) or px <= 0.0:
+            continue
+        j_last = i + hb
+        if j_last >= n:
+            j_last = n - 1
+        if j_last <= i + hold_min:
+            continue
+
+        ret_vec = np.empty(m, dtype=np.float64)
+        obj_vec = np.empty(m, dtype=np.float64)
+        best_r = -1e30
+        second_r = -1e30
+
+        for k in range(m):
+            span = int(spans_bars[k])
+            if span < 2:
+                span = 2
+            alpha = 2.0 / float(span + 1)
+            ema = px * (1.0 - ema_off)
+            streak = 0
+            exit_j = j_last
+
+            for j in range(i + 1, j_last + 1):
+                pj = close[j]
+                if (not np.isfinite(pj)) or pj <= 0.0:
+                    continue
+                ema = ema + (alpha * (pj - ema))
+                if j < i + hold_min:
+                    continue
+                if pj < ema:
+                    streak += 1
+                else:
+                    streak = 0
+                if streak >= conf_need:
+                    exit_j = j
+                    break
+
+            exit_px = close[exit_j]
+            if (not np.isfinite(exit_px)) or exit_px <= 0.0:
+                exit_px = px
+            r_net = (exit_px / px) - 1.0 - cost_two_sides
+            ret_vec[k] = r_net
+            hold_bars = float(max(1, exit_j - i))
+            hb_f = float(max(1, hb))
+            speed = hb_f / hold_bars
+            if speed < 0.25:
+                speed = 0.25
+            if speed > 4.0:
+                speed = 4.0
+            if r_net >= 0.0:
+                eff_r = r_net * speed
+            else:
+                eff_r = r_net / speed
+            obj = (1.0 - eff_l) * r_net + eff_l * eff_r
+            obj_vec[k] = obj
+            if r_net > best_r:
+                second_r = best_r
+                best_r = r_net
+            elif r_net > second_r:
+                second_r = r_net
+
+        best_k = 0
+        best_obj = obj_vec[0]
+        for k in range(1, m):
+            if obj_vec[k] > best_obj:
+                best_obj = obj_vec[k]
+                best_k = k
+        scale = abs(best_obj)
+        base_scale = rscale * 0.25
+        if scale < base_scale:
+            scale = base_scale
+        tol_obj = tol_abs
+        rel_term = tol_rel * scale
+        if rel_term > tol_obj:
+            tol_obj = rel_term
+        if tol_obj < 1e-6:
+            tol_obj = 1e-6
+
+        left = best_k
+        right = best_k
+        while left > 0:
+            if (best_obj - obj_vec[left - 1]) <= tol_obj:
+                left -= 1
+            else:
+                break
+        while right < (m - 1):
+            if (best_obj - obj_vec[right + 1]) <= tol_obj:
+                right += 1
+            else:
+                break
+
+        q25_v = float(spans_bars[left])
+        q50_v = float(spans_bars[best_k])
+        q75_v = float(spans_bars[right])
+
+        q25[i] = np.float32(q25_v)
+        q50[i] = np.float32(q50_v)
+        q75[i] = np.float32(q75_v)
+
+        width_n = 0.0
+        if m > 1:
+            width_n = float(right - left) / float(m - 1)
+        if width_n < 0.0:
+            width_n = 0.0
+        if width_n > 1.0:
+            width_n = 1.0
+        entropy_n[i] = np.float32(width_n)
+
+        best_out = -1e30
+        for k in range(m):
+            if k < left or k > right:
+                if obj_vec[k] > best_out:
+                    best_out = obj_vec[k]
+        edge_obj = 0.0
+        if best_out > -1e20:
+            edge_obj = best_obj - best_out
+        if edge_obj < 0.0:
+            edge_obj = 0.0
+
+        edge_n = edge_obj / escale
+        if edge_n < 0.0:
+            edge_n = 0.0
+        if edge_n > 1.0:
+            edge_n = 1.0
+        abs_n = abs(best_r) / rscale
+        if abs_n < 0.0:
+            abs_n = 0.0
+        if abs_n > 1.0:
+            abs_n = 1.0
+        certainty = 1.0 - width_n
+        if certainty < 0.0:
+            certainty = 0.0
+        if certainty > 1.0:
+            certainty = 1.0
+        conf = 0.55 * edge_n + 0.25 * abs_n + 0.20 * certainty
+        if conf < 0.0:
+            conf = 0.0
+        if conf > 1.0:
+            conf = 1.0
+        w = 1.0 + 6.0 * (conf ** 2.2)
+        if w < 1.0:
+            w = 1.0
+        if w > 7.0:
+            w = 7.0
+        weight[i] = np.float32(w)
+
+    return q25, q50, q75, weight, entropy_n
+
+
 def apply_trade_contract_labels(
     df: pd.DataFrame,
     *,
@@ -722,6 +1171,63 @@ def apply_trade_contract_labels(
         profits = [0.02]
     if len(windows) != len(profits):
         raise ValueError("entry_label_windows_minutes e entry_label_min_profit_pcts devem ter o mesmo tamanho (>=1)")
+    pf_entry_only = str(os.getenv("PF_ENTRY_ONLY", "")).strip().lower() in {"1", "true", "yes", "on"}
+    train_exit_model = str(os.getenv("SNIPER_TRAIN_EXIT_MODEL", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    entry_only_mode = bool(pf_entry_only or (not train_exit_model))
+
+    # Config do target de exit dinÃ¢mico (regressÃ£o de span EMA em barras via grid-search).
+    exit_span_grid_min = _env_int_list(
+        "PF_EXIT_SPAN_GRID_MIN",
+        [
+            15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240,
+            255, 270, 285, 300, 315, 330, 345, 360, 375, 390, 405, 420, 435, 450, 465, 480,
+            495, 510, 525, 540, 555, 570, 585, 600, 615, 630, 645, 660, 675, 690, 705, 720,
+        ],
+    )
+    exit_min_hold_min = int(_env_int("PF_EXIT_LABEL_MIN_HOLD_MIN", 5))
+    exit_confirm_bars = int(_env_int("PF_EXIT_LABEL_CONFIRM_BARS", 2))
+    exit_ret_scale = float(_env_float("PF_EXIT_LABEL_RET_SCALE", 0.03))
+    exit_edge_scale = float(_env_float("PF_EXIT_LABEL_EDGE_SCALE", 0.01))
+    exit_softmax_temp = float(_env_float("PF_EXIT_LABEL_SOFTMAX_TEMP", 0.0025))
+    exit_eff_blend = float(_env_float("PF_EXIT_LABEL_EFF_BLEND", 0.35))
+    exit_window_tol_rel = float(_env_float("PF_EXIT_LABEL_WINDOW_TOL_REL", 0.25))
+    exit_window_tol_abs = float(_env_float("PF_EXIT_LABEL_WINDOW_TOL_ABS", 0.0015))
+    # Modo de máscara para target de exit:
+    # - trade (default): barras ativas de trade (entry -> exit)
+    # - entry: apenas barra de entrada (legado)
+    # - all: todas as barras (mais denso, normalmente mais ruidoso)
+    # Compat: PF_EXIT_LABEL_DENSE_ALL_BARS=1 força modo "all" se PF_EXIT_LABEL_MASK_MODE não vier.
+    exit_dense_all_bars = bool(_env_int("PF_EXIT_LABEL_DENSE_ALL_BARS", 0))
+    exit_mask_mode = _env_str("PF_EXIT_LABEL_MASK_MODE", "").strip().lower()
+    if exit_mask_mode not in {"all", "entry", "trade"}:
+        exit_mask_mode = "all" if exit_dense_all_bars else "trade"
+    min_hold_bars = int(max(1, round((float(exit_min_hold_min) * 60.0) / float(candle_seconds))))
+    spans_bars = np.array(
+        sorted(
+            {
+                int(max(2, round((float(m) * 60.0) / float(candle_seconds))))
+                for m in exit_span_grid_min
+                if int(m) > 0
+            }
+        ),
+        dtype=np.int32,
+    )
+    if spans_bars.size == 0:
+        spans_bars = np.array([int(max(2, round((60.0 * 60.0) / float(candle_seconds))))], dtype=np.int32)
+
+    entry_label_net_profit_thr = float(_env_float("PF_ENTRY_LABEL_NET_PROFIT_THR", 0.0))
+    entry_require_no_dip = bool(_env_int("PF_ENTRY_LABEL_REQUIRE_NO_DIP", 0))
+    entry_weight_ret_scale_pos = float(_env_float("PF_ENTRY_WEIGHT_RET_SCALE_POS", 0.04))
+    entry_weight_ret_scale_neg = float(_env_float("PF_ENTRY_WEIGHT_RET_SCALE_NEG", 0.03))
+    # Retornos muito proximos de zero (ex.: +0.05%) ficam com peso quase 1.
+    entry_weight_ret_deadzone = float(_env_float("PF_ENTRY_WEIGHT_RET_DEADZONE", 0.002))
+    entry_weight_pos_gain = float(_env_float("PF_ENTRY_WEIGHT_POS_GAIN", 6.0))
+    entry_weight_neg_gain = float(_env_float("PF_ENTRY_WEIGHT_NEG_GAIN", 5.0))
+    entry_weight_pos_power = float(_env_float("PF_ENTRY_WEIGHT_POS_POWER", 2.6))
+    entry_weight_neg_power = float(_env_float("PF_ENTRY_WEIGHT_NEG_POWER", 2.2))
+    entry_weight_mode = _env_str("PF_ENTRY_WEIGHT_MODE", "ret_curve").strip().lower()
+    entry_weight_pct_power = float(_env_float("PF_ENTRY_WEIGHT_PCT_POWER", 1.0))
+    entry_weight_mode_i = 1 if entry_weight_mode in {"ret_pct", "ret_pct_abs", "percent"} else 0
 
     gap_next = None
     forbid_gap = bool(getattr(contract, "forbid_exit_on_gap", False))
@@ -744,10 +1250,21 @@ def apply_trade_contract_labels(
             close,
             low,
             0,
-            float(pmin),
+            float(entry_label_net_profit_thr),
             int(hb),
             float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
-            float(getattr(contract, "entry_label_weight_alpha", 1.0) or 1.0),
+            float(getattr(contract, "fee_pct_per_side", 0.0) or 0.0),
+            float(getattr(contract, "slippage_pct", 0.0) or 0.0),
+            int(1 if entry_require_no_dip else 0),
+            float(entry_weight_ret_scale_pos),
+            float(entry_weight_ret_scale_neg),
+            float(entry_weight_ret_deadzone),
+            float(entry_weight_pos_gain),
+            float(entry_weight_neg_gain),
+            float(entry_weight_pos_power),
+            float(entry_weight_neg_power),
+            int(entry_weight_mode_i),
+            float(entry_weight_pct_power),
         )
         if gap_next is not None:
             exit_bar = np.arange(exit_wait.size, dtype=np.int64) + exit_wait.astype(np.int64)
@@ -765,6 +1282,44 @@ def apply_trade_contract_labels(
         df[f"sniper_exit_code_{suffix}"] = pd.Series(exit_code.astype(np.int8), index=df.index)
         df[f"sniper_exit_wait_bars_{suffix}"] = pd.Series(exit_wait.astype(np.int32), index=df.index)
         df[f"sniper_entry_weight_{suffix}"] = pd.Series(weight.astype(np.float32), index=df.index)
+
+        # Label de Exit dinÃ¢mico: span EMA alvo (em barras) + weight.
+        if not entry_only_mode:
+            horizon_min_cfg = int(_env_int("PF_EXIT_LABEL_HORIZON_MIN", int(w_min)))
+            exit_horizon_bars = int(max(1, round((float(horizon_min_cfg) * 60.0) / float(candle_seconds))))
+            if exit_mask_mode == "all":
+                exit_entry_mask = np.ones_like(entry_label, dtype=np.float32)
+            elif exit_mask_mode == "entry":
+                exit_entry_mask = entry_label.astype(np.float32)
+            else:
+                exit_entry_mask = _build_trade_active_mask_numba(
+                    entry_label.astype(np.float32),
+                    exit_wait.astype(np.int32),
+                )
+            exit_q25, exit_q50, exit_q75, exit_w, exit_entropy = _exit_span_quantiles_numba(
+                close,
+                low,
+                exit_entry_mask,
+                int(exit_horizon_bars),
+                int(min_hold_bars),
+                int(exit_confirm_bars),
+                spans_bars,
+                float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
+                float(getattr(contract, "fee_pct_per_side", 0.0) or 0.0),
+                float(getattr(contract, "slippage_pct", 0.0) or 0.0),
+                float(exit_ret_scale),
+                float(exit_edge_scale),
+                float(exit_softmax_temp),
+                float(exit_eff_blend),
+                float(exit_window_tol_rel),
+                float(exit_window_tol_abs),
+            )
+            df[f"sniper_exit_span_q25_{suffix}"] = pd.Series(exit_q25.astype(np.float32), index=df.index)
+            df[f"sniper_exit_span_q50_{suffix}"] = pd.Series(exit_q50.astype(np.float32), index=df.index)
+            df[f"sniper_exit_span_q75_{suffix}"] = pd.Series(exit_q75.astype(np.float32), index=df.index)
+            df[f"sniper_exit_span_entropy_{suffix}"] = pd.Series(exit_entropy.astype(np.float32), index=df.index)
+            df[f"sniper_exit_span_target_{suffix}"] = pd.Series(exit_q50.astype(np.float32), index=df.index)
+            df[f"sniper_exit_span_weight_{suffix}"] = pd.Series(exit_w.astype(np.float32), index=df.index)
 
     # Future evaluation windows (minutes):
     # - avg_early: [future_avg_start_min .. future_avg_split_min]
@@ -864,11 +1419,11 @@ def apply_trade_contract_labels(
         z = np.clip((x - float(start)) / max(1e-9, (1.0 - float(start))), 0.0, 1.0)
         return np.power(z, float(power))
 
-    w_pos = 1.0 + 6.0 * _sharp01(score_pos, start=0.58, power=3.0)
-    w_neg = 1.0 + 6.0 * _sharp01(score_neg, start=0.58, power=3.0)
+    w_pos = 7.0 * _sharp01(score_pos, start=0.58, power=3.0)
+    w_neg = 7.0 * _sharp01(score_neg, start=0.58, power=3.0)
     lbl_long_f = labels_long.astype(np.float64)
     w_long = np.where(lbl_long_f >= 0.5, w_pos, w_neg)
-    w_long = np.clip(w_long, 1.0, 7.0).astype(np.float32, copy=False)
+    w_long = np.clip(w_long, 0.0, 7.0).astype(np.float32, copy=False)
 
     for c in (
         "sniper_price_label",
@@ -915,15 +1470,23 @@ def apply_trade_contract_labels(
         if base_col not in df.columns:
             continue
         base = pd.to_numeric(df[base_col], errors="coerce").to_numpy(np.float32, copy=False)
-        base_norm = np.clip((base.astype(np.float64) - 0.10) / 0.90, 0.0, 1.0)
-        quality = np.where(lbl_long_f >= 0.5, score_pos, score_neg)
-        mix = np.clip(0.80 * quality + 0.20 * base_norm, 0.0, 1.0)
-        mix_sharp = _sharp01(mix, start=0.60, power=3.2)
-        w_final = (1.0 + 6.0 * mix_sharp).astype(np.float32, copy=False)
-        w_final = np.clip(w_final, 1.0, 7.0).astype(np.float32, copy=False)
+        w_final = np.nan_to_num(base.astype(np.float64), nan=0.0, posinf=7.0, neginf=0.0)
+        w_final = np.clip(w_final, 0.0, 7.0).astype(np.float32, copy=False)
         df[base_col] = pd.Series(w_final, index=df.index)
 
     # Compatibilidade legado: primeira janela em colunas canônicas.
+    label_cols = [f"sniper_entry_label_{int(w)}m" for w in windows if f"sniper_entry_label_{int(w)}m" in df.columns]
+    weight_cols = [f"sniper_entry_weight_{int(w)}m" for w in windows if f"sniper_entry_weight_{int(w)}m" in df.columns]
+    if label_cols:
+        lbl_any = (np.nanmax(np.vstack([pd.to_numeric(df[c], errors="coerce").to_numpy(np.float32, copy=False) for c in label_cols]), axis=0) > 0.5).astype(np.uint8)
+        df["sniper_entry_label_any"] = pd.Series(lbl_any, index=df.index)
+    if weight_cols:
+        w_any = np.nanmax(np.vstack([pd.to_numeric(df[c], errors="coerce").to_numpy(np.float32, copy=False) for c in weight_cols]), axis=0).astype(np.float32)
+        w_any = np.nan_to_num(w_any, nan=0.0, posinf=7.0, neginf=0.0)
+        w_any = np.clip(w_any, 0.0, 7.0).astype(np.float32, copy=False)
+        df["sniper_entry_weight_any"] = pd.Series(w_any, index=df.index)
+
+    entry_any_canonical = bool(_env_int("PF_ENTRY_LABEL_ANY_CANONICAL", 1))
     if not first_suffix:
         first_suffix = f"{int(windows[0])}m"
     for c in (
@@ -932,6 +1495,12 @@ def apply_trade_contract_labels(
         "sniper_exit_code",
         "sniper_exit_wait_bars",
         "sniper_entry_weight",
+        "sniper_exit_span_target",
+        "sniper_exit_span_weight",
+        "sniper_exit_span_q25",
+        "sniper_exit_span_q50",
+        "sniper_exit_span_q75",
+        "sniper_exit_span_entropy",
         "sniper_entry_weight_hybrid",
     ):
         if c in df.columns:
@@ -939,17 +1508,41 @@ def apply_trade_contract_labels(
                 del df[c]
             except Exception:
                 pass
+    if entry_only_mode:
+        for c in list(df.columns):
+            if c.startswith("sniper_exit_span_"):
+                try:
+                    del df[c]
+                except Exception:
+                    pass
     for c in list(df.columns):
         if c.startswith("sniper_entry_weight_hybrid_"):
             try:
                 del df[c]
             except Exception:
                 pass
-    df["sniper_entry_label"] = df[f"sniper_entry_label_{first_suffix}"].astype(np.uint8)
+    if entry_any_canonical and ("sniper_entry_label_any" in df.columns):
+        df["sniper_entry_label"] = df["sniper_entry_label_any"].astype(np.uint8)
+    else:
+        df["sniper_entry_label"] = df[f"sniper_entry_label_{first_suffix}"].astype(np.uint8)
     df["sniper_mae_pct"] = df[f"sniper_mae_pct_{first_suffix}"].astype(np.float32)
     df["sniper_exit_code"] = df[f"sniper_exit_code_{first_suffix}"].astype(np.int8)
     df["sniper_exit_wait_bars"] = df[f"sniper_exit_wait_bars_{first_suffix}"].astype(np.int32)
-    df["sniper_entry_weight"] = df[f"sniper_entry_weight_{first_suffix}"].astype(np.float32)
+    if entry_any_canonical and ("sniper_entry_weight_any" in df.columns):
+        df["sniper_entry_weight"] = df["sniper_entry_weight_any"].astype(np.float32)
+    else:
+        df["sniper_entry_weight"] = df[f"sniper_entry_weight_{first_suffix}"].astype(np.float32)
+    if (not entry_only_mode) and (f"sniper_exit_span_target_{first_suffix}" in df.columns):
+        df["sniper_exit_span_target"] = df[f"sniper_exit_span_target_{first_suffix}"].astype(np.float32)
+        df["sniper_exit_span_weight"] = df[f"sniper_exit_span_weight_{first_suffix}"].astype(np.float32)
+        if f"sniper_exit_span_q25_{first_suffix}" in df.columns:
+            df["sniper_exit_span_q25"] = df[f"sniper_exit_span_q25_{first_suffix}"].astype(np.float32)
+        if f"sniper_exit_span_q50_{first_suffix}" in df.columns:
+            df["sniper_exit_span_q50"] = df[f"sniper_exit_span_q50_{first_suffix}"].astype(np.float32)
+        if f"sniper_exit_span_q75_{first_suffix}" in df.columns:
+            df["sniper_exit_span_q75"] = df[f"sniper_exit_span_q75_{first_suffix}"].astype(np.float32)
+        if f"sniper_exit_span_entropy_{first_suffix}" in df.columns:
+            df["sniper_exit_span_entropy"] = df[f"sniper_exit_span_entropy_{first_suffix}"].astype(np.float32)
 
     def _diag_dict(diag: np.ndarray) -> dict:
         return {
@@ -978,6 +1571,29 @@ def apply_trade_contract_labels(
                 "future_eff_min": float(future_eff_min),
                 "early_guard_min": int(early_guard_min),
                 "early_adverse_max": float(early_adverse_max),
+                "entry_label_net_profit_thr": float(entry_label_net_profit_thr),
+                "entry_require_no_dip": bool(entry_require_no_dip),
+                "entry_weight_ret_scale_pos": float(entry_weight_ret_scale_pos),
+                "entry_weight_ret_scale_neg": float(entry_weight_ret_scale_neg),
+                "entry_weight_ret_deadzone": float(entry_weight_ret_deadzone),
+                "entry_weight_pos_gain": float(entry_weight_pos_gain),
+                "entry_weight_neg_gain": float(entry_weight_neg_gain),
+                "entry_weight_pos_power": float(entry_weight_pos_power),
+                "entry_weight_neg_power": float(entry_weight_neg_power),
+                "entry_weight_mode": str(entry_weight_mode),
+                "entry_weight_pct_power": float(entry_weight_pct_power),
+                "exit_span_grid_min": [int(x) for x in exit_span_grid_min],
+                "exit_min_hold_min": int(exit_min_hold_min),
+                "exit_confirm_bars": int(exit_confirm_bars),
+                "exit_ret_scale": float(exit_ret_scale),
+                "exit_edge_scale": float(exit_edge_scale),
+                "exit_softmax_temp": float(exit_softmax_temp),
+                "exit_eff_blend": float(exit_eff_blend),
+                "exit_window_tol_rel": float(exit_window_tol_rel),
+                "exit_window_tol_abs": float(exit_window_tol_abs),
+                "exit_dense_all_bars": bool(exit_dense_all_bars),
+                "exit_mask_mode": str(exit_mask_mode),
+                "entry_any_canonical": bool(entry_any_canonical),
             },
         }
     except Exception:

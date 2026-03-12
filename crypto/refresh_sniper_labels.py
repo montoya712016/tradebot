@@ -22,6 +22,17 @@ def _add_repo_paths() -> None:
 def main() -> None:
     _add_repo_paths()
     os.environ.setdefault("SNIPER_ASSET_CLASS", "crypto")
+    os.environ["PF_ENTRY_LABEL_NET_PROFIT_THR"] = "0.0"
+    os.environ["PF_ENTRY_WEIGHT_RET_SCALE_POS"] = "0.04"
+    os.environ["PF_ENTRY_WEIGHT_RET_SCALE_NEG"] = "0.03"
+    os.environ["PF_ENTRY_WEIGHT_RET_DEADZONE"] = "0.002"
+    os.environ["PF_ENTRY_WEIGHT_POS_GAIN"] = "6.0"
+    os.environ["PF_ENTRY_WEIGHT_NEG_GAIN"] = "5.0"
+    os.environ["PF_ENTRY_WEIGHT_POS_POWER"] = "2.6"
+    os.environ["PF_ENTRY_WEIGHT_NEG_POWER"] = "2.2"
+    os.environ["PF_ENTRY_WEIGHT_MODE"] = "ret_pct_abs"
+    os.environ["PF_ENTRY_WEIGHT_PCT_POWER"] = "1.0"
+    os.environ["SNIPER_ENTRY_WEIGHT_BIN_STEP_X10"] = "2"
     from trade_contract import TradeContract  # type: ignore
     from prepare_features.refresh_sniper_labels_in_cache import (  # type: ignore
         RefreshLabelsSettings,
@@ -29,11 +40,11 @@ def main() -> None:
     )
 
     contract = TradeContract(
-        entry_label_windows_minutes=(120,),
-        entry_label_min_profit_pcts=(0.032,),
+        entry_label_windows_minutes=(240,),
+        entry_label_min_profit_pcts=(0.02,),
         entry_label_weight_alpha=0.5,
-        exit_ema_span=120,
-        exit_ema_init_offset_pct=0.002,
+        exit_ema_span=60,
+        exit_ema_init_offset_pct=0.005,
     )
     settings = RefreshLabelsSettings(contract=contract, candle_sec=60)
     refresh_run(settings)

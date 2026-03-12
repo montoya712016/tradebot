@@ -60,6 +60,7 @@ class PeriodModel:
     entry_calib_map: dict[str, dict]
     danger_calib: dict
     exit_calib: dict
+    exit_meta: dict
     tau_entry: float
     tau_entry_map: dict[str, float]
     tau_danger: float
@@ -100,6 +101,21 @@ def select_entry_mid(p_entry_map: dict[str, np.ndarray]) -> np.ndarray:
     for v in p_entry_map.values():
         return v
     return np.array([], dtype=np.float32)
+
+
+def _apply_exit_span_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
+    out = np.asarray(p, dtype=np.float64)
+    if not isinstance(calib, dict):
+        return out.astype(np.float32, copy=False)
+    if str(calib.get("type", "identity")).strip().lower() != "isotonic":
+        return out.astype(np.float32, copy=False)
+    x = np.asarray(calib.get("x", []), dtype=np.float64)
+    y = np.asarray(calib.get("y", []), dtype=np.float64)
+    if x.size < 2 or y.size != x.size:
+        return out.astype(np.float32, copy=False)
+    with np.errstate(invalid="ignore"):
+        out = np.interp(out, x, y, left=float(y[0]), right=float(y[-1]))
+    return out.astype(np.float32, copy=False)
 
 
 def load_period_models(
@@ -146,15 +162,32 @@ def load_period_models(
             entry_calib_map["mid"] = dict(meta["entry"].get("calibration") or {"type": "identity"})
 
         entry_model = entry_models.get("mid") or list(entry_models.values())[0]
-        # modelos de danger/exit removidos (pipeline entry-only)
+        # danger removido; exit agora opcional (regressor de span EMA)
         danger_model = None
         exit_model = None
         entry_cols = list(meta["entry"]["feature_cols"])
         danger_cols: list[str] = []
         exit_cols: list[str] = []
+        exit_meta: dict = {}
+        exit_calib: dict = {"type": "identity"}
+        exit_path = pd_dir / "exit_model" / "model_exit.json"
+        if exit_path.exists():
+            try:
+                exit_model = _load_booster(exit_path)
+                exit_meta = dict(meta.get("exit") or {})
+                exit_cols = list(exit_meta.get("feature_cols") or [])
+                exit_calib = dict(exit_meta.get("calibration") or {"type": "identity"})
+                if not exit_cols:
+                    exit_cols = list((meta.get("entry") or {}).get("feature_cols") or [])
+            except Exception:
+                exit_model = None
+                exit_meta = {}
+                exit_cols = []
+                exit_calib = {"type": "identity"}
         entry_calib = dict(meta["entry"].get("calibration") or {"type": "identity"})
         danger_calib: dict = {}
-        exit_calib: dict = {}
+        if not isinstance(exit_calib, dict):
+            exit_calib = {"type": "identity"}
         tau_entry = DEFAULT_THRESHOLD_OVERRIDES.tau_entry
         tau_danger = 1.0
         tau_exit = 1.0
@@ -180,6 +213,7 @@ def load_period_models(
                 entry_calib_map=entry_calib_map,
                 danger_calib=danger_calib,
                 exit_calib=exit_calib,
+                exit_meta=exit_meta,
                 tau_entry=tau_entry,
                 tau_entry_map=tau_entry_map,
                 tau_danger=tau_danger,
@@ -260,8 +294,8 @@ def predict_scores_walkforward(
     spec_names = [name for name, _w in _entry_specs()]
     p_entry_map = {name: np.full(n, np.nan, dtype=np.float32) for name in spec_names}
     p_danger = np.zeros(n, dtype=np.float32)  # danger removido
-    # p_exit removido (mantido nulo para compatibilidade)
-    p_exit = np.zeros(n, dtype=np.float32)
+    # p_exit = span EMA previsto (barras), opcional.
+    p_exit = np.full(n, np.nan, dtype=np.float32)
     period_id = np.full(n, -1, dtype=np.int16)
 
     used_any: PeriodModel | None = None
@@ -290,6 +324,27 @@ def predict_scores_walkforward(
             if name not in p_entry_map:
                 p_entry_map[name] = np.full(n, np.nan, dtype=np.float32)
             p_entry_map[name][rows] = pe
+        if pm.exit_model is not None and len(pm.exit_cols) > 0:
+            X_x = _build_matrix_rows(df, pm.exit_cols, rows)
+            px = pm.exit_model.predict(xgb.DMatrix(X_x), validate_features=False).astype(np.float32, copy=False)
+            xmeta = dict(getattr(pm, "exit_meta", {}) or {})
+            tr = str(xmeta.get("transform", "none")).strip().lower()
+            if tr == "log1p":
+                with np.errstate(over="ignore", invalid="ignore"):
+                    px = np.expm1(px.astype(np.float64, copy=False)).astype(np.float32, copy=False)
+            px = _apply_exit_span_calibration(px, dict(xmeta.get("calibration") or getattr(pm, "exit_calib", {}) or {}))
+            clipv = xmeta.get("target_clip_bars")
+            if isinstance(clipv, (list, tuple)) and len(clipv) >= 2:
+                try:
+                    lo = float(clipv[0])
+                    hi = float(clipv[1])
+                    if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                        px = np.clip(px, lo, hi).astype(np.float32, copy=False)
+                except Exception:
+                    pass
+            px = np.asarray(px, dtype=np.float32)
+            px[~np.isfinite(px)] = np.nan
+            p_exit[rows] = px
         p_danger[rows] = pdg
         period_id[rows] = np.int16(pid)
         if used_any is None:
@@ -426,6 +481,10 @@ def simulate_sniper_from_scores(
     # Config explícita (sem depender de env vars)
     exit_min_hold_bars: int = 0,
     exit_confirm_bars: int = 1,
+    exit_span_center_smooth: float = 0.90,
+    exit_span_window_pct: float = 0.20,
+    exit_span_window_steps: float = 2.0,
+    exit_span_rate_limit_pct: float = 0.10,
 ) -> SniperBacktestResult:
     """
     Simula ciclo Sniper usando scores pré-computados (mais rápido) e thresholds do período selecionado.
@@ -441,6 +500,8 @@ def simulate_sniper_from_scores(
     eq = 1.0
     eq_curve = np.ones(n, dtype=np.float64)
     trades: List[SniperTrade] = []
+    ema_exit_curve = np.full(n, np.nan, dtype=np.float32)
+    exit_span_curve = np.full(n, np.nan, dtype=np.float32)
 
     in_pos = False
     pos_side = 1  # +1 long, -1 short
@@ -456,11 +517,57 @@ def simulate_sniper_from_scores(
     if exit_confirm <= 0:
         exit_confirm = 1
     exit_streak = 0
-    ema_span = exit_ema_span_from_window(contract, int(candle_sec))
-    use_ema_exit = ema_span > 0
-    ema_alpha = 2.0 / float(ema_span + 1) if use_ema_exit else 0.0
+    ema_span_base = int(max(0, exit_ema_span_from_window(contract, int(candle_sec))))
+    span_state = float(max(1, ema_span_base)) if ema_span_base > 0 else 0.0
+    ema_alpha = 2.0 / float(span_state + 1.0) if span_state > 0.0 else 0.0
     ema_offset = float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
     ema = 0.0
+    span_smooth = float(min(0.999, max(0.0, exit_span_center_smooth)))
+    span_min = 2.0
+    span_max = float(max(2400, int(max(1, ema_span_base)) * 6))
+    grid_step_bars = float(max(2.0, round((15.0 * 60.0) / float(max(1, candle_sec)))))
+    try:
+        mins_raw = str(
+            os.getenv(
+                "PF_EXIT_SPAN_GRID_MIN",
+                "15,30,45,60,75,90,105,120,135,150,165,180,195,210,225,240,255,270,285,300,315,330,345,360,375,390,405,420,435,450,465,480,495,510,525,540,555,570,585,600,615,630,645,660,675,690,705,720",
+            )
+            or ""
+        )
+        mins = [int(x.strip()) for x in mins_raw.replace(";", ",").split(",") if x.strip()]
+        bars = sorted(
+            {
+                int(max(2, round((float(m) * 60.0) / float(max(1, candle_sec)))))
+                for m in mins
+                if int(m) > 0
+            }
+        )
+        if len(bars) >= 2:
+            dif = np.diff(np.asarray(bars, dtype=np.float64))
+            if dif.size > 0:
+                med = float(np.nanmedian(dif))
+                if np.isfinite(med) and med > 0.0:
+                    grid_step_bars = float(max(2.0, med))
+    except Exception:
+        pass
+    span_window_pct = float(max(0.0, exit_span_window_pct))
+    span_window_steps = float(max(0.0, exit_span_window_steps))
+    span_rate_limit_pct = float(max(0.0, exit_span_rate_limit_pct))
+
+    def _span_at(i_: int, fallback: float) -> float:
+        if p_exit is None:
+            return float(fallback)
+        try:
+            v = float(p_exit[i_])
+        except Exception:
+            return float(fallback)
+        if not np.isfinite(v) or v <= 1.0:
+            return float(fallback)
+        if v < span_min:
+            v = span_min
+        if v > span_max:
+            v = span_max
+        return float(v)
 
     size_sched = tuple(float(x) for x in contract.add_sizing) if contract.add_sizing else (1.0,)
     if len(size_sched) < contract.max_adds + 1:
@@ -507,8 +614,12 @@ def simulate_sniper_from_scores(
                 last_fill = px
                 total_size = size_sched[0]
                 num_adds = 0
-                if use_ema_exit:
+                span_state = _span_at(i, float(max(1, ema_span_base)))
+                if span_state > 0.0:
+                    ema_alpha = 2.0 / float(span_state + 1.0)
                     ema = float(entry_price) * (1.0 - ema_offset if pos_side > 0 else 1.0 + ema_offset)
+                    ema_exit_curve[i] = np.float32(ema)
+                    exit_span_curve[i] = np.float32(span_state)
             eq_curve[i] = eq
             continue
 
@@ -516,14 +627,33 @@ def simulate_sniper_from_scores(
         lo = low[i] if np.isfinite(low[i]) else px
         reason = None
         exit_px = None
-        if use_ema_exit:
+        if span_state > 0.0:
+            desired_span = _span_at(i, span_state)
+            span_center = float((span_smooth * span_state) + ((1.0 - span_smooth) * desired_span))
+            half_w = max(grid_step_bars * span_window_steps, span_center * span_window_pct)
+            lo_w = max(span_min, span_center - half_w)
+            hi_w = min(span_max, span_center + half_w)
+            target_span = float(np.clip(desired_span, lo_w, hi_w))
+            if span_rate_limit_pct > 0.0:
+                max_delta = max(0.5 * grid_step_bars, span_state * span_rate_limit_pct)
+                delta = float(np.clip(target_span - span_state, -max_delta, max_delta))
+                span_state = float(span_state + delta)
+            else:
+                span_state = target_span
+            if span_state < span_min:
+                span_state = span_min
+            if span_state > span_max:
+                span_state = span_max
+            ema_alpha = 2.0 / float(span_state + 1.0)
             ema = ema + (ema_alpha * (px - ema))
+            ema_exit_curve[i] = np.float32(ema)
+            exit_span_curve[i] = np.float32(span_state)
             if (pos_side > 0 and px < ema) or (pos_side < 0 and px > ema):
                 exit_streak += 1
             else:
                 exit_streak = 0
 
-        if use_ema_exit and (((pos_side > 0 and px < ema) or (pos_side < 0 and px > ema))) and (exit_streak >= exit_confirm):
+        if (span_state > 0.0) and (((pos_side > 0 and px < ema) or (pos_side < 0 and px > ema))) and (exit_streak >= exit_confirm):
             reason = "EMA"
             exit_px = px
 
@@ -642,6 +772,8 @@ def simulate_sniper_from_scores(
         max_dd=max_dd,
         ulcer_index=float(ulcer),
         dd_duration_ratio=float(dd_dur),
+        ema_exit_curve=ema_exit_curve,
+        exit_span_curve=exit_span_curve,
         win_rate=win_rate,
         profit_factor=pf,
     )

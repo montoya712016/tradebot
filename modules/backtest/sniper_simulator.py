@@ -68,11 +68,28 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 def _apply_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
     if not isinstance(calib, dict):
         return p
-    if calib.get("type") != "platt":
+    ctype = str(calib.get("type", "identity")).strip().lower()
+    if ctype == "isotonic":
+        x = np.asarray(calib.get("x", []), dtype=np.float64)
+        y = np.asarray(calib.get("y", []), dtype=np.float64)
+        if x.size < 2 or y.size != x.size:
+            return p
+        pp = np.asarray(p, dtype=np.float64)
+        out = np.interp(pp, x, y, left=float(y[0]), right=float(y[-1]))
+        return out.astype(np.float32, copy=False)
+    if ctype != "platt":
         return p
     a = float(calib.get("coef", 1.0))
     b = float(calib.get("intercept", 0.0))
-    z = a * p + b
+    space = str(calib.get("space", "prob")).strip().lower()
+    if space == "logit":
+        eps = 1e-6
+        pp = np.asarray(p, dtype=np.float64)
+        pp = np.clip(pp, eps, 1.0 - eps)
+        x = np.log(pp / (1.0 - pp))
+        z = a * x + b
+    else:
+        z = a * p + b
     return _sigmoid(z)
 
 
@@ -228,6 +245,9 @@ class SniperBacktestResult:
     # métricas adicionais (baratas; calculadas junto com dd)
     ulcer_index: float = 0.0
     dd_duration_ratio: float = 0.0
+    # traces opcionais para diagnóstico/plot
+    ema_exit_curve: np.ndarray | None = None
+    exit_span_curve: np.ndarray | None = None
 
 
 def _max_true_run_np(flags: np.ndarray) -> int:

@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 """
 Backtest single-symbol (Entry + Danger) usando cache de features.
 
 Regras:
-- parâmetros definidos em código (sem ENV)
+- parÃ¢metros definidos em cÃ³digo (sem ENV)
 - usa cache parquet/pickle (features+labels) para evitar recalcular features
 - simula walk-forward real (modelo escolhido por train_end_utc no WF)
 - plota com plotly: candles, faixas de trades, probabilidades, sinais e equity
@@ -52,16 +52,20 @@ from plotting.plotting import plot_backtest_single
 
 def _best_run_contract() -> TradeContract:
     """
-    Contrato alinhado com o melhor WF recente (janela 120m, min_profit 3.2%, alpha 0.5, EMA 120 / offset 0.2%).
+    Contrato alinhado com o treino WF crypto atual.
+    - janela de entry: 240m
+    - min_profit: 2.0%
+    - exit EMA fixo: 60 (sem modelo de exit)
+    - offset de EMA exit: 0.5%
     """
     base = DEFAULT_TRADE_CONTRACT
     return TradeContract(
         timeframe_sec=60,
-        entry_label_windows_minutes=(120,),
-        entry_label_min_profit_pcts=(0.032,),
-        entry_label_weight_alpha=0.5,
-        exit_ema_span=120,
-        exit_ema_init_offset_pct=0.002,
+        entry_label_windows_minutes=(240,),
+        entry_label_min_profit_pcts=(0.02,),
+        entry_label_weight_alpha=base.entry_label_weight_alpha,
+        exit_ema_span=60,
+        exit_ema_init_offset_pct=0.005,
         fee_pct_per_side=base.fee_pct_per_side,
         slippage_pct=base.slippage_pct,
         max_adds=base.max_adds,
@@ -109,27 +113,32 @@ def _default_contract_for_asset(asset_class: str) -> TradeContract:
 class SingleSymbolDemoSettings:
     asset_class: str = "crypto"
     symbol: str = "ADAUSDT"
-    # janela parecida com o WF campeão (aprox. 6 anos)
+    # janela parecida com o WF campeÃ£o (aprox. 6 anos)
     days: int = 6 * 365 + 30
     candle_sec: int = 60
-    # Se quiser fixar um WF específico, preencha; senão, pega o wf_* mais recente.
+    # Se quiser fixar um WF especÃ­fico, preencha; senÃ£o, pega o wf_* mais recente.
     run_dir: str | None = None
-    # Cache (tamanho total que será carregado/garantido em disco)
+    # Cache (tamanho total que serÃ¡ carregado/garantido em disco)
     total_days_cache: int = 365 * 6 + 30
-    # Saída/execução
+    # SaÃ­da/execuÃ§Ã£o
     exit_min_hold_bars: int = 0
     exit_confirm_bars: int = 2
+    exit_span_center_smooth: float = 0.90
+    exit_span_window_pct: float = 0.20
+    exit_span_window_steps: float = 2.0
+    exit_span_rate_limit_pct: float = 0.10
+    use_exit_model: bool = False
     # Plot (html com plotly)
     save_plot: bool = True
     plot_out: str = "data/generated/plots/single_symbol_plot.html"
     plot_candles: bool = True
-    # Diagnóstico (prints)
+    # DiagnÃ³stico (prints)
     print_signal_diagnostics: bool = True
-    # Thresholds são definidos manualmente em config/thresholds.py.
+    # Thresholds sÃ£o definidos manualmente em config/thresholds.py.
     override_tau_entry: float | None = None
     disable_entry_calibration: bool = False
     long_only: bool = False
-    # Contrato usado para cache/simulação
+    # Contrato usado para cache/simulaÃ§Ã£o
     contract: TradeContract | None = None
 
 
@@ -137,7 +146,7 @@ def _find_latest_wf_dir(run_dir: str | None, asset_class: str | None = None) -> 
     if run_dir:
         p = Path(run_dir).expanduser().resolve()
         if not p.is_dir():
-            raise RuntimeError(f"run_dir inválido: {p}")
+            raise RuntimeError(f"run_dir invÃ¡lido: {p}")
         return p
     # usa paths oficiais do projeto (workspace/models_sniper)
     try:
@@ -209,7 +218,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         periods = filtered_periods
         print("[backtest-single] mode=long_only (short model disabled)", flush=True)
 
-    # garante cache do símbolo e carrega df (features+labels+ohlc)
+    # garante cache do sÃ­mbolo e carrega df (features+labels+ohlc)
     contract = settings.contract or _default_contract_for_asset(asset)
     flags = _default_flags_for_asset(asset)
     flags["_quiet"] = True
@@ -221,7 +230,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         asset_class=asset,
     )
     if symbol not in cache_map:
-        raise RuntimeError(f"Cache indisponível para {symbol} (ver logs [cache])")
+        raise RuntimeError(f"Cache indisponÃ­vel para {symbol} (ver logs [cache])")
 
     p = cache_map[symbol]
     df = pd.read_parquet(p) if str(p).lower().endswith(".parquet") else pd.read_pickle(p)
@@ -235,7 +244,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         raise RuntimeError(f"Poucos candles para simular: rows={len(df)}")
 
     # scores WF (sem vazamento)
-    p_entry_map, _p_danger_unused, _p_exit_unused, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
+    p_entry_map, _p_danger_unused, p_exit_wf, used, pid = predict_scores_walkforward(df, periods=periods, return_period_id=True)
     p_long = np.asarray(p_entry_map.get("long", np.full(len(df), np.nan, dtype=np.float32)), dtype=np.float32)
     p_short = np.asarray(p_entry_map.get("short", np.full(len(df), np.nan, dtype=np.float32)), dtype=np.float32)
     if bool(getattr(settings, "long_only", False)):
@@ -243,9 +252,76 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
     p_entry = select_entry_mid(p_entry_map)
     tau_entry = float(settings.override_tau_entry) if settings.override_tau_entry is not None else float(used.tau_entry)
     p_danger = np.zeros(len(p_entry), dtype=np.float32)
+    # Diagnostico de saturacao do entry.
+    def _print_entry_diag(name: str, arr: np.ndarray, tau: float) -> None:
+        try:
+            x = np.asarray(arr, dtype=np.float64)
+            m = np.isfinite(x)
+            n = int(m.sum())
+            if n <= 0:
+                print(f"[backtest-single] {name}: sem valores finitos", flush=True)
+                return
+            xf = x[m]
+            q50 = float(np.nanquantile(xf, 0.50))
+            q90 = float(np.nanquantile(xf, 0.90))
+            q99 = float(np.nanquantile(xf, 0.99))
+            hit_tau = float(np.mean(xf >= float(tau)))
+            hit_08 = float(np.mean(xf >= 0.80))
+            print(
+                f"[backtest-single] {name}: rows={n}/{len(x)} q50={q50:.4f} q90={q90:.4f} q99={q99:.4f} ge_tau={hit_tau:.2%} ge_0.80={hit_08:.2%}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
+    _print_entry_diag("p_long", p_long, tau_entry)
+    if not bool(getattr(settings, "long_only", False)):
+        _print_entry_diag("p_short", p_short, tau_entry)
+        try:
+            ml = np.isfinite(p_long)
+            ms = np.isfinite(p_short)
+            m = ml & ms
+            if int(m.sum()) > 10:
+                corr = float(np.corrcoef(np.asarray(p_long[m], dtype=np.float64), np.asarray(p_short[m], dtype=np.float64))[0, 1])
+                same = float(np.mean(np.abs(np.asarray(p_long[m], dtype=np.float64) - np.asarray(p_short[m], dtype=np.float64)) <= 1e-6))
+                print(f"[backtest-single] entry_l_vs_s: corr={corr:.4f} equal_eps={same:.2%}", flush=True)
+        except Exception:
+            pass
+    try:
+        calib_long = dict((used.entry_calib_map or {}).get("long") or used.entry_calib or {"type": "identity"})
+        calib_short = dict((used.entry_calib_map or {}).get("short") or used.entry_calib or {"type": "identity"})
+        print(
+            f"[backtest-single] calib long={str(calib_long.get('type', 'identity'))} short={str(calib_short.get('type', 'identity'))}",
+            flush=True,
+        )
+    except Exception:
+        pass
+
+    use_exit_model = bool(getattr(settings, "use_exit_model", False))
+    p_exit_input = (np.asarray(p_exit_wf, dtype=np.float32) if use_exit_model else None)
+
+    # DiagnÃ³stico: confirma se o regresssor de exit estÃ¡ ativo no perÃ­odo usado.
+    if use_exit_model:
+        try:
+            px = np.asarray(p_exit_wf, dtype=np.float64)
+            finite = np.isfinite(px)
+            n_fin = int(finite.sum())
+            if n_fin > 0:
+                q50 = float(np.nanquantile(px[finite], 0.50))
+                q90 = float(np.nanquantile(px[finite], 0.90))
+                print(
+                    f"[backtest-single] exit_model ativo: rows={n_fin}/{len(px)} span_p50={q50:.1f} span_p90={q90:.1f}",
+                    flush=True,
+                )
+            else:
+                print("[backtest-single] exit_model inativo: p_exit sem valores finitos", flush=True)
+        except Exception:
+            pass
+    else:
+        print("[backtest-single] mode=entry_only (exit model disabled; fixed contract span)", flush=True)
 
     # `simulate_sniper_from_scores` recebe um `PeriodModel` em `thresholds`.
-    # Se houver override, cria uma cópia do período usado com thresholds alterados.
+    # Se houver override, cria uma cÃ³pia do perÃ­odo usado com thresholds alterados.
     thresholds = used
     if settings.override_tau_entry is not None:
         thresholds = replace(
@@ -266,6 +342,7 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         p_entry=p_long,
         p_entry_short=(None if bool(getattr(settings, "long_only", False)) else p_short),
         p_danger=p_danger,
+        p_exit=p_exit_input,
         thresholds=thresholds,
         periods=periods,
         period_id=pid,
@@ -273,6 +350,10 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         candle_sec=int(settings.candle_sec),
         exit_min_hold_bars=int(settings.exit_min_hold_bars),
         exit_confirm_bars=int(settings.exit_confirm_bars),
+        exit_span_center_smooth=float(settings.exit_span_center_smooth),
+        exit_span_window_pct=float(settings.exit_span_window_pct),
+        exit_span_window_steps=float(settings.exit_span_window_steps),
+        exit_span_rate_limit_pct=float(settings.exit_span_rate_limit_pct),
     )
 
     eq_end = float(res.equity_curve[-1]) if len(res.equity_curve) else 1.0
@@ -286,33 +367,27 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={float(res.max_dd):.2%} "
         f"win={win_rate:.2%} pf={pf_s} sec={dt:.2f}"
     )
-
-    ema_exit = np.full(len(df), np.nan, dtype=np.float32)
     try:
-        from trade_contract import exit_ema_span_from_window
+        su = np.asarray(getattr(res, "exit_span_curve", None), dtype=np.float64)
+        m = np.isfinite(su)
+        if int(m.sum()) > 0:
+            q10 = float(np.nanquantile(su[m], 0.10))
+            q50 = float(np.nanquantile(su[m], 0.50))
+            q90 = float(np.nanquantile(su[m], 0.90))
+            print(f"[backtest-single] span_used p10={q10:.1f} p50={q50:.1f} p90={q90:.1f}", flush=True)
+    except Exception:
+        pass
 
-        span = exit_ema_span_from_window(contract, int(settings.candle_sec))
-        alpha = 2.0 / float(span + 1) if span > 0 else 0.0
-        offset = float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0)
-        close = df["close"].to_numpy(np.float64, copy=False)
-        idx = pd.to_datetime(df.index)
-        for t in res.trades:
-            try:
-                entry_ts = pd.to_datetime(t.entry_ts)
-                exit_ts = pd.to_datetime(t.exit_ts)
-                entry_i = int(idx.get_indexer([entry_ts], method="nearest")[0])
-                exit_i = int(idx.get_indexer([exit_ts], method="nearest")[0])
-            except Exception:
-                continue
-            if entry_i < 0 or exit_i < entry_i:
-                continue
-            ema = float(close[entry_i]) * (1.0 - offset)
-            ema_exit[entry_i] = ema
-            for i in range(entry_i + 1, exit_i + 1):
-                ema = ema + (alpha * (float(close[i]) - ema))
-                ema_exit[i] = ema
+    ema_exit = None
+    span_used = None
+    try:
+        if getattr(res, "ema_exit_curve", None) is not None:
+            ema_exit = np.asarray(res.ema_exit_curve, dtype=np.float32)
+        if getattr(res, "exit_span_curve", None) is not None:
+            span_used = np.asarray(res.exit_span_curve, dtype=np.float32)
     except Exception:
         ema_exit = None
+        span_used = None
 
     if settings.save_plot:
         plot_backtest_single(
@@ -322,6 +397,8 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
             p_entry=np.asarray(p_entry, dtype=np.float64),
             p_entry_long=np.asarray(p_long, dtype=np.float64),
             p_entry_short=np.asarray(p_short, dtype=np.float64),
+            p_exit=(np.asarray(p_exit_wf, dtype=np.float64) if use_exit_model else None),
+            p_exit_used=(np.asarray(span_used, dtype=np.float64) if span_used is not None else None),
             entry_sig=np.asarray(entry_ok, dtype=bool),
             tau_entry=tau_entry,
             title=f"{symbol} | days={settings.days} | ret={ret_total:+.2%} | trades={len(res.trades)}",
@@ -340,3 +417,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

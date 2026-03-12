@@ -69,6 +69,7 @@ from train.sniper_trainer import (  # type: ignore[import]
     TrainConfig,
     train_sniper_models,
     DEFAULT_ENTRY_PARAMS,
+    DEFAULT_EXIT_PARAMS,
 )
 
 
@@ -100,6 +101,7 @@ class TrainSniperWFSettings:
 
     # sizing (use RAM/VRAM)
     max_rows_entry: int = 6_000_000
+    max_rows_exit: int = 6_000_000
     entry_ratio_neg_per_pos: float = 6.0
     use_full_entry_pool: bool = True
     full_pool_max_rows_entry: int = 8_000_000
@@ -114,6 +116,7 @@ class TrainSniperWFSettings:
     # thresholds são definidos manualmente em config/thresholds.py
     # params xgb
     entry_params: dict = field(default_factory=lambda: dict(DEFAULT_ENTRY_PARAMS))
+    exit_params: dict = field(default_factory=lambda: dict(DEFAULT_EXIT_PARAMS))
     # opcional: flags de features custom (senão usa o default por asset)
     feature_flags: dict | None = None
     # opcional: diretório para cache de features
@@ -148,12 +151,28 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
 
     entry_params = dict(settings.entry_params)
     entry_params["device"] = settings.xgb_device
+    exit_params = dict(settings.exit_params or DEFAULT_EXIT_PARAMS)
+    exit_params["device"] = settings.xgb_device
     metric_mode = str(getattr(settings, "entry_metric_mode", "loss") or "loss").strip().lower()
     if metric_mode in {"aucpr", "aucpr_weighted", "pr"}:
         entry_params["eval_metric"] = "aucpr"
     else:
         entry_params["eval_metric"] = "logloss"
     print(f"[train-wf] entry_metric={entry_params.get('eval_metric')}", flush=True)
+    exit_obj = str(os.getenv("SNIPER_EXIT_OBJECTIVE", "") or "").strip().lower()
+    exit_metric = str(os.getenv("SNIPER_EXIT_EVAL_METRIC", "") or "").strip().lower()
+    if exit_obj:
+        exit_params["objective"] = exit_obj
+    if exit_metric:
+        exit_params["eval_metric"] = exit_metric
+    train_exit_model = str(os.getenv("SNIPER_TRAIN_EXIT_MODEL", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+    if train_exit_model:
+        print(
+            f"[train-wf] exit_objective={exit_params.get('objective')} exit_metric={exit_params.get('eval_metric')}",
+            flush=True,
+        )
+    else:
+        print("[train-wf] mode=entry_only (exit model disabled)", flush=True)
     contract_obj = settings.contract or DEFAULT_TRADE_CONTRACT
 
     cfg = TrainConfig(
@@ -162,7 +181,9 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         max_symbols=int(settings.max_symbols),
         min_symbols_used_per_period=int(settings.min_symbols_used_per_period),
         entry_params=entry_params,
+        exit_params=exit_params,
         max_rows_entry=int(settings.max_rows_entry),
+        max_rows_exit=int(settings.max_rows_exit),
         entry_ratio_neg_per_pos=float(settings.entry_ratio_neg_per_pos),
         use_full_entry_pool=bool(getattr(settings, "use_full_entry_pool", True)),
         full_pool_max_rows_entry=int(getattr(settings, "full_pool_max_rows_entry", 8_000_000)),

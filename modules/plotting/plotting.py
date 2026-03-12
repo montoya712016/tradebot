@@ -127,9 +127,26 @@ def _add_line(
         return
     if gap_threshold is None:
         gap_threshold = timedelta(hours=2)
-    x_arr = pd.to_datetime(x).to_numpy()
     y_arr = np.asarray(y, dtype=float)
     gap_threshold64 = np.timedelta64(gap_threshold)
+    cache_key = (id(x), len(y_arr), int(gap_threshold.total_seconds()))
+    cache = getattr(_add_line, "_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(_add_line, "_cache", cache)
+    cached = cache.get(cache_key)
+    if cached is None:
+        x_arr = pd.to_datetime(x).to_numpy()
+        if len(x_arr) >= 2:
+            gap_break = (x_arr[1:] - x_arr[:-1]) >= gap_threshold64
+        else:
+            gap_break = np.zeros(0, dtype=bool)
+        cache[cache_key] = (x_arr, gap_break)
+        if len(cache) > 8:
+            cache.pop(next(iter(cache)))
+    else:
+        x_arr, gap_break = cached
+
     if len(x_arr) < 2:
         fig.add_trace(
             go.Scatter(x=x_arr, y=y_arr, name=name, mode="lines", line=dict(dash=dash) if dash else None),
@@ -139,33 +156,38 @@ def _add_line(
         return
 
     line_color = _color_for_name(name)
-    start = 0
-    first = True
-    for i in range(1, len(x_arr)):
-        gap = (x_arr[i] - x_arr[i - 1]) >= gap_threshold64
-        nan_break = np.isnan(y_arr[i]) or np.isnan(y_arr[i - 1])
-        if gap or nan_break:
-            if i - start > 1:
-                fig.add_trace(
-                    go.Scatter(
-                        x=x_arr[start:i],
-                        y=y_arr[start:i],
-                        name=name,
-                        mode="lines",
-                        line=dict(color=line_color, dash=dash) if dash else dict(color=line_color),
-                        showlegend=first,
-                        legendgroup=name,
-                    ),
-                    row=row,
-                    col=1,
-                )
-                first = False
-            start = i
-    if len(x_arr) - start > 1:
+    y_nan = np.isnan(y_arr)
+    if (not y_nan.any()) and (not gap_break.any()):
         fig.add_trace(
             go.Scatter(
-                x=x_arr[start:],
-                y=y_arr[start:],
+                x=x_arr,
+                y=y_arr,
+                name=name,
+                mode="lines",
+                line=dict(color=line_color, dash=dash) if dash else dict(color=line_color),
+                showlegend=True,
+                legendgroup=name,
+            ),
+            row=row,
+            col=1,
+        )
+        return
+
+    breaks = np.array(gap_break, copy=True)
+    if y_nan.any():
+        breaks |= (y_nan[1:] | y_nan[:-1])
+    cut_idx = np.where(breaks)[0] + 1
+    starts = np.concatenate(([0], cut_idx))
+    ends = np.concatenate((cut_idx, [len(x_arr)]))
+
+    first = True
+    for start, end in zip(starts, ends):
+        if (end - start) <= 1:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=x_arr[start:end],
+                y=y_arr[start:end],
                 name=name,
                 mode="lines",
                 line=dict(color=line_color, dash=dash) if dash else dict(color=line_color),
@@ -175,6 +197,7 @@ def _add_line(
             row=row,
             col=1,
         )
+        first = False
 
 
 def _add_markers(fig, *, row: int, x, y, name: str, color: str, symbol: str):
@@ -185,7 +208,200 @@ def _add_markers(fig, *, row: int, x, y, name: str, color: str, symbol: str):
     )
 
 
+def _suffix_sort_key(suffix: str) -> tuple[int, str]:
+    s = str(suffix or "")
+    d = "".join(ch for ch in s if ch.isdigit())
+    try:
+        return (int(d), s)
+    except Exception:
+        return (10**9, s)
+
+
+def _exit_suffixes(df: pd.DataFrame) -> list[str]:
+    out: set[str] = set()
+    prefixes = (
+        "sniper_exit_span_q25_",
+        "sniper_exit_span_q50_",
+        "sniper_exit_span_q75_",
+        "sniper_exit_span_q25_dense_",
+        "sniper_exit_span_q50_dense_",
+        "sniper_exit_span_q75_dense_",
+        "sniper_exit_span_target_",
+        "sniper_exit_span_target_dense_",
+    )
+    for c in df.columns:
+        sc = str(c)
+        for p in prefixes:
+            if sc.startswith(p) and sc.endswith("m"):
+                suf = sc[len(p) :]
+                if suf:
+                    out.add(suf)
+    return sorted(out, key=_suffix_sort_key)
+
+
+def _pick_exit_window_cols(df: pd.DataFrame, suffix: str | None = None) -> tuple[str | None, str | None, str | None]:
+    sfx = str(suffix or "").strip()
+    if sfx:
+        if f"sniper_exit_span_q25_{sfx}" in df.columns:
+            lo = f"sniper_exit_span_q25_{sfx}"
+        elif f"sniper_exit_span_q25_dense_{sfx}" in df.columns:
+            lo = f"sniper_exit_span_q25_dense_{sfx}"
+        else:
+            lo = None
+        if f"sniper_exit_span_q75_{sfx}" in df.columns:
+            hi = f"sniper_exit_span_q75_{sfx}"
+        elif f"sniper_exit_span_q75_dense_{sfx}" in df.columns:
+            hi = f"sniper_exit_span_q75_dense_{sfx}"
+        else:
+            hi = None
+        if f"sniper_exit_span_q50_{sfx}" in df.columns:
+            mid = f"sniper_exit_span_q50_{sfx}"
+        elif f"sniper_exit_span_q50_dense_{sfx}" in df.columns:
+            mid = f"sniper_exit_span_q50_dense_{sfx}"
+        elif f"sniper_exit_span_target_{sfx}" in df.columns:
+            mid = f"sniper_exit_span_target_{sfx}"
+        elif f"sniper_exit_span_target_dense_{sfx}" in df.columns:
+            mid = f"sniper_exit_span_target_dense_{sfx}"
+        else:
+            mid = None
+        return lo, mid, hi
+
+    lo = "sniper_exit_span_q25" if "sniper_exit_span_q25" in df.columns else None
+    hi = "sniper_exit_span_q75" if "sniper_exit_span_q75" in df.columns else None
+    if "sniper_exit_span_q50" in df.columns:
+        mid = "sniper_exit_span_q50"
+    elif "sniper_exit_span_target" in df.columns:
+        mid = "sniper_exit_span_target"
+    else:
+        mid = None
+    return lo, mid, hi
+
+
+def _add_exit_window_band(
+    fig,
+    *,
+    row: int,
+    x,
+    lo: np.ndarray | None,
+    hi: np.ndarray | None,
+    name: str,
+    gap_mask: np.ndarray | None = None,
+) -> bool:
+    if lo is None or hi is None:
+        return False
+    lo_arr = _apply_gap_nan(np.asarray(lo, dtype=float), gap_mask)
+    hi_arr = _apply_gap_nan(np.asarray(hi, dtype=float), gap_mask)
+    if lo_arr is None or hi_arr is None:
+        return False
+    if len(lo_arr) == 0 or len(hi_arr) == 0:
+        return False
+    if not (np.isfinite(lo_arr).any() and np.isfinite(hi_arr).any()):
+        return False
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=lo_arr,
+            name=f"{name}_lo",
+            mode="lines",
+            line=dict(color="rgba(242,204,96,0.0)", width=0.0),
+            showlegend=False,
+            legendgroup=name,
+            hoverinfo="skip",
+        ),
+        row=row,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=hi_arr,
+            name=name,
+            mode="lines",
+            line=dict(color="rgba(242,204,96,0.45)", width=0.8),
+            fill="tonexty",
+            fillcolor="rgba(242,204,96,0.15)",
+            legendgroup=name,
+        ),
+        row=row,
+        col=1,
+    )
+    return True
+
+
+def _plot_exit_regression_panel(
+    fig,
+    *,
+    row: int,
+    x,
+    df: pd.DataFrame,
+    line_df: pd.DataFrame | None = None,
+    gap_mask: np.ndarray | None = None,
+    gap_threshold: timedelta | None = None,
+    include_suffix_variants: bool = False,
+) -> None:
+    src = line_df if line_df is not None else df
+    # canonical
+    lo_c, mid_c, hi_c = _pick_exit_window_cols(src, None)
+    plotted_suffix: str | None = None
+    if (lo_c is None) and (mid_c is None) and (hi_c is None):
+        sfxs = _exit_suffixes(src)
+        if sfxs:
+            plotted_suffix = str(sfxs[0])
+            lo_c, mid_c, hi_c = _pick_exit_window_cols(src, plotted_suffix)
+    if (lo_c is not None) and (hi_c is not None):
+        _add_exit_window_band(
+            fig,
+            row=row,
+            x=x,
+            lo=_safe_series(src, lo_c),
+            hi=_safe_series(src, hi_c),
+            name="exit_window",
+            gap_mask=gap_mask,
+        )
+    if mid_c is not None:
+        _add_line(
+            fig,
+            row=row,
+            x=x,
+            y=_apply_gap_nan(_safe_series(src, mid_c), gap_mask),
+            name=mid_c,
+            gap_threshold=gap_threshold,
+        )
+
+    if not bool(include_suffix_variants):
+        return
+
+    # suffixed windows (ex.: 360m)
+    for sfx in _exit_suffixes(src):
+        if plotted_suffix is not None and str(sfx) == str(plotted_suffix):
+            continue
+        lo, mid, hi = _pick_exit_window_cols(src, sfx)
+        if (lo is not None) and (hi is not None):
+            _add_exit_window_band(
+                fig,
+                row=row,
+                x=x,
+                lo=_safe_series(src, lo),
+                hi=_safe_series(src, hi),
+                name=f"exit_window_{sfx}",
+                gap_mask=gap_mask,
+            )
+        if mid is not None:
+            _add_line(
+                fig,
+                row=row,
+                x=x,
+                y=_apply_gap_nan(_safe_series(src, mid), gap_mask),
+                name=mid,
+                gap_threshold=gap_threshold,
+            )
+
+
 def _build_panels(flags: dict[str, Any]) -> list[str]:
+    entry_only_mode = str(os.getenv("PF_ENTRY_ONLY", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if not entry_only_mode:
+        train_exit_on = str(os.getenv("SNIPER_TRAIN_EXIT_MODEL", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        entry_only_mode = not train_exit_on
     panels = ["candles"]
     if flags.get("shitidx"):
         panels.append("shitidx")
@@ -243,6 +459,10 @@ def _build_panels(flags: dict[str, Any]) -> list[str]:
         panels.append("eff")
     if flags.get("label"):
         panels.append("entry_weights")
+        if flags.get("oracle_equity"):
+            panels.append("oracle_equity")
+        if not entry_only_mode:
+            panels.append("exit_regression")
     return panels
 
 
@@ -261,6 +481,7 @@ def plot_all(
     mark_gaps: bool = True,
     show_price_ema: bool = False,
     price_ema_span: int | None = None,
+    show_label_markers: bool = True,
 ):
     """
     Plot main chart with optional indicator panels using plotly.
@@ -962,27 +1183,47 @@ def plot_all(
 
         # entry_weights
         if "entry_weights" in row_map:
-            for col in df.columns:
-                if col.startswith("sniper_entry_weight_") and col.endswith("m"):
-                    _add_line(
-                        fig,
-                        row=row_map["entry_weights"],
-                        x=x,
-                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
-                        name=col,
-                        gap_threshold=gap_threshold,
-                    )
-            for col in ("sniper_price_weight_long",):
-                if col in df.columns:
-                    _add_line(
-                        fig,
-                        row=row_map["entry_weights"],
-                        x=x,
-                        y=_apply_gap_nan(_safe_series(line_df, col), gap_mask),
-                        name=col,
-                        gap_threshold=gap_threshold,
-                    )
+            wcol = "sniper_entry_weight" if "sniper_entry_weight" in df.columns else ""
+            if not wcol:
+                wcols = sorted([c for c in df.columns if c.startswith("sniper_entry_weight_") and c.endswith("m")])
+                if wcols:
+                    wcol = str(wcols[0])
+            if wcol:
+                _add_line(
+                    fig,
+                    row=row_map["entry_weights"],
+                    x=x,
+                    y=_apply_gap_nan(_safe_series(line_df, wcol), gap_mask),
+                    name="entry_weight",
+                    gap_threshold=gap_threshold,
+                )
+        if "oracle_equity" in row_map:
+            ecol = "sniper_oracle_equity" if "sniper_oracle_equity" in df.columns else ""
+            if not ecol and "oracle_equity" in df.columns:
+                ecol = "oracle_equity"
+            if ecol:
+                _add_line(
+                    fig,
+                    row=row_map["oracle_equity"],
+                    x=x,
+                    y=_apply_gap_nan(_safe_series(line_df, ecol), gap_mask),
+                    name="oracle_equity",
+                    gap_threshold=gap_threshold,
+                )
             # labels sao marcados apenas no candle
+        # exit_regression
+        if "exit_regression" in row_map:
+            show_all_exit_variants = str(os.getenv("PF_PLOT_EXIT_SHOW_ALL_VARIANTS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+            _plot_exit_regression_panel(
+                fig,
+                row=row_map["exit_regression"],
+                x=x,
+                df=df,
+                line_df=line_df,
+                gap_mask=gap_mask,
+                gap_threshold=gap_threshold,
+                include_suffix_variants=bool(show_all_exit_variants),
+            )
     else:
         # fallback: detect columns by prefix (evita dependência circular com pf_config)
         def _plot_prefix(panel: str, prefixes: tuple[str, ...]):
@@ -1029,34 +1270,50 @@ def plot_all(
         _plot_prefix("mom_short", ("slope_diff_",))
         _plot_prefix("wick_stats", ("wick_lower_", "wick_upper_", "wick_"))
         _plot_prefix("eff", ("eff_",))
+        if "exit_regression" in row_map:
+            show_all_exit_variants = str(os.getenv("PF_PLOT_EXIT_SHOW_ALL_VARIANTS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+            _plot_exit_regression_panel(
+                fig,
+                row=row_map["exit_regression"],
+                x=x,
+                df=df,
+                line_df=df,
+                gap_mask=None,
+                gap_threshold=gap_threshold,
+                include_suffix_variants=bool(show_all_exit_variants),
+            )
         if "entry_weights" in row_map:
-            for col in df.columns:
-                # Evita plotar alias sem sufixo de janela (ex.: sniper_entry_weight_hybrid),
-                # pois ele costuma duplicar exatamente a curva *_360m.
-                if col.startswith("sniper_entry_weight_") and col.endswith("m"):
-                    _add_line(
-                        fig,
-                        row=row_map["entry_weights"],
-                        x=x,
-                        y=_safe_series(df, col),
-                        name=col,
-                        gap_threshold=gap_threshold,
-                    )
-        if "entry_weights" in row_map:
-            for col in ("sniper_price_weight_long",):
-                if col in df.columns:
-                    _add_line(
-                        fig,
-                        row=row_map["entry_weights"],
-                        x=x,
-                        y=_safe_series(df, col),
-                        name=col,
-                        gap_threshold=gap_threshold,
-                    )
+            wcol = "sniper_entry_weight" if "sniper_entry_weight" in df.columns else ""
+            if not wcol:
+                wcols = sorted([c for c in df.columns if c.startswith("sniper_entry_weight_") and c.endswith("m")])
+                if wcols:
+                    wcol = str(wcols[0])
+            if wcol:
+                _add_line(
+                    fig,
+                    row=row_map["entry_weights"],
+                    x=x,
+                    y=_safe_series(df, wcol),
+                    name="entry_weight",
+                    gap_threshold=gap_threshold,
+                )
+        if "oracle_equity" in row_map:
+            ecol = "sniper_oracle_equity" if "sniper_oracle_equity" in df.columns else ""
+            if not ecol and "oracle_equity" in df.columns:
+                ecol = "oracle_equity"
+            if ecol:
+                _add_line(
+                    fig,
+                    row=row_map["oracle_equity"],
+                    x=x,
+                    y=_safe_series(df, ecol),
+                    name="oracle_equity",
+                    gap_threshold=gap_threshold,
+                )
 
     # Label markers on candles (sniper_entry_label_* == 1)
     shapes = []
-    if "candles" in row_map:
+    if show_label_markers and "candles" in row_map:
         try:
             y0 = float(np.nanmin(df["low"].to_numpy(dtype=float, copy=False)))
             y1 = float(np.nanmax(df["high"].to_numpy(dtype=float, copy=False)))
@@ -1305,6 +1562,8 @@ def plot_backtest_single(
     p_entry: np.ndarray,
     p_entry_long: np.ndarray | None = None,
     p_entry_short: np.ndarray | None = None,
+    p_exit: np.ndarray | None = None,
+    p_exit_used: np.ndarray | None = None,
     p_danger: np.ndarray | None = None,
     entry_sig: np.ndarray,
     danger_sig: np.ndarray | None = None,
@@ -1339,6 +1598,13 @@ def plot_backtest_single(
     panels = ["candles"]
     if plot_probs:
         panels.append("probs")
+        if p_exit is not None:
+            try:
+                px = np.asarray(p_exit, dtype=float)
+                if px.shape[0] == len(df) and np.isfinite(px).any():
+                    panels.append("exit")
+            except Exception:
+                pass
     if plot_signals:
         panels.append("signals")
     panels.append("equity")
@@ -1348,6 +1614,8 @@ def plot_backtest_single(
             ratios.append(3.0 if (plot_probs or plot_signals) else 2.5)
         elif p == "probs":
             ratios.append(1.2)
+        elif p == "exit":
+            ratios.append(0.9)
         elif p == "signals":
             ratios.append(0.8)
         elif p == "equity":
@@ -1517,6 +1785,105 @@ def plot_backtest_single(
                     line=dict(color="#ff7b72", dash="dash", width=1),
                 ),
                 row=row_map["probs"],
+                col=1,
+            )
+
+    if "exit" in row_map:
+        # Faixa de labels (q25..q75) opcional; por padrao escondida no backtest.
+        show_label_window = str(os.getenv("BT_PLOT_EXIT_LABEL_WINDOW", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        if show_label_window:
+            lo_col, _mid_col, hi_col = _pick_exit_window_cols(df, None)
+            if (lo_col is None) or (hi_col is None):
+                sfxs = _exit_suffixes(df)
+                if sfxs:
+                    lo_col, _mid_col, hi_col = _pick_exit_window_cols(df, sfxs[0])
+            if (lo_col is not None) and (hi_col is not None):
+                _add_exit_window_band(
+                    fig,
+                    row=row_map["exit"],
+                    x=idx,
+                    lo=_safe_series(df, lo_col),
+                    hi=_safe_series(df, hi_col),
+                    name="exit_window_label",
+                    gap_mask=gap_mask,
+                )
+
+        fig.add_trace(
+            go.Scatter(
+                x=idx,
+                y=_apply_gap_nan(np.asarray(p_exit, dtype=float), gap_mask),
+                name="p_exit",
+                mode="lines",
+                line=dict(color="#f2cc60", width=1.1),
+            ),
+            row=row_map["exit"],
+            col=1,
+        )
+
+        # Janela operacional do backtest em torno do span usado/predito.
+        base_span = p_exit_used if p_exit_used is not None else p_exit
+        try:
+            bw = np.asarray(base_span, dtype=float)
+            if bw.shape[0] == len(idx) and np.isfinite(bw).any():
+                candle_seconds = 60.0
+                try:
+                    if len(idx) >= 2:
+                        candle_seconds = max(
+                            1.0,
+                            float((pd.to_datetime(idx[1]) - pd.to_datetime(idx[0])).total_seconds()),
+                        )
+                except Exception:
+                    candle_seconds = 60.0
+                step = max(2.0, round((15.0 * 60.0) / candle_seconds))
+                try:
+                    mins_raw = str(
+                        os.getenv(
+                            "PF_EXIT_SPAN_GRID_MIN",
+                            "15,30,45,60,75,90,105,120,135,150,165,180,195,210,225,240,255,270,285,300,315,330,345,360,375,390,405,420,435,450,465,480,495,510,525,540,555,570,585,600,615,630,645,660,675,690,705,720",
+                        )
+                        or ""
+                    )
+                    mins = [int(x.strip()) for x in mins_raw.replace(";", ",").split(",") if x.strip()]
+                    bars = sorted(
+                        {
+                            int(max(2, round((float(m) * 60.0) / candle_seconds)))
+                            for m in mins
+                            if int(m) > 0
+                        }
+                    )
+                    if len(bars) >= 2:
+                        d = np.diff(np.asarray(bars, dtype=float))
+                        if d.size > 0 and np.isfinite(np.nanmedian(d)) and float(np.nanmedian(d)) > 0.0:
+                            step = max(2.0, float(np.nanmedian(d)))
+                except Exception:
+                    pass
+                w_pct = float(max(0.0, float(os.getenv("BT_EXIT_SPAN_WINDOW_PCT", "0.20") or "0.20")))
+                w_steps = float(max(0.0, float(os.getenv("BT_EXIT_SPAN_WINDOW_STEPS", "2.0") or "2.0")))
+                half = np.maximum(bw * w_pct, step * w_steps)
+                lo = np.maximum(2.0, bw - half)
+                hi = np.maximum(lo, bw + half)
+                _add_exit_window_band(
+                    fig,
+                    row=row_map["exit"],
+                    x=idx,
+                    lo=lo,
+                    hi=hi,
+                    name="exit_window_used",
+                    gap_mask=gap_mask,
+                )
+        except Exception:
+            pass
+
+        if p_exit_used is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=idx,
+                    y=_apply_gap_nan(np.asarray(p_exit_used, dtype=float), gap_mask),
+                    name="span_used",
+                    mode="lines",
+                    line=dict(color="#58a6ff", width=1.0, dash="dot"),
+                ),
+                row=row_map["exit"],
                 col=1,
             )
 

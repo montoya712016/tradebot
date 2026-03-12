@@ -56,11 +56,17 @@ def _ensure_contract_labels(
     entry_label_col: str = "sniper_entry_label",
     entry_weight_col: str = "",
     exit_code_col: str = "",
+    exit_target_col: str = "",
+    exit_weight_col: str = "",
 ) -> None:
-    # Se faltar label (ou weight solicitado), gera labels do contrato.
+    # Se faltar label/weight solicitado, gera labels do contrato.
     need_rebuild = str(entry_label_col) not in df.columns
     if str(entry_weight_col):
         need_rebuild = need_rebuild or (str(entry_weight_col) not in df.columns)
+    if str(exit_target_col):
+        need_rebuild = need_rebuild or (str(exit_target_col) not in df.columns)
+    if str(exit_weight_col):
+        need_rebuild = need_rebuild or (str(exit_weight_col) not in df.columns)
     if need_rebuild:
         apply_trade_contract_labels(df, contract=contract, candle_sec=candle_sec)
 
@@ -73,6 +79,8 @@ def build_sniper_datasets(
     entry_label_col: str = "sniper_entry_label",
     entry_weight_col: str = "",
     exit_code_col: str = "",
+    exit_target_col: str = "sniper_exit_span_target",
+    exit_weight_col: str = "sniper_exit_span_weight",
     max_add_starts: int = 20_000,
     max_exit_starts: int = 8_000,
     exit_neg_frac: float = 0.35,
@@ -81,13 +89,14 @@ def build_sniper_datasets(
     # Margem do exit: em 1m, 0.2% costuma ser pequeno demais e gera label_exit quase morto.
     exit_margin_pct: float = 0.006,
     seed: int = 42,
+    enable_exit_dataset: bool = True,
 ) -> SniperDataset:
     """
     Constrói quatro dataframes:
         - entry: todas as barras com o label de entry informado (ex.: sniper_entry_label ou sniper_entry_label_360m)
         - add: vazio (adds removidos)
         - danger: vazio (danger removido)
-        - exit: vazio (exit model removido)
+        - exit: barras com target de span EMA (regressão)
     Cada dataframe já inclui colunas de estado (cycle_*).
     """
     contract = contract or DEFAULT_TRADE_CONTRACT
@@ -99,6 +108,8 @@ def build_sniper_datasets(
         entry_label_col=str(entry_label_col),
         entry_weight_col=str(entry_weight_col),
         exit_code_col=str(exit_code_col),
+        exit_target_col=str(exit_target_col),
+        exit_weight_col=str(exit_weight_col),
     )
 
     entry_mask = df[str(entry_label_col)].notna()
@@ -123,7 +134,34 @@ def build_sniper_datasets(
     ]
     add_df = pd.DataFrame(columns=empty_cols + ["label_entry"])
     danger_df = pd.DataFrame(columns=empty_cols + ["label_danger"])
-    exit_df = pd.DataFrame(columns=empty_cols + ["label_exit"])
+    tgt_col = str(exit_target_col or "").strip()
+    w_col = str(exit_weight_col or "").strip()
+    if not bool(enable_exit_dataset):
+        tgt_col = ""
+        w_col = ""
+    else:
+        if (not tgt_col) or (tgt_col not in df.columns):
+            tgt_col = "sniper_exit_span_target" if "sniper_exit_span_target" in df.columns else ""
+        if (not w_col) or (w_col not in df.columns):
+            w_col = "sniper_exit_span_weight" if "sniper_exit_span_weight" in df.columns else ""
+    if tgt_col:
+        tgt = pd.to_numeric(df[tgt_col], errors="coerce")
+        exit_mask = tgt.notna() & np.isfinite(tgt.to_numpy(dtype=np.float64, copy=False)) & (tgt > 0.0)
+        exit_df = df.loc[exit_mask].copy()
+        exit_df["ts"] = exit_df.index
+        exit_df["cycle_is_add"] = 0
+        exit_df["cycle_num_adds"] = 0
+        exit_df["cycle_time_in_trade"] = 0
+        exit_df["cycle_dd_pct"] = 0.0
+        exit_df["cycle_avg_entry_price"] = exit_df["close"]
+        exit_df["cycle_last_fill_price"] = exit_df["close"]
+        exit_df["label_exit"] = pd.to_numeric(exit_df[tgt_col], errors="coerce").astype(np.float32)
+        if w_col and (w_col in exit_df.columns):
+            exit_df["label_exit_weight"] = pd.to_numeric(exit_df[w_col], errors="coerce").fillna(1.0).clip(lower=1.0).astype(np.float32)
+        else:
+            exit_df["label_exit_weight"] = np.float32(1.0)
+    else:
+        exit_df = pd.DataFrame(columns=empty_cols + ["label_exit", "label_exit_weight"])
 
     meta = dict(
         candle_sec=candle_sec,

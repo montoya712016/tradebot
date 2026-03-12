@@ -248,8 +248,8 @@ def render_feature_studio(
     // guarda cópias base para reconstruir sob demanda
     const baseData = fig.data || [];
     const baseLayout = fig.layout || {{}};
-    Plotly.newPlot(plotDiv, baseData, baseLayout, {{responsive: true}});
-    Plotly.Plots.resize(plotDiv);
+    // render inicial leve; o conteúdo final vem do rebuildPlot()
+    Plotly.newPlot(plotDiv, [], baseLayout, {{responsive: true}});
 
     const groupState = {{}};
     for (const key of Object.keys(groups)) {{
@@ -267,7 +267,8 @@ def render_feature_studio(
       if (priceTraces.length === 0) return;
 
       const cloneTrace = (idx, targetRow) => {{
-        const t = JSON.parse(JSON.stringify(baseData[idx]));
+        const src = baseData[idx] || {{}};
+        const t = Object.assign({{}}, src);
         const yName = axisName("y", targetRow);
         const xName = axisName("x", targetRow);
         t.yaxis = yName;
@@ -286,6 +287,15 @@ def render_feature_studio(
           (t) => selected.length === 0 || selected.includes(t.name || "")
         );
         if (!enabledTraces.length) continue;
+        if (group === "label") {{
+          for (const panelName of ["entry_weights", "exit_regression"]) {{
+            const panelTraces = enabledTraces.filter((t) => t.panel === panelName);
+            if (!panelTraces.length) continue;
+            row += 1;
+            panelTraces.forEach((tr) => data.push(cloneTrace(tr.i, row)));
+          }}
+          continue;
+        }}
         row += 1;
         enabledTraces.forEach((tr) => data.push(cloneTrace(tr.i, row)));
       }}
