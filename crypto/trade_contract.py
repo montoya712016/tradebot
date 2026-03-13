@@ -53,9 +53,12 @@ __all__ = [
 
 
 def exit_ema_span_from_window(contract: TradeContract, candle_sec: int = 60) -> int:
+    explicit_span = int(getattr(contract, "exit_ema_span", 0) or 0)
+    if explicit_span > 0:
+        return explicit_span
     windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
     if not windows:
-        return int(getattr(contract, "exit_ema_span", 0) or 0)
+        return 0
     candle_sec = int(max(1, candle_sec))
     w_min = float(windows[0])
     return int(max(1, round((w_min * 60.0) / float(candle_sec))))

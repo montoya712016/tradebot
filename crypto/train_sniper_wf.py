@@ -43,23 +43,25 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def main() -> None:
+    # Config fixa (sem flags/ENV de controle de fluxo)
     max_symbols = 0
     total_days = 0
     mcap_min_usd = 100_000_000.0
     mcap_max_usd = 150_000_000_000.0
-    refresh_labels_before_train = _env_bool("CRYPTO_REFRESH_LABELS_BEFORE_TRAIN", False)
-    prewarm_ohlc_before_train = _env_bool("CRYPTO_PREWARM_OHLC_BEFORE_TRAIN", False)
-    use_full_entry_pool = _env_bool("CRYPTO_USE_FULL_ENTRY_POOL", True)
+    # Apos mudar o label/weight, o proximo treino precisa regravar labels no cache.
+    refresh_labels_before_train = True
+    prewarm_ohlc_before_train = False
+    use_full_entry_pool = True
     # Safe mode (default): forca limites conservadores de recursos para evitar BSOD
     # em cargas longas de cache/dataset. Pode desligar com CRYPTO_FORCE_SAFE_RESOURCES=0.
-    force_safe = _env_bool("CRYPTO_FORCE_SAFE_RESOURCES", True)
+    force_safe = True
     if bool(force_safe):
         os.environ["SNIPER_CACHE_WORKERS"] = "1"
         os.environ["SNIPER_DATASET_WORKERS"] = "1"
         os.environ["SNIPER_CACHE_RAM_PCT"] = "72"
         os.environ["SNIPER_DATASET_RAM_PCT"] = "75"
-        os.environ["SNIPER_CACHE_CRITICAL_RAM_PCT"] = "85"
-        os.environ["SNIPER_DATASET_CRITICAL_RAM_PCT"] = "85"
+        os.environ["SNIPER_CACHE_CRITICAL_RAM_PCT"] = "92"
+        os.environ["SNIPER_DATASET_CRITICAL_RAM_PCT"] = "92"
         os.environ["SNIPER_CACHE_MIN_FREE_MB"] = "4096"
         os.environ["SNIPER_DATASET_MIN_FREE_MB"] = "4096"
         os.environ["SNIPER_CACHE_PER_WORKER_MB"] = "1536"
@@ -70,18 +72,42 @@ def main() -> None:
     # - isotonic pode "achatar" em patamares quando o sinal e ruidoso
     os.environ["SNIPER_ENTRY_CALIB_METHOD"] = "platt"
     os.environ["SNIPER_ENTRY_CALIB_USE_WEIGHTS"] = "0"
-    os.environ["SNIPER_ENTRY_CALIB_PLATT_C"] = "0.1"
-    os.environ["SNIPER_ENTRY_CALIB_COEF_MIN"] = "0.25"
-    os.environ["SNIPER_ENTRY_CALIB_COEF_MAX"] = "2.50"
-    os.environ["SNIPER_ENTRY_CALIB_INTERCEPT_MIN"] = "-4.00"
-    os.environ["SNIPER_ENTRY_CALIB_INTERCEPT_MAX"] = "0.50"
-    # Usa weight para sampling/bins, mas nao na loss do classificador.
-    os.environ["SNIPER_ENTRY_USE_LABEL_WEIGHTS"] = "0"
+    os.environ["SNIPER_ENTRY_CALIB_PLATT_C"] = "0.80"
+    os.environ["SNIPER_ENTRY_CALIB_COEF_MIN"] = "0.10"
+    os.environ["SNIPER_ENTRY_CALIB_COEF_MAX"] = "8.00"
+    os.environ["SNIPER_ENTRY_CALIB_INTERCEPT_MIN"] = "-8.00"
+    os.environ["SNIPER_ENTRY_CALIB_INTERCEPT_MAX"] = "3.00"
+    os.environ["SNIPER_ENTRY_CALIB_TAIL_BLEND"] = "1.0"
+    os.environ["SNIPER_ENTRY_CALIB_TAIL_START"] = "0.95"
+    os.environ["SNIPER_ENTRY_CALIB_TAIL_POWER"] = "1.00"
+    os.environ["SNIPER_ENTRY_CALIB_TAIL_BOOST"] = "1.35"
+    os.environ["SNIPER_ENTRY_CALIB_PRIOR_STRENGTH"] = "1.0"
+    os.environ["SNIPER_ENTRY_CALIB_PRIOR_SHIFT_CLIP"] = "6.0"
+    # Usa weight tambem na loss, com normalizacao controlada no trainer.
+    os.environ["SNIPER_ENTRY_USE_LABEL_WEIGHTS"] = "1"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_CLASS_NORM"] = "1"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MIN"] = "0.0"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX"] = "20.0"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX_POS"] = "6.0"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX_NEG"] = "10.0"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_POWER"] = "1.00"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_POWER_POS"] = "0.65"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_POWER_NEG"] = "0.90"
+    os.environ["SNIPER_ENTRY_LOSS_WEIGHT_MEAN_NORM"] = "0"
     # Mantem probabilidades ancoradas na prevalencia real do recorte.
     os.environ["SNIPER_ENTRY_CLASS_BALANCE_WEIGHTS"] = "0"
     os.environ["SNIPER_ENTRY_CLASS_BALANCE_STRENGTH"] = "0.0"
-    # Label/weight: r_net > 0 e pesos baixos para retornos marginais.
-    os.environ["PF_ENTRY_LABEL_NET_PROFIT_THR"] = "0.0"
+    # Label/weight: premia trajetoria consistente, nao apenas spike isolado.
+    os.environ["PF_ENTRY_LABEL_NET_PROFIT_THR"] = "0.0045"
+    os.environ["PF_ENTRY_LABEL_MIN_FUTURE_AVG_NET"] = "0.0012"
+    os.environ["PF_ENTRY_LABEL_EARLY_WINDOW_MIN"] = "15"
+    os.environ["PF_ENTRY_LABEL_MIN_FUTURE_EARLY_AVG_NET"] = "0.0005"
+    os.environ["PF_ENTRY_LABEL_MIN_FUTURE_EARLY_WORST_NET"] = "-0.0035"
+    os.environ["PF_ENTRY_LABEL_MIN_RISK_SCORE"] = "0.0000"
+    os.environ["PF_ENTRY_LABEL_MIN_FUTURE_EFF"] = "0.09"
+    os.environ["PF_ENTRY_LABEL_MIN_FUTURE_POS_FRAC"] = "0.52"
+    os.environ["PF_ENTRY_LABEL_MIN_CONSISTENCY_SCORE"] = "0.0015"
+    os.environ["PF_ENTRY_LABEL_MIN_CONTRACT_MAE"] = "-0.010"
     os.environ["PF_ENTRY_WEIGHT_RET_SCALE_POS"] = "0.04"
     os.environ["PF_ENTRY_WEIGHT_RET_SCALE_NEG"] = "0.03"
     os.environ["PF_ENTRY_WEIGHT_RET_DEADZONE"] = "0.002"
@@ -89,10 +115,37 @@ def main() -> None:
     os.environ["PF_ENTRY_WEIGHT_NEG_GAIN"] = "5.0"
     os.environ["PF_ENTRY_WEIGHT_POS_POWER"] = "2.6"
     os.environ["PF_ENTRY_WEIGHT_NEG_POWER"] = "2.2"
-    os.environ["PF_ENTRY_WEIGHT_MODE"] = "ret_pct_abs"
-    os.environ["PF_ENTRY_WEIGHT_PCT_POWER"] = "1.0"
+    os.environ["PF_ENTRY_WEIGHT_MODE"] = "future_consistency_dir"
+    os.environ["PF_ENTRY_WEIGHT_PCT_POWER"] = "1.35"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_WINDOW_MIN"] = "60"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_DD_PENALTY"] = "1.20"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_AVG_SOFTCAP"] = "0.015"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_END_SOFTCAP"] = "0.020"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_EARLY_AVG_SOFTCAP"] = "0.008"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_END_GAIN"] = "0.35"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_EARLY_GAIN"] = "1.00"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_EARLY_DD_PENALTY"] = "1.10"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_EFF_GAIN"] = "0.0200"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_POS_FRAC_GAIN"] = "0.0150"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_POS_SCALE"] = "1.70"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_NEG_SCALE"] = "0.70"
+    os.environ["PF_ENTRY_WEIGHT_MAX"] = "20.0"
     # Bins mais finos para weight no sampling.
-    os.environ["SNIPER_ENTRY_WEIGHT_BIN_STEP_X10"] = "2"
+    os.environ["SNIPER_ENTRY_WEIGHT_BIN_STEP_X10"] = "5"
+    os.environ["SNIPER_ENTRY_WEIGHT_BIN_MAX"] = "20.0"
+    # Reduz ruido de positivos marginais (0~0.5%) sem remover completamente.
+    os.environ["SNIPER_ENTRY_POS_KEEP_FRACTION"] = "0.85"
+    os.environ["SNIPER_ENTRY_POS_MIN_WEIGHT"] = "0.75"
+    os.environ["SNIPER_ENTRY_NEG_FAVOR_HIGH"] = "1"
+    # Pool-full persistido/reusado automaticamente entre execuções.
+    os.environ["SNIPER_FULL_POOL_REUSE"] = "1"
+    os.environ["SNIPER_FULL_POOL_REBUILD"] = "1"
+    # Usa mtime no fingerprint para invalidar pool quando labels forem regravados.
+    os.environ["SNIPER_FULL_POOL_FINGERPRINT_MODE"] = "mtime"
+    # Evita fallback para pool antigo incompativel quando o hash atual mudar.
+    os.environ["SNIPER_FULL_POOL_USE_LAST"] = "0"
+    os.environ["SNIPER_FULL_POOL_CACHE_DIR"] = "D:/astra/cache_sniper/full_pool"
+    print(f"[train-wf-crypto] full_pool_cache_dir={os.environ['SNIPER_FULL_POOL_CACHE_DIR']}", flush=True)
 
     # Modo default: reaproveita cache de features e só faz refresh de labels.
     if bool(prewarm_ohlc_before_train):
@@ -110,7 +163,7 @@ def main() -> None:
     else:
         print("[train-wf-crypto] ohlc prewarm: skipped (labels-only refresh mode)", flush=True)
 
-    metric_mode = _env_str("CRYPTO_ENTRY_METRIC_MODE", "aucpr")
+    metric_mode = "aucpr"
     contract = TradeContract(
         timeframe_sec=60,
         entry_label_windows_minutes=(240,),
@@ -144,15 +197,15 @@ def main() -> None:
         entry_params={
             "objective": "binary:logistic",
             "eval_metric": "aucpr",
-            "eta": 0.05,
-            "max_depth": 7,
-            "min_child_weight": 4,
-            "gamma": 0.10,
-            "subsample": 0.85,
-            "colsample_bytree": 0.85,
+            "eta": 0.04,
+            "max_depth": 6,
+            "min_child_weight": 8,
+            "gamma": 0.20,
+            "subsample": 0.80,
+            "colsample_bytree": 0.80,
             "max_bin": 256,
-            "lambda": 2.0,
-            "alpha": 0.20,
+            "lambda": 3.0,
+            "alpha": 0.40,
             "tree_method": "hist",
             "device": "cuda:0",
         },
@@ -162,12 +215,12 @@ def main() -> None:
         offsets_step_days=180,
         # Corta tails mais antigos (T-1620+), onde o train-aucpr começou a inflar demais.
         offsets_days=(0, 180, 360, 540, 720, 900, 1080, 1260, 1440),
-        entry_ratio_neg_per_pos=4.0,
+        entry_ratio_neg_per_pos=3.0,
         max_rows_entry=2_000_000,
         max_rows_exit=0,
         use_full_entry_pool=bool(use_full_entry_pool),
         # Pool full para slicing por periodo (evita rebuild completo por step).
-        full_pool_max_rows_entry=3_000_000,
+        full_pool_max_rows_entry=2_000_000,
         min_symbols_used_per_period=30,
     )
     run_dir = run(settings)

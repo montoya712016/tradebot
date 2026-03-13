@@ -304,7 +304,15 @@ def _apply_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
         return p
     a = float(calib.get("coef", 1.0))
     b = float(calib.get("intercept", 0.0))
-    z = a * p + b
+    prior_shift = float(calib.get("prior_shift", 0.0) or 0.0)
+    space = str(calib.get("space", "prob")).strip().lower()
+    pp = np.asarray(p, dtype=np.float64)
+    if space == "logit":
+        eps = 1e-6
+        pp = np.clip(pp, eps, 1.0 - eps)
+        z = a * np.log(pp / (1.0 - pp)) + b + prior_shift
+    else:
+        z = a * pp + b + prior_shift
     return _sigmoid(z)
 
 

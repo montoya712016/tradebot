@@ -1034,31 +1034,24 @@ def prepare_sniper_dataset(
                 return take.astype(np.int64, copy=False)
 
             w_all = pd.to_numeric(df_in[weight_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-            w = np.clip(np.nan_to_num(w_all[idx_src], nan=0.0, posinf=7.0, neginf=0.0), 0.0, 7.0)
-            # bins finos (step configuravel) em [0.0, 7.0]
-            bin_step = float(_env_int("SNIPER_ENTRY_WEIGHT_BIN_STEP_X10", 5)) / 10.0
+            try:
+                bin_max = float(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_MAX", "7.0") or "7.0")
+            except Exception:
+                bin_max = 7.0
+            if (not np.isfinite(bin_max)) or bin_max <= 0.0:
+                bin_max = 7.0
+            w = np.clip(np.nan_to_num(w_all[idx_src], nan=0.0, posinf=bin_max, neginf=0.0), 0.0, bin_max)
+            # bins finos (step configuravel) em [0.0, bin_max]
+            bin_step = float(_env_int("SNIPER_ENTRY_WEIGHT_BIN_STEP_X10", 1)) / 10.0
             if (not np.isfinite(bin_step)) or bin_step <= 0.0:
                 bin_step = 0.5
-            n_bins = int(max(8, round(7.0 / bin_step)))
+            n_bins = int(max(8, round(bin_max / bin_step)))
             bins = np.floor(w / bin_step).astype(np.int32, copy=False)
             bins = np.clip(bins, 0, n_bins - 1)
 
-            # Preserva pico (ultimo bin, proximo de 7) sempre que couber.
-            peak_bin = int(n_bins - 1)
-            peak_rel = np.flatnonzero(bins == peak_bin)
-            if peak_rel.size >= target_n:
-                take_rel = rng.choice(peak_rel, size=target_n, replace=False)
-                out = idx_src[take_rel]
-                out.sort()
-                return out.astype(np.int64, copy=False)
+            # Nao forca manter todo o bin de pico; isso colapsa o dataset em um unico bin.
             selected_rel: list[np.ndarray] = []
-            if peak_rel.size > 0:
-                selected_rel.append(peak_rel)
-            rem = int(target_n - peak_rel.size)
-            if rem <= 0:
-                out = idx_src[np.concatenate(selected_rel)] if selected_rel else np.empty((0,), dtype=np.int64)
-                out.sort()
-                return out.astype(np.int64, copy=False)
+            rem = int(target_n)
 
             # Quotas por bin:
             # - favor_high=True: prioriza bins mais altos
@@ -1072,18 +1065,25 @@ def prepare_sniper_dataset(
                 rel = np.flatnonzero(bins == b)
                 rel_by_bin.append(rel)
                 counts[b] = int(rel.size)
-            # pico ja reservado
             counts_eff = counts.copy()
-            counts_eff[peak_bin] = 0
             if int(counts_eff.sum()) <= 0:
                 out = idx_src[np.concatenate(selected_rel)] if selected_rel else np.empty((0,), dtype=np.int64)
                 out.sort()
                 return out.astype(np.int64, copy=False)
 
-            score = factors * counts_eff.astype(np.float64)
+            # Mistura prioridade por qualidade com cobertura dos bins.
+            # O objetivo aqui nao e colapsar o pool nos bins de pico, e sim
+            # manter bins medios/altos vivos para o modelo aprender trades
+            # mais consistentes, nao apenas outliers.
+            span = np.linspace(0.0, 1.0, n_bins, dtype=np.float64)
+            if not favor_high:
+                span = span[::-1]
+            bias_strength = 1.25 if favor_high else 0.75
+            bias = 1.0 + (bias_strength * span)
+            score = bias * np.power(np.maximum(1.0, counts_eff.astype(np.float64)), 0.75)
             ssum = float(np.sum(score))
             if (not np.isfinite(ssum)) or ssum <= 0.0:
-                pool_rel = np.flatnonzero(bins != peak_bin)
+                pool_rel = np.arange(idx_src.size, dtype=np.int64)
                 if rem >= pool_rel.size:
                     chosen_rel = pool_rel
                 else:
@@ -1142,7 +1142,27 @@ def prepare_sniper_dataset(
 
         ratio = float(max(0.0, ratio_neg_per_pos))
         max_rows = int(max_rows)
+        if weight_col and weight_col in df_in.columns:
+            try:
+                pos_min_w = float(os.getenv("SNIPER_ENTRY_POS_MIN_WEIGHT", "0.0") or "0.0")
+            except Exception:
+                pos_min_w = 0.0
+            if np.isfinite(pos_min_w) and pos_min_w > 0.0:
+                w_all_pos = pd.to_numeric(df_in[weight_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+                wp = np.nan_to_num(w_all_pos[pos_idx], nan=0.0, posinf=0.0, neginf=0.0)
+                pos_idx = pos_idx[wp >= float(pos_min_w)]
+                if pos_idx.size == 0:
+                    return df_in.iloc[0:0].copy()
         pos_keep_n = int(pos_idx.size)
+        try:
+            pos_keep_frac = float(os.getenv("SNIPER_ENTRY_POS_KEEP_FRACTION", "1.0") or "1.0")
+        except Exception:
+            pos_keep_frac = 1.0
+        neg_favor_high = str(os.getenv("SNIPER_ENTRY_NEG_FAVOR_HIGH", "0") or "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+        if (not np.isfinite(pos_keep_frac)) or pos_keep_frac <= 0.0:
+            pos_keep_frac = 1.0
+        if pos_keep_frac < 1.0:
+            pos_keep_n = min(pos_keep_n, int(max(1, round(pos_idx.size * pos_keep_frac))))
         if max_rows > 0:
             max_pos = int(max(1, round(max_rows / (1.0 + ratio))))
             pos_keep_n = min(pos_keep_n, max_pos)
@@ -1159,7 +1179,8 @@ def prepare_sniper_dataset(
         if neg_target <= 0 or neg_idx.size == 0:
             keep = pos_keep
         else:
-            neg_keep = _sample_weight_bins(neg_idx, neg_target, favor_high=True)
+            # Negativos: quando habilitado, prioriza bins altos para reforcar falsos positivos caros.
+            neg_keep = _sample_weight_bins(neg_idx, neg_target, favor_high=bool(neg_favor_high))
             keep = np.concatenate([pos_keep, neg_keep])
         return df_in.iloc[np.sort(keep)].copy()
 
@@ -1229,6 +1250,8 @@ def prepare_sniper_dataset(
 
     total_pos = 0
     total_neg = 0
+    entry_raw_pos_map: dict[str, int] = {}
+    entry_raw_total_map: dict[str, int] = {}
     batch_flush_n = 8
     for sym_idx, symbol in enumerate(symbols):
         df_pf = None
@@ -1264,6 +1287,12 @@ def prepare_sniper_dataset(
                 if entry_df.empty:
                     continue
                 entry_df = _try_downcast_df(entry_df, copy=False)
+                try:
+                    y_raw = entry_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                    entry_raw_pos_map[name] = int(entry_raw_pos_map.get(name, 0)) + int(np.sum(y_raw >= 0.5))
+                    entry_raw_total_map[name] = int(entry_raw_total_map.get(name, 0)) + int(y_raw.shape[0])
+                except Exception:
+                    pass
                 entry_df["sym_id"] = int(sym_idx)
                 feat_cols = feat_cols_entry_map.get(name)
                 if not feat_cols:
@@ -1403,7 +1432,12 @@ def prepare_sniper_dataset(
         feat_cols = feat_cols_entry_map.get(name, []) if not entry_df.empty else []
         weight_col = str(spec.get("weight_col") or "")
         Xe, ye, we, tse, syme = _to_numpy(entry_df, list(feat_cols), "label_entry", weight_col=weight_col)
-        entry_batches[name] = SniperBatch(X=Xe, y=ye, w=we, ts=tse, sym_id=syme, feature_cols=list(feat_cols))
+        batch = SniperBatch(X=Xe, y=ye, w=we, ts=tse, sym_id=syme, feature_cols=list(feat_cols))
+        rt = int(entry_raw_total_map.get(name, 0) or 0)
+        if rt > 0:
+            setattr(batch, "natural_pos_rate", float(entry_raw_pos_map.get(name, 0) or 0) / float(rt))
+            setattr(batch, "natural_pos_rows", rt)
+        entry_batches[name] = batch
 
     entry_short = entry_batches.get("short")
     entry_long = entry_batches.get("long")
@@ -1600,29 +1634,22 @@ def prepare_sniper_dataset_from_cache(
                 return take.astype(np.int64, copy=False)
 
             w_all = pd.to_numeric(df_in[weight_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-            w = np.clip(np.nan_to_num(w_all[idx_src], nan=0.0, posinf=7.0, neginf=0.0), 0.0, 7.0)
-            bin_step = float(_env_int("SNIPER_ENTRY_WEIGHT_BIN_STEP_X10", 5)) / 10.0
+            try:
+                bin_max = float(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_MAX", "7.0") or "7.0")
+            except Exception:
+                bin_max = 7.0
+            if (not np.isfinite(bin_max)) or bin_max <= 0.0:
+                bin_max = 7.0
+            w = np.clip(np.nan_to_num(w_all[idx_src], nan=0.0, posinf=bin_max, neginf=0.0), 0.0, bin_max)
+            bin_step = float(_env_int("SNIPER_ENTRY_WEIGHT_BIN_STEP_X10", 1)) / 10.0
             if (not np.isfinite(bin_step)) or bin_step <= 0.0:
                 bin_step = 0.5
-            n_bins = int(max(8, round(7.0 / bin_step)))
+            n_bins = int(max(8, round(bin_max / bin_step)))
             bins = np.floor(w / bin_step).astype(np.int32, copy=False)
             bins = np.clip(bins, 0, n_bins - 1)
 
-            peak_bin = int(n_bins - 1)
-            peak_rel = np.flatnonzero(bins == peak_bin)
-            if peak_rel.size >= target_n:
-                take_rel = rng.choice(peak_rel, size=target_n, replace=False)
-                out = idx_src[take_rel]
-                out.sort()
-                return out.astype(np.int64, copy=False)
             selected_rel: list[np.ndarray] = []
-            if peak_rel.size > 0:
-                selected_rel.append(peak_rel)
-            rem = int(target_n - peak_rel.size)
-            if rem <= 0:
-                out = idx_src[np.concatenate(selected_rel)] if selected_rel else np.empty((0,), dtype=np.int64)
-                out.sort()
-                return out.astype(np.int64, copy=False)
+            rem = int(target_n)
 
             factors = np.arange(2, 2 + n_bins, dtype=np.float64)
             if not favor_high:
@@ -1634,16 +1661,20 @@ def prepare_sniper_dataset_from_cache(
                 rel_by_bin.append(rel)
                 counts[b] = int(rel.size)
             counts_eff = counts.copy()
-            counts_eff[peak_bin] = 0
             if int(counts_eff.sum()) <= 0:
                 out = idx_src[np.concatenate(selected_rel)] if selected_rel else np.empty((0,), dtype=np.int64)
                 out.sort()
                 return out.astype(np.int64, copy=False)
 
-            score = factors * counts_eff.astype(np.float64)
+            span = np.linspace(0.0, 1.0, n_bins, dtype=np.float64)
+            if not favor_high:
+                span = span[::-1]
+            bias_strength = 1.25 if favor_high else 0.75
+            bias = 1.0 + (bias_strength * span)
+            score = bias * np.power(np.maximum(1.0, counts_eff.astype(np.float64)), 0.75)
             ssum = float(np.sum(score))
             if (not np.isfinite(ssum)) or ssum <= 0.0:
-                pool_rel = np.flatnonzero(bins != peak_bin)
+                pool_rel = np.arange(idx_src.size, dtype=np.int64)
                 if rem >= pool_rel.size:
                     chosen_rel = pool_rel
                 else:
@@ -1702,7 +1733,27 @@ def prepare_sniper_dataset_from_cache(
 
         ratio = float(max(0.0, ratio_neg_per_pos))
         max_rows = int(max_rows)
+        if weight_col and weight_col in df_in.columns:
+            try:
+                pos_min_w = float(os.getenv("SNIPER_ENTRY_POS_MIN_WEIGHT", "0.0") or "0.0")
+            except Exception:
+                pos_min_w = 0.0
+            if np.isfinite(pos_min_w) and pos_min_w > 0.0:
+                w_all_pos = pd.to_numeric(df_in[weight_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+                wp = np.nan_to_num(w_all_pos[pos_idx], nan=0.0, posinf=0.0, neginf=0.0)
+                pos_idx = pos_idx[wp >= float(pos_min_w)]
+                if pos_idx.size == 0:
+                    return df_in.iloc[0:0].copy()
         pos_keep_n = int(pos_idx.size)
+        try:
+            pos_keep_frac = float(os.getenv("SNIPER_ENTRY_POS_KEEP_FRACTION", "1.0") or "1.0")
+        except Exception:
+            pos_keep_frac = 1.0
+        neg_favor_high = str(os.getenv("SNIPER_ENTRY_NEG_FAVOR_HIGH", "0") or "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+        if (not np.isfinite(pos_keep_frac)) or pos_keep_frac <= 0.0:
+            pos_keep_frac = 1.0
+        if pos_keep_frac < 1.0:
+            pos_keep_n = min(pos_keep_n, int(max(1, round(pos_idx.size * pos_keep_frac))))
         if max_rows > 0:
             max_pos = int(max(1, round(max_rows / (1.0 + ratio))))
             pos_keep_n = min(pos_keep_n, max_pos)
@@ -1718,7 +1769,7 @@ def prepare_sniper_dataset_from_cache(
         if neg_target <= 0 or neg_idx.size == 0:
             keep = pos_keep
         else:
-            neg_keep = _sample_weight_bins(neg_idx, neg_target, favor_high=True)
+            neg_keep = _sample_weight_bins(neg_idx, neg_target, favor_high=bool(neg_favor_high))
             keep = np.concatenate([pos_keep, neg_keep])
         return df_in.iloc[np.sort(keep)].copy()
     def _to_numpy(
@@ -1800,6 +1851,7 @@ def prepare_sniper_dataset_from_cache(
         frozen_mask = _frozen_ohlc_mask(df) if str(asset_class or "crypto").lower() == "stocks" else None
 
         frames_local: dict[str, tuple[pd.DataFrame, List[str]]] = {}
+        raw_counts_local: dict[str, tuple[int, int]] = {}
         exit_local: pd.DataFrame | None = None
         for spec in entry_specs:
             name = str(spec["name"])
@@ -1823,6 +1875,11 @@ def prepare_sniper_dataset_from_cache(
                 if entry_df.empty:
                     continue
             entry_df = _try_downcast_df(entry_df, copy=False)
+            try:
+                y_raw = entry_df["label_entry"].to_numpy(dtype=np.float32, copy=False)
+                raw_counts_local[name] = (int(np.sum(y_raw >= 0.5)), int(y_raw.shape[0]))
+            except Exception:
+                raw_counts_local[name] = (0, int(entry_df.shape[0]))
             entry_df["sym_id"] = int(sym_idx)
             feat_cols = _list_feature_columns(entry_df)
             cols_keep = list(feat_cols) + ["label_entry", "sym_id"]
@@ -1862,11 +1919,13 @@ def prepare_sniper_dataset_from_cache(
                     weight_col=("label_exit_weight" if "label_exit_weight" in ex.columns else None),
                 )
                 exit_payload = (ex, feat_ex)
-        return sym_idx, symbol, frames_local, exit_payload
+        return sym_idx, symbol, frames_local, exit_payload, raw_counts_local
 
     preferred_name = "long" if any(str(s["name"]) == "long" for s in entry_specs) else str(entry_specs[0]["name"])
     total_pos = 0
     total_neg = 0
+    entry_raw_pos_map: dict[str, int] = {}
+    entry_raw_total_map: dict[str, int] = {}
     batch_flush_n = 8
     done = 0
 
@@ -1874,6 +1933,7 @@ def prepare_sniper_dataset_from_cache(
         res_symbol: str,
         frames_local: dict[str, tuple[pd.DataFrame, List[str]]] | None,
         exit_payload: tuple[pd.DataFrame, List[str]] | None,
+        raw_counts_local: dict[str, tuple[int, int]] | None,
         *,
         fallback_symbol: str,
     ) -> tuple[int, int]:
@@ -1883,6 +1943,12 @@ def prepare_sniper_dataset_from_cache(
         if not frames_local:
             symbols_skipped.append(res_symbol or fallback_symbol)
             return 0, 0
+        for _name, (_rp, _rt) in (raw_counts_local or {}).items():
+            try:
+                entry_raw_pos_map[_name] = int(entry_raw_pos_map.get(_name, 0)) + int(_rp)
+                entry_raw_total_map[_name] = int(entry_raw_total_map.get(_name, 0)) + int(_rt)
+            except Exception:
+                pass
 
         pref = frames_local.get(preferred_name)
         if pref is not None:
@@ -1967,12 +2033,13 @@ def prepare_sniper_dataset_from_cache(
             neg_n = 0
             current_symbol = submitted_symbol
             try:
-                _, res_symbol, frames_local, exit_payload = fut.result()
+                _, res_symbol, frames_local, exit_payload, raw_counts_local = fut.result()
                 current_symbol = res_symbol or submitted_symbol
                 pos_n, neg_n = _consume_symbol_result(
                     current_symbol,
                     frames_local,
                     exit_payload,
+                    raw_counts_local,
                     fallback_symbol=submitted_symbol,
                 )
             except Exception:
@@ -1996,12 +2063,13 @@ def prepare_sniper_dataset_from_cache(
             neg_n = 0
             current_symbol = symbol
             try:
-                _, res_symbol, frames_local, exit_payload = _process_symbol(sym_idx, symbol)
+                _, res_symbol, frames_local, exit_payload, raw_counts_local = _process_symbol(sym_idx, symbol)
                 current_symbol = res_symbol or symbol
                 pos_n, neg_n = _consume_symbol_result(
                     current_symbol,
                     frames_local,
                     exit_payload,
+                    raw_counts_local,
                     fallback_symbol=symbol,
                 )
             except Exception:
@@ -2061,7 +2129,12 @@ def prepare_sniper_dataset_from_cache(
         feat_cols = feat_cols_entry_map.get(name, []) if not entry_df.empty else []
         weight_col = str(spec.get("weight_col") or "")
         Xe, ye, we, tse, syme = _to_numpy(entry_df, list(feat_cols), "label_entry", weight_col=weight_col)
-        entry_batches[name] = SniperBatch(X=Xe, y=ye, w=we, ts=tse, sym_id=syme, feature_cols=list(feat_cols))
+        batch = SniperBatch(X=Xe, y=ye, w=we, ts=tse, sym_id=syme, feature_cols=list(feat_cols))
+        rt = int(entry_raw_total_map.get(name, 0) or 0)
+        if rt > 0:
+            setattr(batch, "natural_pos_rate", float(entry_raw_pos_map.get(name, 0) or 0) / float(rt))
+            setattr(batch, "natural_pos_rows", rt)
+        entry_batches[name] = batch
 
     entry_short = entry_batches.get("short")
     entry_long = entry_batches.get("long")

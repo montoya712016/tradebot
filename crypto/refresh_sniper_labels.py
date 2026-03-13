@@ -22,7 +22,9 @@ def _add_repo_paths() -> None:
 def main() -> None:
     _add_repo_paths()
     os.environ.setdefault("SNIPER_ASSET_CLASS", "crypto")
-    os.environ["PF_ENTRY_LABEL_NET_PROFIT_THR"] = "0.0"
+    # Refresh robusto (evita abort por RAM em lotes longos).
+    os.environ["SNIPER_LABELS_REFRESH_WORKERS"] = "1"
+    os.environ["PF_ENTRY_LABEL_NET_PROFIT_THR"] = "0.005"
     os.environ["PF_ENTRY_WEIGHT_RET_SCALE_POS"] = "0.04"
     os.environ["PF_ENTRY_WEIGHT_RET_SCALE_NEG"] = "0.03"
     os.environ["PF_ENTRY_WEIGHT_RET_DEADZONE"] = "0.002"
@@ -30,9 +32,12 @@ def main() -> None:
     os.environ["PF_ENTRY_WEIGHT_NEG_GAIN"] = "5.0"
     os.environ["PF_ENTRY_WEIGHT_POS_POWER"] = "2.6"
     os.environ["PF_ENTRY_WEIGHT_NEG_POWER"] = "2.2"
-    os.environ["PF_ENTRY_WEIGHT_MODE"] = "ret_pct_abs"
-    os.environ["PF_ENTRY_WEIGHT_PCT_POWER"] = "1.0"
-    os.environ["SNIPER_ENTRY_WEIGHT_BIN_STEP_X10"] = "2"
+    os.environ["PF_ENTRY_WEIGHT_MODE"] = "future_avg_ret_pct_dir"
+    os.environ["PF_ENTRY_WEIGHT_PCT_POWER"] = "1.35"
+    os.environ["PF_ENTRY_WEIGHT_FUTURE_WINDOW_MIN"] = "60"
+    os.environ["PF_ENTRY_WEIGHT_MAX"] = "20.0"
+    os.environ["SNIPER_ENTRY_WEIGHT_BIN_STEP_X10"] = "5"
+    os.environ["SNIPER_ENTRY_WEIGHT_BIN_MAX"] = "20.0"
     from trade_contract import TradeContract  # type: ignore
     from prepare_features.refresh_sniper_labels_in_cache import (  # type: ignore
         RefreshLabelsSettings,
@@ -47,6 +52,10 @@ def main() -> None:
         exit_ema_init_offset_pct=0.005,
     )
     settings = RefreshLabelsSettings(contract=contract, candle_sec=60)
+    settings.workers = 1
+    settings.max_ram_pct = 72.0
+    settings.min_free_mb = 4096.0
+    settings.per_worker_mem_mb = 1024.0
     refresh_run(settings)
 
 

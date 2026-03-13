@@ -81,16 +81,66 @@ def _apply_calibration(p: np.ndarray, calib: dict) -> np.ndarray:
         return p
     a = float(calib.get("coef", 1.0))
     b = float(calib.get("intercept", 0.0))
+    prior_shift = float(calib.get("prior_shift", 0.0) or 0.0)
     space = str(calib.get("space", "prob")).strip().lower()
+    tail_blend = float(calib.get("tail_blend", 0.0) or 0.0)
+    tail_start = float(calib.get("tail_start", 0.70) or 0.70)
+    tail_power = float(calib.get("tail_power", 1.0) or 1.0)
+    tail_boost = float(calib.get("tail_boost", 0.0) or 0.0)
+    try:
+        v = os.getenv("BT_CALIB_TAIL_BLEND_OVERRIDE", "").strip()
+        if v:
+            tail_blend = float(v)
+    except Exception:
+        pass
+    try:
+        v = os.getenv("BT_CALIB_TAIL_START_OVERRIDE", "").strip()
+        if v:
+            tail_start = float(v)
+    except Exception:
+        pass
+    try:
+        v = os.getenv("BT_CALIB_TAIL_POWER_OVERRIDE", "").strip()
+        if v:
+            tail_power = float(v)
+    except Exception:
+        pass
+    try:
+        v = os.getenv("BT_CALIB_TAIL_BOOST_OVERRIDE", "").strip()
+        if v:
+            tail_boost = float(v)
+    except Exception:
+        pass
+    if (not np.isfinite(tail_blend)) or tail_blend < 0.0:
+        tail_blend = 0.0
+    if tail_blend > 1.0:
+        tail_blend = 1.0
+    if (not np.isfinite(tail_start)) or tail_start < 0.0:
+        tail_start = 0.70
+    if tail_start >= 1.0:
+        tail_start = 0.999
+    if (not np.isfinite(tail_power)) or tail_power <= 0.0:
+        tail_power = 1.0
+    if (not np.isfinite(tail_boost)) or tail_boost < 0.0:
+        tail_boost = 0.0
+    pp = np.asarray(p, dtype=np.float64)
     if space == "logit":
         eps = 1e-6
-        pp = np.asarray(p, dtype=np.float64)
         pp = np.clip(pp, eps, 1.0 - eps)
         x = np.log(pp / (1.0 - pp))
-        z = a * x + b
+        z = a * x + b + prior_shift
     else:
-        z = a * p + b
-    return _sigmoid(z)
+        z = a * pp + b + prior_shift
+    out = _sigmoid(z).astype(np.float64, copy=False)
+    if tail_blend > 0.0:
+        denom = max(1e-9, 1.0 - float(tail_start))
+        rel = np.clip((pp - float(tail_start)) / denom, 0.0, 1.0)
+        if tail_power != 1.0:
+            rel = np.power(rel, float(tail_power))
+        out = out + float(tail_blend) * rel * (pp - out)
+        if tail_boost > 0.0:
+            out = out + float(tail_boost) * rel * (1.0 - out)
+    return np.clip(out, 0.0, 1.0).astype(np.float32, copy=False)
 
 
 def _load_booster(path_json: Path) -> "xgb.Booster":

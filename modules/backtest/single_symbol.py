@@ -263,12 +263,28 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
                 return
             xf = x[m]
             q50 = float(np.nanquantile(xf, 0.50))
+            q95 = float(np.nanquantile(xf, 0.95))
             q90 = float(np.nanquantile(xf, 0.90))
             q99 = float(np.nanquantile(xf, 0.99))
+            q995 = float(np.nanquantile(xf, 0.995))
+            q999 = float(np.nanquantile(xf, 0.999))
+            q9995 = float(np.nanquantile(xf, 0.9995))
+            q9999 = float(np.nanquantile(xf, 0.9999))
             hit_tau = float(np.mean(xf >= float(tau)))
             hit_08 = float(np.mean(xf >= 0.80))
+            hit_09 = float(np.mean(xf >= 0.90))
+            hit_095 = float(np.mean(xf >= 0.95))
+            hit_099 = float(np.mean(xf >= 0.99))
+            hit_0995 = float(np.mean(xf >= 0.995))
+            hit_0999 = float(np.mean(xf >= 0.999))
             print(
-                f"[backtest-single] {name}: rows={n}/{len(x)} q50={q50:.4f} q90={q90:.4f} q99={q99:.4f} ge_tau={hit_tau:.2%} ge_0.80={hit_08:.2%}",
+                (
+                    f"[backtest-single] {name}: rows={n}/{len(x)} "
+                    f"q50={q50:.4f} q90={q90:.4f} q95={q95:.4f} q99={q99:.4f} q99.5={q995:.4f} q99.9={q999:.4f} "
+                    f"q99.95={q9995:.4f} q99.99={q9999:.4f} "
+                    f"ge_tau={hit_tau:.2%} ge_0.80={hit_08:.2%} ge_0.90={hit_09:.2%} ge_0.95={hit_095:.2%} "
+                    f"ge_0.99={hit_099:.2%} ge_0.995={hit_0995:.2%} ge_0.999={hit_0999:.2%}"
+                ),
                 flush=True,
             )
         except Exception:
@@ -367,6 +383,55 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
         f"eq={eq_end:.4f} ret={ret_total:+.2%} max_dd={float(res.max_dd):.2%} "
         f"win={win_rate:.2%} pf={pf_s} sec={dt:.2f}"
     )
+    try:
+        tr_ret = np.asarray([float(getattr(t, "r_net", 0.0) or 0.0) for t in (res.trades or [])], dtype=np.float64)
+        if tr_ret.size > 0:
+            pos = tr_ret[tr_ret > 0.0]
+            neg = tr_ret[tr_ret < 0.0]
+            gross_pos = float(np.sum(pos)) if pos.size else 0.0
+            order = np.argsort(-tr_ret)
+            best_idx = int(order[0])
+            keep_wo_best = np.ones(tr_ret.size, dtype=bool)
+            keep_wo_best[best_idx] = False
+            eq_wo_best = float(np.prod(1.0 + tr_ret[keep_wo_best])) if int(keep_wo_best.sum()) > 0 else 1.0
+            top3_n = int(min(3, tr_ret.size))
+            keep_wo_top3 = np.ones(tr_ret.size, dtype=bool)
+            keep_wo_top3[order[:top3_n]] = False
+            eq_wo_top3 = float(np.prod(1.0 + tr_ret[keep_wo_top3])) if int(keep_wo_top3.sum()) > 0 else 1.0
+            top1_share = (float(tr_ret[best_idx]) / gross_pos) if gross_pos > 1e-12 and tr_ret[best_idx] > 0.0 else 0.0
+            top3_share = (float(np.sum(np.clip(tr_ret[order[:top3_n]], 0.0, None))) / gross_pos) if gross_pos > 1e-12 else 0.0
+            q25_tr = float(np.nanquantile(tr_ret, 0.25))
+            q50_tr = float(np.nanquantile(tr_ret, 0.50))
+            q75_tr = float(np.nanquantile(tr_ret, 0.75))
+            avg_win = float(np.mean(pos)) if pos.size else 0.0
+            avg_loss = float(np.mean(neg)) if neg.size else 0.0
+            payoff = (avg_win / abs(avg_loss)) if abs(avg_loss) > 1e-12 else np.inf
+            expectancy = float(np.mean(tr_ret))
+            print(
+                (
+                    f"[backtest-single] trade_dist: mean={float(np.mean(tr_ret)):+.2%} "
+                    f"p25={q25_tr:+.2%} p50={q50_tr:+.2%} p75={q75_tr:+.2%} "
+                    f"best={float(np.max(tr_ret)):+.2%} worst={float(np.min(tr_ret)):+.2%}"
+                ),
+                flush=True,
+            )
+            print(
+                (
+                    f"[backtest-single] trade_edge: wins={int(pos.size)} losses={int(neg.size)} "
+                    f"avg_win={avg_win:+.2%} avg_loss={avg_loss:+.2%} "
+                    f"payoff={('inf' if np.isinf(payoff) else f'{payoff:.2f}')} expectancy={expectancy:+.2%}"
+                ),
+                flush=True,
+            )
+            print(
+                (
+                    f"[backtest-single] trade_conc: top1_share={top1_share:.2%} top3_share={top3_share:.2%} "
+                    f"ret_wo_best={eq_wo_best - 1.0:+.2%} ret_wo_top3={eq_wo_top3 - 1.0:+.2%}"
+                ),
+                flush=True,
+            )
+    except Exception:
+        pass
     try:
         su = np.asarray(getattr(res, "exit_span_curve", None), dtype=np.float64)
         m = np.isfinite(su)

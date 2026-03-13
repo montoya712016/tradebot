@@ -4,12 +4,14 @@ Treinamento dos modelos Sniper (EntryScore + ExitSpan) usando walk-forward.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
+import hashlib
 import json
 import os
+import pickle
 import numpy as np
 import pandas as pd
 
@@ -17,6 +19,13 @@ try:
     import xgboost as xgb
 except Exception as e:
     raise
+
+try:
+    import plotly.graph_objects as go  # type: ignore
+    from plotly.subplots import make_subplots  # type: ignore
+except Exception:
+    go = None  # type: ignore
+    make_subplots = None  # type: ignore
 
 try:
     from sklearn.linear_model import LogisticRegression
@@ -216,6 +225,22 @@ def _split_train_val(batch: SniperBatch, val_frac: float = 0.2) -> Tuple[np.ndar
     return tr_idx, va_idx
 
 
+def _entry_weight_bin_max() -> float:
+    try:
+        v = float(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_MAX", "") or "nan")
+    except Exception:
+        v = float("nan")
+    if np.isfinite(v) and v > 0.0:
+        return float(v)
+    try:
+        v2 = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX", "7.0") or "7.0")
+    except Exception:
+        v2 = 7.0
+    if (not np.isfinite(v2)) or v2 <= 0.0:
+        v2 = 7.0
+    return float(v2)
+
+
 def _build_entry_classifier_weights(
     ytr: np.ndarray,
     yva: np.ndarray,
@@ -226,8 +251,9 @@ def _build_entry_classifier_weights(
     yva = np.asarray(yva, dtype=np.float32)
     wtr0 = np.asarray(wtr, dtype=np.float32) if wtr is not None else np.ones(ytr.size, dtype=np.float32)
     wva0 = np.asarray(wva, dtype=np.float32) if wva is not None else np.ones(yva.size, dtype=np.float32)
-    wtr0 = np.clip(np.nan_to_num(wtr0, nan=1.0, posinf=7.0, neginf=1.0), 1e-3, None).astype(np.float32, copy=False)
-    wva0 = np.clip(np.nan_to_num(wva0, nan=1.0, posinf=7.0, neginf=1.0), 1e-3, None).astype(np.float32, copy=False)
+    wbin_max = _entry_weight_bin_max()
+    wtr0 = np.clip(np.nan_to_num(wtr0, nan=0.0, posinf=wbin_max, neginf=0.0), 0.0, None).astype(np.float32, copy=False)
+    wva0 = np.clip(np.nan_to_num(wva0, nan=0.0, posinf=wbin_max, neginf=0.0), 0.0, None).astype(np.float32, copy=False)
 
     enabled = str(os.getenv("SNIPER_ENTRY_CLASS_BALANCE_WEIGHTS", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
     strength = float(os.getenv("SNIPER_ENTRY_CLASS_BALANCE_STRENGTH", "1.0") or "1.0")
@@ -304,11 +330,207 @@ def _weighted_positive_rate(y: np.ndarray, w: np.ndarray | None = None) -> float
     ww0 = np.asarray(w, dtype=np.float64)
     if ww0.shape[0] != yy.shape[0]:
         return float(np.mean(yb))
-    ww = np.clip(np.nan_to_num(ww0[m], nan=1.0, posinf=7.0, neginf=1.0), 1e-9, None)
+    wbin_max = _entry_weight_bin_max()
+    ww = np.clip(np.nan_to_num(ww0[m], nan=1.0, posinf=wbin_max, neginf=1.0), 1e-9, None)
     sw = float(np.sum(ww))
     if (not np.isfinite(sw)) or sw <= 0.0:
         return float(np.mean(yb))
     return float(np.sum(ww * yb) / sw)
+
+
+def _normalize_entry_loss_weights(y: np.ndarray, w: np.ndarray | None) -> np.ndarray:
+    yy = np.asarray(y, dtype=np.float32)
+    if w is None:
+        return np.ones(yy.size, dtype=np.float32)
+    ww = np.asarray(w, dtype=np.float64)
+    if ww.shape[0] != yy.shape[0]:
+        return np.ones(yy.size, dtype=np.float32)
+    wbin_max = _entry_weight_bin_max()
+    ww = np.clip(np.nan_to_num(ww, nan=0.0, posinf=wbin_max, neginf=0.0), 0.0, wbin_max)
+    wpow = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_POWER", "1.0") or "1.0")
+    wpow_pos = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_POWER_POS", str(wpow)) or str(wpow))
+    wpow_neg = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_POWER_NEG", str(wpow)) or str(wpow))
+    pos = yy >= 0.5
+    neg = ~pos
+    if np.isfinite(wpow_pos) and wpow_pos > 0.0 and abs(wpow_pos - 1.0) > 1e-6 and bool(np.any(pos)):
+        ww[pos] = np.power(ww[pos], wpow_pos)
+    if np.isfinite(wpow_neg) and wpow_neg > 0.0 and abs(wpow_neg - 1.0) > 1e-6 and bool(np.any(neg)):
+        ww[neg] = np.power(ww[neg], wpow_neg)
+    class_norm = str(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_CLASS_NORM", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+    if class_norm:
+        if bool(np.any(pos)) and bool(np.any(neg)):
+            mu_pos = float(np.mean(ww[pos]))
+            mu_neg = float(np.mean(ww[neg]))
+            if np.isfinite(mu_pos) and np.isfinite(mu_neg) and mu_pos > 1e-12 and mu_neg > 1e-12:
+                tgt = 0.5 * (mu_pos + mu_neg)
+                s_pos = tgt / mu_pos
+                s_neg = tgt / mu_neg
+                ww[pos] *= s_pos
+                ww[neg] *= s_neg
+    mean_norm = str(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_MEAN_NORM", "0") or "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+    target_mean = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_MEAN_TARGET", "1.0") or "1.0")
+    if (not np.isfinite(target_mean)) or target_mean <= 0.0:
+        target_mean = 1.0
+    if mean_norm:
+        # Opcional: mantem escala media controlada sem destruir a relacao entre bins.
+        mu = float(np.mean(ww)) if ww.size else 1.0
+        if np.isfinite(mu) and mu > 1e-12:
+            ww = ww * (target_mean / mu)
+    wmin = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MIN", "0.0") or "0.0")
+    wmax = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX", str(wbin_max)) or str(wbin_max))
+    wmax_pos = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX_POS", str(wmax)) or str(wmax))
+    wmax_neg = float(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX_NEG", str(wmax)) or str(wmax))
+    if wmax < wmin:
+        wmax = wmin
+    if wmax_pos < wmin:
+        wmax_pos = wmin
+    if wmax_neg < wmin:
+        wmax_neg = wmin
+    if bool(np.any(pos)):
+        ww[pos] = np.clip(ww[pos], wmin, wmax_pos)
+    if bool(np.any(neg)):
+        ww[neg] = np.clip(ww[neg], wmin, wmax_neg)
+    if (not np.isfinite(np.sum(ww))) or float(np.sum(ww)) <= 0.0:
+        ww = np.ones(yy.size, dtype=np.float64)
+    return ww.astype(np.float32, copy=False)
+
+
+def _entry_weight_bin_table(y: np.ndarray, w: np.ndarray, *, step: float = 0.5) -> pd.DataFrame:
+    yy = np.asarray(y, dtype=np.float32)
+    ww = np.asarray(w, dtype=np.float64)
+    if yy.size == 0 or ww.size != yy.size:
+        return pd.DataFrame(columns=["bin_lo", "bin_hi", "count_pos", "count_neg", "mass_pos", "mass_neg"])
+    st = float(step)
+    if (not np.isfinite(st)) or st <= 0.0:
+        st = 0.5
+    wbin_max = _entry_weight_bin_max()
+    n_bins = int(max(4, round(wbin_max / st)))
+    wb = np.clip(np.nan_to_num(ww, nan=0.0, posinf=wbin_max, neginf=0.0), 0.0, wbin_max)
+    b = np.floor(wb / st).astype(np.int32, copy=False)
+    b = np.clip(b, 0, n_bins - 1)
+    pos = yy >= 0.5
+    neg = ~pos
+    rows: list[dict] = []
+    for i in range(n_bins):
+        lo = float(i * st)
+        hi = float(min(wbin_max, (i + 1) * st))
+        m = b == i
+        mp = m & pos
+        mn = m & neg
+        cp = int(np.sum(mp))
+        cn = int(np.sum(mn))
+        sp = float(np.sum(wb[mp])) if cp > 0 else 0.0
+        sn = float(np.sum(wb[mn])) if cn > 0 else 0.0
+        rows.append(
+            {
+                "bin_lo": lo,
+                "bin_hi": hi,
+                "count_pos": cp,
+                "count_neg": cn,
+                "mass_pos": sp,
+                "mass_neg": sn,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _entry_weight_bin_mass_str(y: np.ndarray, w: np.ndarray, *, step: float = 0.5) -> str:
+    tb = _entry_weight_bin_table(y, w, step=step)
+    if tb.empty:
+        return "bins=na"
+    nz = tb[(tb["count_pos"] + tb["count_neg"]) > 0].copy()
+    if nz.empty:
+        return "bins=empty"
+    parts: list[str] = []
+    for _, r in nz.iterrows():
+        lo = float(r["bin_lo"])
+        hi = float(r["bin_hi"])
+        cp = int(r["count_pos"])
+        cn = int(r["count_neg"])
+        sp = float(r["mass_pos"])
+        sn = float(r["mass_neg"])
+        parts.append(f"[{lo:.1f},{hi:.1f}) p={cp}/{sp:.0f} n={cn}/{sn:.0f}")
+    max_bins = int(os.getenv("SNIPER_ENTRY_WEIGHT_LOG_MAX_BINS", "16") or "16")
+    if max_bins < 4:
+        max_bins = 4
+    if len(parts) <= max_bins:
+        return " | ".join(parts)
+    h = max_bins // 2
+    t = max_bins - h
+    shown = parts[:h] + ["..."] + parts[-t:]
+    return " | ".join(shown)
+
+
+def _save_entry_weight_bins_plot(
+    tables: dict[str, pd.DataFrame],
+    *,
+    out_html: Path,
+    title: str,
+) -> None:
+    if not tables:
+        return
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Sempre salva CSV por cenario para auditoria/reprodutibilidade.
+        for name, tb in tables.items():
+            if tb is None or tb.empty:
+                continue
+            csv_path = out_html.with_name(f"{out_html.stem}_{name}.csv")
+            tb.to_csv(csv_path, index=False)
+    except Exception:
+        pass
+    if go is None or make_subplots is None:
+        return
+    names = [k for k, v in tables.items() if v is not None and not v.empty]
+    if not names:
+        return
+    cols = len(names)
+    fig = make_subplots(
+        rows=2,
+        cols=cols,
+        subplot_titles=tuple(names + names),
+        vertical_spacing=0.14,
+        horizontal_spacing=0.05,
+    )
+    for ci, name in enumerate(names, start=1):
+        tb = tables[name].copy()
+        x = [f"{float(lo):.1f}-{float(hi):.1f}" for lo, hi in zip(tb["bin_lo"].to_numpy(), tb["bin_hi"].to_numpy())]
+        cpos = tb["count_pos"].to_numpy(dtype=np.float64, copy=False)
+        cneg = tb["count_neg"].to_numpy(dtype=np.float64, copy=False)
+        mpos = tb["mass_pos"].to_numpy(dtype=np.float64, copy=False)
+        mneg = tb["mass_neg"].to_numpy(dtype=np.float64, copy=False)
+        fig.add_trace(
+            go.Bar(x=x, y=cpos, name=f"{name}: count_pos", marker_color="#2ecc71", showlegend=(ci == 1)),
+            row=1,
+            col=ci,
+        )
+        fig.add_trace(
+            go.Bar(x=x, y=cneg, name=f"{name}: count_neg", marker_color="#e74c3c", showlegend=(ci == 1)),
+            row=1,
+            col=ci,
+        )
+        fig.add_trace(
+            go.Bar(x=x, y=mpos, name=f"{name}: mass_pos", marker_color="#27ae60", showlegend=(ci == 1)),
+            row=2,
+            col=ci,
+        )
+        fig.add_trace(
+            go.Bar(x=x, y=mneg, name=f"{name}: mass_neg", marker_color="#c0392b", showlegend=(ci == 1)),
+            row=2,
+            col=ci,
+        )
+        fig.update_xaxes(tickangle=-65, row=1, col=ci)
+        fig.update_xaxes(tickangle=-65, row=2, col=ci)
+    fig.update_layout(
+        title=str(title),
+        barmode="group",
+        template="plotly_dark",
+        height=800,
+        margin=dict(l=40, r=20, t=70, b=70),
+    )
+    fig.update_yaxes(title_text="count", row=1, col=1)
+    fig.update_yaxes(title_text="weight mass", row=2, col=1)
+    fig.write_html(str(out_html), include_plotlyjs="cdn")
 
 
 def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster, dict]:
@@ -325,6 +547,25 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
     wtr = (batch.w[tr_idx] if (use_label_weights and getattr(batch, "w", None) is not None) else None)
     wva = (batch.w[va_idx] if (use_label_weights and getattr(batch, "w", None) is not None) else None)
     wtr_eff, wva_eff, wmeta = _build_entry_classifier_weights(ytr, yva, wtr, wva)
+    loss_bin_stats: dict[str, object] = {}
+    if use_label_weights:
+        wtr_eff = _normalize_entry_loss_weights(ytr, wtr_eff)
+        wva_eff = _normalize_entry_loss_weights(yva, wva_eff)
+        try:
+            bin_step = float(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_STEP_X10", "1") or "1") / 10.0
+            tb_tr = _entry_weight_bin_table(ytr, wtr_eff, step=bin_step)
+            tb_va = _entry_weight_bin_table(yva, wva_eff, step=bin_step)
+            loss_bin_stats = {
+                "step": float(bin_step),
+                "train": tb_tr.to_dict(orient="records"),
+                "val": tb_va.to_dict(orient="records"),
+            }
+            msg_tr = _entry_weight_bin_mass_str(ytr, wtr_eff, step=bin_step)
+            msg_va = _entry_weight_bin_mass_str(yva, wva_eff, step=bin_step)
+            print(f"[xgb] loss_w train bins: {msg_tr}", flush=True)
+            print(f"[xgb] loss_w val   bins: {msg_va}", flush=True)
+        except Exception:
+            pass
     try:
         base_unw = _weighted_positive_rate(yva, None)
         base_w = _weighted_positive_rate(yva, wva_eff)
@@ -406,17 +647,20 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
             raise
     val_pred = booster.predict(dvalid, iteration_range=(0, booster.best_iteration + 1))
     val_true = batch.y[va_idx]
-    calib = _fit_platt(val_pred, val_true, sample_weight=wva_eff)
+    target_pos_rate = getattr(batch, "natural_pos_rate", None)
+    calib = _fit_platt(val_pred, val_true, sample_weight=wva_eff, target_pos_rate=target_pos_rate)
     try:
         p_raw = np.asarray(val_pred, dtype=np.float64)
         p_cal = np.asarray(calib["transform"](p_raw), dtype=np.float64)
         q_raw = [float(np.nanquantile(p_raw, q)) for q in (0.50, 0.90, 0.99)]
         q_cal = [float(np.nanquantile(p_cal, q)) for q in (0.50, 0.90, 0.99)]
+        cp = dict(calib.get("params") or {})
         print(
             (
                 "[xgb] calib entry: "
-                f"type={str((calib.get('params') or {}).get('type', 'identity'))} "
-                f"space={str((calib.get('params') or {}).get('space', 'prob'))} "
+                f"type={str(cp.get('type', 'identity'))} "
+                f"space={str(cp.get('space', 'prob'))} "
+                f"prior={float(cp.get('sample_pos_rate', np.nan)):.4f}->{float(cp.get('target_pos_rate', np.nan)):.4f} "
                 f"q50/q90/q99 raw={q_raw[0]:.4f}/{q_raw[1]:.4f}/{q_raw[2]:.4f} "
                 f"cal={q_cal[0]:.4f}/{q_cal[1]:.4f}/{q_cal[2]:.4f}"
             ),
@@ -427,6 +671,7 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
     meta = {
         "calibrator": calib["params"],
         "best_iteration": booster.best_iteration,
+        "loss_weight_bins": loss_bin_stats,
     }
     return booster, meta
 
@@ -738,7 +983,13 @@ def _train_xgb_regressor(batch: SniperBatch, params: dict, *, y_transform: str =
     return booster, meta
 
 
-def _fit_platt(preds: np.ndarray, labels: np.ndarray, sample_weight: np.ndarray | None = None) -> dict:
+def _fit_platt(
+    preds: np.ndarray,
+    labels: np.ndarray,
+    sample_weight: np.ndarray | None = None,
+    *,
+    target_pos_rate: float | None = None,
+) -> dict:
     p = np.asarray(preds, dtype=np.float64).reshape(-1)
     labels = labels.astype(np.int32)
     method = str(os.getenv("SNIPER_ENTRY_CALIB_METHOD", "platt") or "platt").strip().lower()
@@ -812,13 +1063,68 @@ def _fit_platt(preds: np.ndarray, labels: np.ndarray, sample_weight: np.ndarray 
             b_hi = b_lo
         a = float(np.clip(a, a_lo, a_hi))
         b = float(np.clip(b, b_lo, b_hi))
+        tail_blend = float(os.getenv("SNIPER_ENTRY_CALIB_TAIL_BLEND", "0.0") or "0.0")
+        tail_start = float(os.getenv("SNIPER_ENTRY_CALIB_TAIL_START", "0.70") or "0.70")
+        tail_power = float(os.getenv("SNIPER_ENTRY_CALIB_TAIL_POWER", "1.0") or "1.0")
+        tail_boost = float(os.getenv("SNIPER_ENTRY_CALIB_TAIL_BOOST", "0.0") or "0.0")
+        if (not np.isfinite(tail_blend)) or tail_blend < 0.0:
+            tail_blend = 0.0
+        if tail_blend > 1.0:
+            tail_blend = 1.0
+        if (not np.isfinite(tail_start)) or tail_start < 0.0:
+            tail_start = 0.70
+        if tail_start >= 1.0:
+            tail_start = 0.999
+        if (not np.isfinite(tail_power)) or tail_power <= 0.0:
+            tail_power = 1.0
+        if (not np.isfinite(tail_boost)) or tail_boost < 0.0:
+            tail_boost = 0.0
+        if sw is not None:
+            sw_sum = float(np.sum(sw))
+            sample_prior = float(np.sum(sw * labels) / sw_sum) if sw_sum > 0.0 else float(np.mean(labels))
+        else:
+            sample_prior = float(np.mean(labels)) if labels.size else 0.5
+        prior_target = target_pos_rate
+        if prior_target is None or (not np.isfinite(float(prior_target))):
+            prior_target = sample_prior
+        prior_target = float(np.clip(float(prior_target), eps, 1.0 - eps))
+        sample_prior = float(np.clip(float(sample_prior), eps, 1.0 - eps))
+        prior_strength = float(os.getenv("SNIPER_ENTRY_CALIB_PRIOR_STRENGTH", "1.0") or "1.0")
+        prior_shift_clip = float(os.getenv("SNIPER_ENTRY_CALIB_PRIOR_SHIFT_CLIP", "6.0") or "6.0")
+        if not np.isfinite(prior_strength):
+            prior_strength = 1.0
+        if (not np.isfinite(prior_shift_clip)) or prior_shift_clip <= 0.0:
+            prior_shift_clip = 6.0
+        try:
+            prior_delta = float(
+                np.clip(
+                    float(prior_strength)
+                    * (
+                        np.log(prior_target / (1.0 - prior_target))
+                        - np.log(sample_prior / (1.0 - sample_prior))
+                    ),
+                    -float(prior_shift_clip),
+                    float(prior_shift_clip),
+                )
+            )
+        except Exception:
+            prior_delta = 0.0
 
         def _transform(x: np.ndarray) -> np.ndarray:
             xx = np.asarray(x, dtype=np.float64).reshape(-1)
             xx = np.clip(xx, eps, 1.0 - eps)
             z = np.log(xx / (1.0 - xx)).reshape(-1, 1)
-            zz = a * z.reshape(-1) + b
-            return (1.0 / (1.0 + np.exp(-zz))).astype(np.float64, copy=False)
+            zz = a * z.reshape(-1) + b + float(prior_delta)
+            out = (1.0 / (1.0 + np.exp(-zz))).astype(np.float64, copy=False)
+            if tail_blend > 0.0:
+                denom = max(1e-9, 1.0 - float(tail_start))
+                rel = np.clip((xx - float(tail_start)) / denom, 0.0, 1.0)
+                if tail_power != 1.0:
+                    rel = np.power(rel, float(tail_power))
+                out = out + float(tail_blend) * rel * (xx - out)
+                if tail_boost > 0.0:
+                    out = out + float(tail_boost) * rel * (1.0 - out)
+            return np.clip(out, 0.0, 1.0).astype(np.float64, copy=False)
 
         params = {
             "type": "platt",
@@ -829,6 +1135,13 @@ def _fit_platt(preds: np.ndarray, labels: np.ndarray, sample_weight: np.ndarray 
             "c_reg": float(c_reg),
             "coef_clip": [float(a_lo), float(a_hi)],
             "intercept_clip": [float(b_lo), float(b_hi)],
+            "tail_blend": float(tail_blend),
+            "tail_start": float(tail_start),
+            "tail_power": float(tail_power),
+            "tail_boost": float(tail_boost),
+            "sample_pos_rate": float(sample_prior),
+            "target_pos_rate": float(prior_target),
+            "prior_shift": float(prior_delta),
         }
         return {
             "params": params,
@@ -853,6 +1166,201 @@ def _next_run_dir(base: Path, prefix: str = "wf_") -> Path:
     return run_dir
 
 
+def _full_pool_cache_root() -> Path:
+    v = os.getenv("SNIPER_FULL_POOL_CACHE_DIR", "").strip()
+    if v:
+        return Path(v).expanduser().resolve()
+    try:
+        from utils.paths import workspace_root as _workspace_root  # type: ignore
+
+        return _workspace_root() / "cache_sniper" / "full_pool"
+    except Exception:
+        return Path(__file__).resolve().parents[2].parent / "cache_sniper" / "full_pool"
+
+
+def _cache_map_fingerprint(cache_map: dict | None) -> str:
+    if not cache_map:
+        return "nocache"
+    mode = str(os.getenv("SNIPER_FULL_POOL_FINGERPRINT_MODE", "size") or "size").strip().lower()
+    use_mtime = mode in {"mtime", "size_mtime", "full"}
+    h = hashlib.sha1()
+    for sym in sorted(cache_map.keys()):
+        p = Path(str(cache_map[sym]))
+        try:
+            st = p.stat()
+            if use_mtime:
+                token = f"{sym}|{p.name}|{int(st.st_size)}|{int(st.st_mtime_ns)}"
+            else:
+                # default "size": permite reaproveitar pool mesmo apos refresh que so regrava
+                # os arquivos sem alterar conteudo efetivo.
+                token = f"{sym}|{p.name}|{int(st.st_size)}"
+        except Exception:
+            token = f"{sym}|{p.name}|missing"
+        h.update(token.encode("utf-8", errors="ignore"))
+    return h.hexdigest()
+
+
+def _full_pool_cache_key(
+    *,
+    asset_class: str,
+    symbols: Sequence[str],
+    cfg: TrainConfig,
+    contract: TradeContract,
+    feature_flags: dict,
+    cache_fp: str,
+    pool_rows: int,
+) -> str:
+    payload = {
+        "asset_class": str(asset_class),
+        "symbols": [str(s) for s in symbols],
+        "total_days": int(getattr(cfg, "total_days", 0) or 0),
+        "entry_ratio_neg_per_pos": float(getattr(cfg, "entry_ratio_neg_per_pos", 0.0) or 0.0),
+        "max_rows_exit": int(getattr(cfg, "max_rows_exit", 0) or 0),
+        "pool_rows_entry": int(pool_rows),
+        "contract": asdict(contract),
+        "feature_flags": dict(feature_flags or {}),
+        "cache_fp": str(cache_fp),
+        "train_exit_model": str(os.getenv("SNIPER_TRAIN_EXIT_MODEL", "1") or "1"),
+        "bin_step_x10": str(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_STEP_X10", "1") or "1"),
+        "bin_max": str(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_MAX", "7.0") or "7.0"),
+        "pos_keep_fraction": str(os.getenv("SNIPER_ENTRY_POS_KEEP_FRACTION", "1.0") or "1.0"),
+        "pos_min_weight": str(os.getenv("SNIPER_ENTRY_POS_MIN_WEIGHT", "0.0") or "0.0"),
+        "neg_favor_high": str(os.getenv("SNIPER_ENTRY_NEG_FAVOR_HIGH", "0") or "0"),
+        "pf_entry_label_net_profit_thr": str(os.getenv("PF_ENTRY_LABEL_NET_PROFIT_THR", "0.005") or "0.005"),
+        "pf_entry_label_min_future_avg_net": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_AVG_NET", "0.0") or "0.0"),
+        "pf_entry_label_early_window_min": str(os.getenv("PF_ENTRY_LABEL_EARLY_WINDOW_MIN", "15") or "15"),
+        "pf_entry_label_min_future_early_avg_net": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_AVG_NET", "0.0") or "0.0"),
+        "pf_entry_label_min_future_early_worst_net": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_WORST_NET", "-1.0") or "-1.0"),
+        "pf_entry_label_min_risk_score": str(os.getenv("PF_ENTRY_LABEL_MIN_RISK_SCORE", "0.0") or "0.0"),
+        "pf_entry_label_min_future_eff": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_EFF", "0.0") or "0.0"),
+        "pf_entry_label_min_future_pos_frac": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_POS_FRAC", "0.0") or "0.0"),
+        "pf_entry_label_min_consistency_score": str(os.getenv("PF_ENTRY_LABEL_MIN_CONSISTENCY_SCORE", "0.0") or "0.0"),
+        "pf_entry_label_min_contract_mae": str(os.getenv("PF_ENTRY_LABEL_MIN_CONTRACT_MAE", "-1.0") or "-1.0"),
+        "pf_entry_weight_mode": str(os.getenv("PF_ENTRY_WEIGHT_MODE", "ret_curve") or "ret_curve"),
+        "pf_entry_weight_future_window_min": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_WINDOW_MIN", "60") or "60"),
+        "pf_entry_weight_future_dd_penalty": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_DD_PENALTY", "1.5") or "1.5"),
+        "pf_entry_weight_future_avg_softcap": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_AVG_SOFTCAP", "0.03") or "0.03"),
+        "pf_entry_weight_future_end_softcap": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_END_SOFTCAP", "0.04") or "0.04"),
+        "pf_entry_weight_future_early_avg_softcap": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_EARLY_AVG_SOFTCAP", "0.01") or "0.01"),
+        "pf_entry_weight_future_end_gain": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_END_GAIN", "0.0") or "0.0"),
+        "pf_entry_weight_future_early_gain": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_EARLY_GAIN", "0.0") or "0.0"),
+        "pf_entry_weight_future_early_dd_penalty": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_EARLY_DD_PENALTY", "0.0") or "0.0"),
+        "pf_entry_weight_future_eff_gain": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_EFF_GAIN", "0.0") or "0.0"),
+        "pf_entry_weight_future_pos_frac_gain": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_POS_FRAC_GAIN", "0.0") or "0.0"),
+        "pf_entry_weight_future_pos_scale": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_POS_SCALE", "1.0") or "1.0"),
+        "pf_entry_weight_future_neg_scale": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_NEG_SCALE", "1.0") or "1.0"),
+        "pf_entry_weight_pct_power": str(os.getenv("PF_ENTRY_WEIGHT_PCT_POWER", "1.0") or "1.0"),
+        "entry_loss_use_label_weights": str(os.getenv("SNIPER_ENTRY_USE_LABEL_WEIGHTS", "0") or "0"),
+        "entry_loss_weight_power": str(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_POWER", "1.0") or "1.0"),
+        "entry_loss_weight_power_pos": str(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_POWER_POS", "") or ""),
+        "entry_loss_weight_power_neg": str(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_POWER_NEG", "") or ""),
+        "entry_loss_weight_clip_max_pos": str(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX_POS", "") or ""),
+        "entry_loss_weight_clip_max_neg": str(os.getenv("SNIPER_ENTRY_LOSS_WEIGHT_CLIP_MAX_NEG", "") or ""),
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()
+
+
+def _load_full_pool_cache(path: Path) -> SniperDataPack | None:
+    def _coerce_batch(obj, *, allow_none: bool = False) -> SniperBatch | None:
+        try:
+            if obj is None:
+                return None if allow_none else None
+            if isinstance(obj, SniperBatch):
+                return obj
+            d = obj if isinstance(obj, dict) else getattr(obj, "__dict__", None)
+            if not isinstance(d, dict):
+                return None
+            X = np.asarray(d.get("X", np.empty((0, 0), dtype=np.float32)), dtype=np.float32)
+            y = np.asarray(d.get("y", np.empty((0,), dtype=np.float32)), dtype=np.float32)
+            w = np.asarray(d.get("w", np.empty((0,), dtype=np.float32)), dtype=np.float32)
+            ts = np.asarray(d.get("ts", np.empty((0,), dtype="datetime64[ns]")), dtype="datetime64[ns]")
+            sym_id = np.asarray(d.get("sym_id", np.empty((0,), dtype=np.int32)), dtype=np.int32)
+            feat_cols = list(d.get("feature_cols", []) or [])
+            return SniperBatch(
+                X=X,
+                y=y,
+                w=w,
+                ts=ts,
+                sym_id=sym_id,
+                feature_cols=feat_cols,
+            )
+        except Exception:
+            return None
+
+    def _coerce_contract(obj) -> TradeContract:
+        if isinstance(obj, TradeContract):
+            return obj
+        try:
+            d = obj if isinstance(obj, dict) else getattr(obj, "__dict__", None)
+            if isinstance(d, dict):
+                return TradeContract(**d)
+        except Exception:
+            pass
+        return DEFAULT_TRADE_CONTRACT
+
+    try:
+        with path.open("rb") as f:
+            obj = pickle.load(f)
+        if isinstance(obj, SniperDataPack):
+            return obj
+        d = obj if isinstance(obj, dict) else getattr(obj, "__dict__", None)
+        if not isinstance(d, dict):
+            return None
+        req = ("entry", "entry_short", "entry_mid", "entry_long", "danger", "exit", "contract", "symbols")
+        if not all(k in d for k in req):
+            return None
+        b_entry = _coerce_batch(d.get("entry"))
+        b_short = _coerce_batch(d.get("entry_short"), allow_none=True)
+        b_mid = _coerce_batch(d.get("entry_mid"))
+        b_long = _coerce_batch(d.get("entry_long"))
+        b_danger = _coerce_batch(d.get("danger"))
+        b_exit = _coerce_batch(d.get("exit"))
+        if any(v is None for v in (b_entry, b_mid, b_long, b_danger, b_exit)):
+            return None
+        t_end = d.get("train_end_utc", None)
+        try:
+            t_end = pd.to_datetime(t_end) if t_end is not None else None
+        except Exception:
+            t_end = None
+        return SniperDataPack(
+            entry=b_entry,  # type: ignore[arg-type]
+            entry_short=b_short,  # type: ignore[arg-type]
+            entry_mid=b_mid,  # type: ignore[arg-type]
+            entry_long=b_long,  # type: ignore[arg-type]
+            danger=b_danger,  # type: ignore[arg-type]
+            exit=b_exit,  # type: ignore[arg-type]
+            contract=_coerce_contract(d.get("contract")),
+            symbols=list(d.get("symbols", []) or []),
+            symbols_used=(list(d.get("symbols_used", []) or []) or None),
+            symbols_skipped=(list(d.get("symbols_skipped", []) or []) or None),
+            train_end_utc=t_end,
+        )
+    except Exception:
+        return None
+    return None
+
+
+def _save_full_pool_cache(path: Path, pack: SniperDataPack) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("wb") as f:
+        pickle.dump(pack, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(path)
+
+
+def _load_latest_full_pool_cache(cache_root: Path, asset_class: str) -> tuple[SniperDataPack | None, Path | None]:
+    d = cache_root / str(asset_class or "crypto").lower()
+    if not d.exists():
+        return None, None
+    files = sorted(d.glob("pool_*.pkl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in files:
+        obj = _load_full_pool_cache(p)
+        if obj is not None:
+            return obj, p
+    return None, None
+
+
 def _save_model(booster: xgb.Booster, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     booster.save_model(str(path))
@@ -865,7 +1373,7 @@ def _save_model(booster: xgb.Booster, path: Path) -> None:
 
 def _empty_batch_like(b: SniperBatch | None = None) -> SniperBatch:
     n_feats = int(b.X.shape[1]) if (b is not None and getattr(b, "X", None) is not None and b.X.ndim == 2) else 0
-    return SniperBatch(
+    out = SniperBatch(
         X=np.empty((0, n_feats), dtype=np.float32),
         y=np.empty((0,), dtype=np.float32),
         w=np.empty((0,), dtype=np.float32),
@@ -873,6 +1381,13 @@ def _empty_batch_like(b: SniperBatch | None = None) -> SniperBatch:
         sym_id=np.empty((0,), dtype=np.int32),
         feature_cols=list(getattr(b, "feature_cols", []) or []),
     )
+    nat = getattr(b, "natural_pos_rate", None)
+    if nat is not None:
+        try:
+            setattr(out, "natural_pos_rate", float(nat))
+        except Exception:
+            pass
+    return out
 
 
 def _sample_indices_binary(
@@ -934,7 +1449,7 @@ def _slice_and_rebalance_batch(
     if keep_rel.size == 0:
         return _empty_batch_like(b)
     idx = idx0[keep_rel]
-    return SniperBatch(
+    out = SniperBatch(
         X=b.X[idx],
         y=b.y[idx],
         w=b.w[idx],
@@ -942,6 +1457,18 @@ def _slice_and_rebalance_batch(
         sym_id=b.sym_id[idx],
         feature_cols=list(b.feature_cols),
     )
+    nat = getattr(b, "natural_pos_rate", None)
+    if nat is None:
+        try:
+            nat = float(np.mean(y0 >= 0.5)) if y0.size else None
+        except Exception:
+            nat = None
+    if nat is not None:
+        try:
+            setattr(out, "natural_pos_rate", float(nat))
+        except Exception:
+            pass
+    return out
 
 
 def _slice_regression_batch(
@@ -1139,34 +1666,72 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         base_rows = int(getattr(cfg, "max_rows_entry", 2_000_000) or 2_000_000)
         if pool_rows <= base_rows:
             pool_rows = max(base_rows * 2, base_rows)
-        print(f"[sniper-train] pool-full: construindo 1x (rows_target={pool_rows})", flush=True)
-        if bool(getattr(cfg, "use_feature_cache", True)):
-            full_pool_pack = prepare_sniper_dataset_from_cache(
-                symbols,
-                total_days=int(cfg.total_days),
-                remove_tail_days=0,
-                contract=contract,
-                cache_map=cache_map,
-                entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
-                max_rows_entry=int(pool_rows),
-                max_rows_exit=int(getattr(cfg, "max_rows_exit", 2_000_000)),
-                seed=7331,
-                asset_class=asset_class,
-                feature_flags=feature_flags,
-            )
-        else:
-            full_pool_pack = prepare_sniper_dataset(
-                symbols,
-                total_days=int(cfg.total_days),
-                remove_tail_days=0,
-                contract=contract,
-                entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
-                max_rows_entry=int(pool_rows),
-                max_rows_exit=int(getattr(cfg, "max_rows_exit", 2_000_000)),
-                seed=7331,
-                asset_class=asset_class,
-                feature_flags=feature_flags,
-            )
+        reuse_pool = str(os.getenv("SNIPER_FULL_POOL_REUSE", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+        force_rebuild = str(os.getenv("SNIPER_FULL_POOL_REBUILD", "0") or "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+        cache_fp = _cache_map_fingerprint(cache_map)
+        cache_key = _full_pool_cache_key(
+            asset_class=asset_class,
+            symbols=symbols,
+            cfg=cfg,
+            contract=contract,
+            feature_flags=feature_flags,
+            cache_fp=cache_fp,
+            pool_rows=int(pool_rows),
+        )
+        pool_cache_file = _full_pool_cache_root() / asset_class / f"pool_{cache_key}.pkl"
+        if reuse_pool and (not force_rebuild) and pool_cache_file.exists():
+            full_pool_pack = _load_full_pool_cache(pool_cache_file)
+            if full_pool_pack is not None:
+                print(f"[sniper-train] pool-full: reutilizando cache ({pool_cache_file})", flush=True)
+            else:
+                print(f"[sniper-train] pool-full: cache invalido, reconstruindo ({pool_cache_file})", flush=True)
+        use_last = str(os.getenv("SNIPER_FULL_POOL_USE_LAST", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+        if full_pool_pack is None and reuse_pool and (not force_rebuild) and use_last:
+            last_pack, last_path = _load_latest_full_pool_cache(_full_pool_cache_root(), asset_class)
+            if last_pack is not None and last_path is not None:
+                full_pool_pack = last_pack
+                print(f"[sniper-train] pool-full: usando ultimo pool salvo ({last_path})", flush=True)
+                # Materializa tambem no hash atual para nao depender sempre de fallback.
+                try:
+                    _save_full_pool_cache(pool_cache_file, full_pool_pack)
+                    print(f"[sniper-train] pool-full: vinculado ao hash atual ({pool_cache_file})", flush=True)
+                except Exception:
+                    pass
+        if full_pool_pack is None:
+            print(f"[sniper-train] pool-full: construindo 1x (rows_target={pool_rows})", flush=True)
+            if bool(getattr(cfg, "use_feature_cache", True)):
+                full_pool_pack = prepare_sniper_dataset_from_cache(
+                    symbols,
+                    total_days=int(cfg.total_days),
+                    remove_tail_days=0,
+                    contract=contract,
+                    cache_map=cache_map,
+                    entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
+                    max_rows_entry=int(pool_rows),
+                    max_rows_exit=int(getattr(cfg, "max_rows_exit", 2_000_000)),
+                    seed=7331,
+                    asset_class=asset_class,
+                    feature_flags=feature_flags,
+                )
+            else:
+                full_pool_pack = prepare_sniper_dataset(
+                    symbols,
+                    total_days=int(cfg.total_days),
+                    remove_tail_days=0,
+                    contract=contract,
+                    entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
+                    max_rows_entry=int(pool_rows),
+                    max_rows_exit=int(getattr(cfg, "max_rows_exit", 2_000_000)),
+                    seed=7331,
+                    asset_class=asset_class,
+                    feature_flags=feature_flags,
+                )
+            if reuse_pool and full_pool_pack is not None:
+                try:
+                    _save_full_pool_cache(pool_cache_file, full_pool_pack)
+                    print(f"[sniper-train] pool-full: cache salvo ({pool_cache_file})", flush=True)
+                except Exception as e:
+                    print(f"[sniper-train] pool-full: falha ao salvar cache ({type(e).__name__}: {e})", flush=True)
         try:
             for _side_name, _b in (("long", full_pool_pack.entry_long), ("short", full_pool_pack.entry_short)):
                 if _b is not None and _b.X.size > 0:
@@ -1237,12 +1802,18 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         if (pack.entry_long is None or pack.entry_long.X.size == 0) and (pack.entry_short is None or pack.entry_short.X.size == 0):
             print(f"[sniper-train] {tail}d: dataset vazio, pulando")
             continue
+        dataset_bin_tables: dict[str, pd.DataFrame] = {}
         for side_name, side_batch in (("long", pack.entry_long), ("short", pack.entry_short)):
             try:
                 if side_batch is not None and side_batch.X.size > 0:
                     pos_e = int((side_batch.y >= 0.5).sum())
                     neg_e = int((side_batch.y < 0.5).sum())
                     print((f"[sniper-train] dataset entry_{side_name}: pos={pos_e:,} neg={neg_e:,}").replace(",", "."), flush=True)
+                    if getattr(side_batch, "w", None) is not None and side_batch.w.size == side_batch.y.size:
+                        bin_step = float(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_STEP_X10", "1") or "1") / 10.0
+                        dataset_bin_tables[side_name] = _entry_weight_bin_table(side_batch.y, side_batch.w, step=bin_step)
+                        msg = _entry_weight_bin_mass_str(side_batch.y, side_batch.w, step=bin_step)
+                        print(f"[sniper-train] dataset entry_{side_name} w-bins: {msg}", flush=True)
             except Exception:
                 pass
         if train_exit_model:
@@ -1318,6 +1889,38 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             d_exit = period_dir / "exit_model"
             d_exit.mkdir(parents=True, exist_ok=True)
             _save_model(exit_model_pack[0], d_exit / "model_exit.json")
+        save_bin_plot = str(os.getenv("SNIPER_ENTRY_BIN_PLOT", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+        bin_plot_paths: dict[str, str] = {}
+        if save_bin_plot:
+            for name, _tag in entry_specs:
+                if name not in entry_models:
+                    continue
+                _m, _m_meta = entry_models[name]
+                tables: dict[str, pd.DataFrame] = {}
+                tb_ds = dataset_bin_tables.get(name)
+                if tb_ds is not None and (not tb_ds.empty):
+                    tables["dataset"] = tb_ds
+                lb = dict((_m_meta or {}).get("loss_weight_bins") or {})
+                rec_tr = list(lb.get("train") or [])
+                rec_va = list(lb.get("val") or [])
+                if rec_tr:
+                    tables["loss_train"] = pd.DataFrame(rec_tr)
+                if rec_va:
+                    tables["loss_val"] = pd.DataFrame(rec_va)
+                if not tables:
+                    continue
+                out_html = period_dir / f"entry_bins_{name}.html"
+                try:
+                    _save_entry_weight_bins_plot(
+                        tables,
+                        out_html=out_html,
+                        title=f"entry {name} | T-{int(tail)}d",
+                    )
+                    if out_html.exists():
+                        bin_plot_paths[name] = str(out_html)
+                        print(f"[sniper-train] entry_{name} bins plot: {out_html}", flush=True)
+                except Exception as e:
+                    print(f"[sniper-train] entry_{name} bins plot falhou: {type(e).__name__}: {e}", flush=True)
         base_name = "long" if "long" in entry_models else "short"
         base_batch = entry_batches[base_name]
         base_meta = entry_models[base_name][1]
@@ -1368,6 +1971,13 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             meta[f"entry_{name}"] = {
                 "feature_cols": entry_batches[name].feature_cols,
                 "calibration": _m_meta["calibrator"],
+                "loss_weight_bins": dict((_m_meta or {}).get("loss_weight_bins") or {}),
+                "dataset_weight_bins": (
+                    dataset_bin_tables[name].to_dict(orient="records")
+                    if name in dataset_bin_tables and (not dataset_bin_tables[name].empty)
+                    else []
+                ),
+                "bins_plot_file": bin_plot_paths.get(name, ""),
             }
         (period_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[sniper-train] {tail}d salvo em {period_dir}")

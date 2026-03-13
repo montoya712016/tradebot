@@ -71,10 +71,18 @@ DEFAULT_TRADE_CONTRACT = TradeContract()
 
 
 def exit_ema_span_from_window(contract: TradeContract, candle_sec: int = 60) -> int:
-    """Calcula o span da EMA de saída baseado na janela de label."""
+    """
+    Resolve o span efetivo da EMA de saída.
+
+    Prioriza `exit_ema_span` explícito no contrato. O fallback para a janela de
+    label existe apenas para contratos legados que não definem span próprio.
+    """
+    explicit_span = int(getattr(contract, "exit_ema_span", 0) or 0)
+    if explicit_span > 0:
+        return explicit_span
     windows = list(getattr(contract, "entry_label_windows_minutes", []) or [])
     if not windows:
-        return int(getattr(contract, "exit_ema_span", 0) or 0)
+        return 0
     candle_sec = int(max(1, candle_sec))
     w_min = float(windows[0])
     return int(max(1, round((w_min * 60.0) / float(candle_sec))))

@@ -80,16 +80,17 @@ def _latest_wf_run_dir() -> str | None:
 
 
 def main() -> None:
-    symbol = _env_str("BT_SYMBOL", "trumpusdt").upper()
-    days = _env_int("BT_DAYS", 2*360)
+    symbol = _env_str("BT_SYMBOL", "dogeusdt").upper()
+    days = _env_int("BT_DAYS", 360)
     total_days_cache = _env_int("BT_TOTAL_DAYS_CACHE", 0)
     run_dir = _env_str("BT_RUN_DIR", "") or _latest_wf_run_dir()
     plot_out = _env_str("BT_PLOT_OUT", "data/generated/plots/crypto_single_symbol.html")
     plot_candles = _env_bool("BT_PLOT_CANDLES", True)
+    save_plot = _env_bool("BT_SAVE_PLOT", True)
     disable_calib = _env_bool("BT_DISABLE_CALIB", False)
     long_only = _env_bool("BT_LONG_ONLY", True)
     use_exit_model = _env_bool("BT_USE_EXIT_MODEL", False)
-    tau_entry = _env_float("BT_TAU_ENTRY", 0.70)
+    tau_entry = _env_float("BT_TAU_ENTRY", 0.60)
     exit_min_hold_bars = _env_int("BT_EXIT_MIN_HOLD_BARS", 0)
     exit_confirm_bars = _env_int("BT_EXIT_CONFIRM_BARS", 2)
     exit_span_center_smooth = _env_float("BT_EXIT_SPAN_CENTER_SMOOTH", 0.90)
@@ -103,6 +104,7 @@ def main() -> None:
         days=days,
         total_days_cache=total_days_cache,
         run_dir=run_dir,
+        save_plot=save_plot,
         plot_out=plot_out,
         plot_candles=plot_candles,
         disable_entry_calibration=disable_calib,
