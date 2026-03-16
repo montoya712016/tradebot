@@ -26,6 +26,7 @@ def _simulate_entry_contract_numba(
     low: np.ndarray,
     horizon_bars: int,
     label_profit_thr_pct: float,
+    label_profit_only: int,
     exit_ema_span: int,
     exit_ema_init_offset_pct: float,
     fee_pct_per_side: float,
@@ -50,10 +51,23 @@ def _simulate_entry_contract_numba(
     label_future_early_avg_thr: float,
     label_future_early_worst_thr: float,
     label_risk_score_thr: float,
+    label_future_end_thr: float,
     label_future_eff_thr: float,
     label_future_pos_frac_thr: float,
     label_consistency_thr: float,
     label_contract_mae_thr: float,
+    label_enable_neutral: int,
+    label_neg_profit_thr: float,
+    label_neg_future_avg_thr: float,
+    label_neg_future_early_avg_thr: float,
+    label_neg_future_early_worst_thr: float,
+    label_neg_risk_score_thr: float,
+    label_neg_future_end_thr: float,
+    label_neg_future_eff_thr: float,
+    label_neg_future_pos_frac_thr: float,
+    label_neg_consistency_thr: float,
+    label_neg_contract_mae_thr: float,
+    label_neg_min_failures: int,
     weight_future_end_gain: float,
     weight_future_early_gain: float,
     weight_future_early_dd_penalty: float,
@@ -64,7 +78,8 @@ def _simulate_entry_contract_numba(
     weight_max: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     n = close.size
-    labels = np.zeros(n, np.uint8)
+    labels = np.empty(n, np.float32)
+    labels[:] = np.nan
     mae = np.zeros(n, np.float32)
     exit_code = np.zeros(n, np.int8)
     exit_wait = np.zeros(n, np.int32)
@@ -77,6 +92,7 @@ def _simulate_entry_contract_numba(
     thr = float(label_profit_thr_pct)
     if not np.isfinite(thr):
         thr = 0.0
+    profit_only = int(label_profit_only) != 0
     ret_scale_pos = float(weight_ret_scale_pos)
     if (not np.isfinite(ret_scale_pos)) or ret_scale_pos <= 1e-9:
         ret_scale_pos = 0.04
@@ -133,6 +149,9 @@ def _simulate_entry_contract_numba(
     risk_thr = float(label_risk_score_thr)
     if not np.isfinite(risk_thr):
         risk_thr = 0.0
+    future_end_thr = float(label_future_end_thr)
+    if not np.isfinite(future_end_thr):
+        future_end_thr = 0.0
     future_eff_thr = float(label_future_eff_thr)
     if (not np.isfinite(future_eff_thr)) or future_eff_thr < 0.0:
         future_eff_thr = 0.0
@@ -145,6 +164,40 @@ def _simulate_entry_contract_numba(
     contract_mae_thr = float(label_contract_mae_thr)
     if not np.isfinite(contract_mae_thr):
         contract_mae_thr = -1.0
+    neutral_mode = int(label_enable_neutral) != 0
+    neg_profit_thr = float(label_neg_profit_thr)
+    if not np.isfinite(neg_profit_thr):
+        neg_profit_thr = 0.0
+    neg_future_avg_thr = float(label_neg_future_avg_thr)
+    if not np.isfinite(neg_future_avg_thr):
+        neg_future_avg_thr = 0.0
+    neg_future_early_avg_thr = float(label_neg_future_early_avg_thr)
+    if not np.isfinite(neg_future_early_avg_thr):
+        neg_future_early_avg_thr = 0.0
+    neg_future_early_worst_thr = float(label_neg_future_early_worst_thr)
+    if not np.isfinite(neg_future_early_worst_thr):
+        neg_future_early_worst_thr = -1.0
+    neg_risk_thr = float(label_neg_risk_score_thr)
+    if not np.isfinite(neg_risk_thr):
+        neg_risk_thr = 0.0
+    neg_future_end_thr = float(label_neg_future_end_thr)
+    if not np.isfinite(neg_future_end_thr):
+        neg_future_end_thr = 0.0
+    neg_future_eff_thr = float(label_neg_future_eff_thr)
+    if (not np.isfinite(neg_future_eff_thr)) or neg_future_eff_thr < 0.0:
+        neg_future_eff_thr = 0.0
+    neg_future_pos_frac_thr = float(label_neg_future_pos_frac_thr)
+    if (not np.isfinite(neg_future_pos_frac_thr)) or neg_future_pos_frac_thr < 0.0:
+        neg_future_pos_frac_thr = 1.0
+    neg_consist_thr = float(label_neg_consistency_thr)
+    if not np.isfinite(neg_consist_thr):
+        neg_consist_thr = 0.0
+    neg_contract_mae_thr = float(label_neg_contract_mae_thr)
+    if not np.isfinite(neg_contract_mae_thr):
+        neg_contract_mae_thr = -1.0
+    neg_min_failures = int(label_neg_min_failures)
+    if neg_min_failures < 1:
+        neg_min_failures = 1
     future_end_gain = float(weight_future_end_gain)
     if (not np.isfinite(future_end_gain)) or future_end_gain < 0.0:
         future_end_gain = 0.0
@@ -180,7 +233,7 @@ def _simulate_entry_contract_numba(
 
         worst = px0
         best_mae = 0.0
-        label = 0
+        label = np.nan
         code = 0
         exit_bar = i
         dipped_below_entry = False
@@ -300,21 +353,51 @@ def _simulate_entry_contract_numba(
             - (future_early_dd_penalty * abs(min(0.0, r_future_early_worst_net)))
             - (w_future_dd_pen * abs(min(0.0, r_future_worst_net)))
         )
-        if (
-            ((not no_dip) or (not dipped_below_entry))
-            and (r_net > thr)
-            and (r_future_avg_net > future_avg_thr)
-            and (r_future_early_avg_net > future_early_avg_thr)
-            and (r_future_early_worst_net > future_early_worst_thr)
-            and (risk_score > risk_thr)
-            and (future_up_eff > future_eff_thr)
-            and (future_pos_frac > future_pos_frac_thr)
-            and (consistency_score > consist_thr)
-            and (best_mae > contract_mae_thr)
-        ):
-            label = 1
+        if profit_only:
+            pos_label = r_net > thr
         else:
-            label = 0
+            pos_label = (
+                ((not no_dip) or (not dipped_below_entry))
+                and (r_net > thr)
+                and (r_future_avg_net > future_avg_thr)
+                and (r_future_early_avg_net > future_early_avg_thr)
+                and (r_future_early_worst_net > future_early_worst_thr)
+                and (risk_score > risk_thr)
+                and (r_future_end_net > future_end_thr)
+                and (future_up_eff > future_eff_thr)
+                and (future_pos_frac > future_pos_frac_thr)
+                and (consistency_score > consist_thr)
+                and (best_mae > contract_mae_thr)
+            )
+        if profit_only:
+            neg_label = not pos_label
+        else:
+            neg_failures = 0
+            if r_future_avg_net < neg_future_avg_thr:
+                neg_failures += 1
+            if r_future_early_avg_net < neg_future_early_avg_thr:
+                neg_failures += 1
+            if r_future_early_worst_net < neg_future_early_worst_thr:
+                neg_failures += 1
+            if risk_score < neg_risk_thr:
+                neg_failures += 1
+            if r_future_end_net < neg_future_end_thr:
+                neg_failures += 1
+            if future_up_eff < neg_future_eff_thr:
+                neg_failures += 1
+            if future_pos_frac < neg_future_pos_frac_thr:
+                neg_failures += 1
+            if consistency_score < neg_consist_thr:
+                neg_failures += 1
+            if best_mae < neg_contract_mae_thr:
+                neg_failures += 1
+            neg_label = (r_net < neg_profit_thr) and (neg_failures >= neg_min_failures)
+        if pos_label:
+            label = 1.0
+        elif neg_label:
+            label = 0.0
+        else:
+            label = np.nan if (neutral_mode and (not profit_only)) else 0.0
 
         # Peso simples por retorno liquido e label:
         # - positivos: quanto maior retorno, maior peso
@@ -418,7 +501,7 @@ def _simulate_entry_contract_numba(
             w = w_max
         weights[i] = float(w)
 
-        labels[i] = label
+        labels[i] = np.float32(label)
         mae[i] = best_mae
         exit_code[i] = code
         exit_wait[i] = max(0, exit_bar - i)
@@ -1458,7 +1541,8 @@ def apply_trade_contract_labels(
     if spans_bars.size == 0:
         spans_bars = np.array([int(max(2, round((60.0 * 60.0) / float(candle_seconds))))], dtype=np.int32)
 
-    entry_label_net_profit_thr = float(_env_float("PF_ENTRY_LABEL_NET_PROFIT_THR", 0.005))
+    entry_label_net_profit_thr = float(_env_float("PF_ENTRY_LABEL_NET_PROFIT_THR", 0.03))
+    entry_label_profit_only = bool(_env_int("PF_ENTRY_LABEL_PROFIT_ONLY", 0))
     entry_require_no_dip = bool(_env_int("PF_ENTRY_LABEL_REQUIRE_NO_DIP", 0))
     entry_weight_ret_scale_pos = float(_env_float("PF_ENTRY_WEIGHT_RET_SCALE_POS", 0.04))
     entry_weight_ret_scale_neg = float(_env_float("PF_ENTRY_WEIGHT_RET_SCALE_NEG", 0.03))
@@ -1478,14 +1562,27 @@ def apply_trade_contract_labels(
     entry_weight_future_avg_softcap = float(_env_float("PF_ENTRY_WEIGHT_FUTURE_AVG_SOFTCAP", 0.03))
     entry_weight_future_end_softcap = float(_env_float("PF_ENTRY_WEIGHT_FUTURE_END_SOFTCAP", 0.04))
     entry_weight_future_early_avg_softcap = float(_env_float("PF_ENTRY_WEIGHT_FUTURE_EARLY_AVG_SOFTCAP", 0.01))
-    entry_label_future_avg_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_AVG_NET", 0.0))
-    entry_label_future_early_avg_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_AVG_NET", 0.0))
+    entry_label_future_avg_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_AVG_NET", 0.0018))
+    entry_label_future_early_avg_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_AVG_NET", 0.0008))
     entry_label_future_early_worst_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_WORST_NET", -1.0))
-    entry_label_risk_score_thr = float(_env_float("PF_ENTRY_LABEL_MIN_RISK_SCORE", 0.0))
-    entry_label_future_eff_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_EFF", 0.0))
-    entry_label_future_pos_frac_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_POS_FRAC", 0.0))
-    entry_label_consistency_thr = float(_env_float("PF_ENTRY_LABEL_MIN_CONSISTENCY_SCORE", 0.0))
-    entry_label_contract_mae_thr = float(_env_float("PF_ENTRY_LABEL_MIN_CONTRACT_MAE", -1.0))
+    entry_label_risk_score_thr = float(_env_float("PF_ENTRY_LABEL_MIN_RISK_SCORE", 0.0008))
+    entry_label_future_end_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_END_NET", 0.0030))
+    entry_label_future_eff_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_EFF", 0.13))
+    entry_label_future_pos_frac_thr = float(_env_float("PF_ENTRY_LABEL_MIN_FUTURE_POS_FRAC", 0.60))
+    entry_label_consistency_thr = float(_env_float("PF_ENTRY_LABEL_MIN_CONSISTENCY_SCORE", 0.0038))
+    entry_label_contract_mae_thr = float(_env_float("PF_ENTRY_LABEL_MIN_CONTRACT_MAE", -0.011))
+    entry_label_enable_neutral = bool(_env_int("PF_ENTRY_LABEL_ENABLE_NEUTRAL", 1))
+    entry_label_neg_profit_thr = float(_env_float("PF_ENTRY_LABEL_NEG_NET_PROFIT_THR", 0.0040))
+    entry_label_neg_future_avg_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_FUTURE_AVG_NET", 0.0008))
+    entry_label_neg_future_early_avg_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_FUTURE_EARLY_AVG_NET", 0.0002))
+    entry_label_neg_future_early_worst_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_FUTURE_EARLY_WORST_NET", -0.0060))
+    entry_label_neg_risk_score_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_RISK_SCORE", 0.0))
+    entry_label_neg_future_end_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_FUTURE_END_NET", 0.0010))
+    entry_label_neg_future_eff_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_FUTURE_EFF", 0.08))
+    entry_label_neg_future_pos_frac_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_FUTURE_POS_FRAC", 0.50))
+    entry_label_neg_consistency_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_CONSISTENCY_SCORE", 0.0015))
+    entry_label_neg_contract_mae_thr = float(_env_float("PF_ENTRY_LABEL_NEG_MAX_CONTRACT_MAE", -0.012))
+    entry_label_neg_min_failures = int(_env_int("PF_ENTRY_LABEL_NEG_MIN_FAILURES", 3))
     entry_weight_future_end_gain = float(_env_float("PF_ENTRY_WEIGHT_FUTURE_END_GAIN", 0.0))
     entry_weight_future_early_gain = float(_env_float("PF_ENTRY_WEIGHT_FUTURE_EARLY_GAIN", 0.0))
     entry_weight_future_early_dd_penalty = float(_env_float("PF_ENTRY_WEIGHT_FUTURE_EARLY_DD_PENALTY", 0.0))
@@ -1533,6 +1630,7 @@ def apply_trade_contract_labels(
             low,
             int(hb),
             float(entry_label_net_profit_thr),
+            int(1 if entry_label_profit_only else 0),
             int(exit_span_bars),
             float(getattr(contract, "exit_ema_init_offset_pct", 0.0) or 0.0),
             float(getattr(contract, "fee_pct_per_side", 0.0) or 0.0),
@@ -1557,10 +1655,23 @@ def apply_trade_contract_labels(
             float(entry_label_future_early_avg_thr),
             float(entry_label_future_early_worst_thr),
             float(entry_label_risk_score_thr),
+            float(entry_label_future_end_thr),
             float(entry_label_future_eff_thr),
             float(entry_label_future_pos_frac_thr),
             float(entry_label_consistency_thr),
             float(entry_label_contract_mae_thr),
+            int(1 if entry_label_enable_neutral else 0),
+            float(entry_label_neg_profit_thr),
+            float(entry_label_neg_future_avg_thr),
+            float(entry_label_neg_future_early_avg_thr),
+            float(entry_label_neg_future_early_worst_thr),
+            float(entry_label_neg_risk_score_thr),
+            float(entry_label_neg_future_end_thr),
+            float(entry_label_neg_future_eff_thr),
+            float(entry_label_neg_future_pos_frac_thr),
+            float(entry_label_neg_consistency_thr),
+            float(entry_label_neg_contract_mae_thr),
+            int(entry_label_neg_min_failures),
             float(entry_weight_future_end_gain),
             float(entry_weight_future_early_gain),
             float(entry_weight_future_early_dd_penalty),
@@ -1581,7 +1692,7 @@ def apply_trade_contract_labels(
         suffix = f"{int(w_min)}m"
         if not first_suffix:
             first_suffix = suffix
-        df[f"sniper_entry_label_{suffix}"] = pd.Series(entry_label.astype(np.uint8), index=df.index)
+        df[f"sniper_entry_label_{suffix}"] = pd.Series(entry_label.astype(np.float32), index=df.index)
         df[f"sniper_mae_pct_{suffix}"] = pd.Series(mae_pct.astype(np.float32), index=df.index)
         df[f"sniper_exit_code_{suffix}"] = pd.Series(exit_code.astype(np.int8), index=df.index)
         df[f"sniper_exit_wait_bars_{suffix}"] = pd.Series(exit_wait.astype(np.int32), index=df.index)
@@ -1782,7 +1893,12 @@ def apply_trade_contract_labels(
     label_cols = [f"sniper_entry_label_{int(w)}m" for w in windows if f"sniper_entry_label_{int(w)}m" in df.columns]
     weight_cols = [f"sniper_entry_weight_{int(w)}m" for w in windows if f"sniper_entry_weight_{int(w)}m" in df.columns]
     if label_cols:
-        lbl_any = (np.nanmax(np.vstack([pd.to_numeric(df[c], errors="coerce").to_numpy(np.float32, copy=False) for c in label_cols]), axis=0) > 0.5).astype(np.uint8)
+        lbl_stack = np.vstack([pd.to_numeric(df[c], errors="coerce").to_numpy(np.float32, copy=False) for c in label_cols]).astype(np.float32, copy=False)
+        any_defined = np.any(np.isfinite(lbl_stack), axis=0)
+        any_pos = np.nanmax(np.where(np.isfinite(lbl_stack), lbl_stack, np.float32(0.0)), axis=0) > 0.5
+        lbl_any = np.full(lbl_stack.shape[1], np.nan, dtype=np.float32)
+        lbl_any[any_defined] = np.float32(0.0)
+        lbl_any[any_pos] = np.float32(1.0)
         df["sniper_entry_label_any"] = pd.Series(lbl_any, index=df.index)
     if weight_cols:
         w_any = np.nanmax(np.vstack([pd.to_numeric(df[c], errors="coerce").to_numpy(np.float32, copy=False) for c in weight_cols]), axis=0).astype(np.float32)
@@ -1826,9 +1942,9 @@ def apply_trade_contract_labels(
             except Exception:
                 pass
     if entry_any_canonical and ("sniper_entry_label_any" in df.columns):
-        df["sniper_entry_label"] = df["sniper_entry_label_any"].astype(np.uint8)
+        df["sniper_entry_label"] = pd.to_numeric(df["sniper_entry_label_any"], errors="coerce").astype(np.float32)
     else:
-        df["sniper_entry_label"] = df[f"sniper_entry_label_{first_suffix}"].astype(np.uint8)
+        df["sniper_entry_label"] = pd.to_numeric(df[f"sniper_entry_label_{first_suffix}"], errors="coerce").astype(np.float32)
     df["sniper_mae_pct"] = df[f"sniper_mae_pct_{first_suffix}"].astype(np.float32)
     df["sniper_exit_code"] = df[f"sniper_exit_code_{first_suffix}"].astype(np.int8)
     df["sniper_exit_wait_bars"] = df[f"sniper_exit_wait_bars_{first_suffix}"].astype(np.int32)
@@ -1876,6 +1992,7 @@ def apply_trade_contract_labels(
                 "early_guard_min": int(early_guard_min),
                 "early_adverse_max": float(early_adverse_max),
                 "entry_label_net_profit_thr": float(entry_label_net_profit_thr),
+                "entry_label_profit_only": bool(entry_label_profit_only),
                 "entry_require_no_dip": bool(entry_require_no_dip),
                 "entry_weight_ret_scale_pos": float(entry_weight_ret_scale_pos),
                 "entry_weight_ret_scale_neg": float(entry_weight_ret_scale_neg),

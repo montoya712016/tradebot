@@ -22,6 +22,11 @@ def _add_repo_paths() -> None:
 _add_repo_paths()
 
 from backtest.single_symbol import SingleSymbolDemoSettings, run  # type: ignore
+from crypto.trade_contract import (  # type: ignore
+    CRYPTO_PIPELINE_CANDLE_SEC,
+    apply_crypto_pipeline_env,
+    build_default_crypto_contract,
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -43,6 +48,22 @@ def _env_float(name: str, default: float) -> float:
         return float(v) if v else float(default)
     except Exception:
         return float(default)
+
+
+def _env_int_tuple(name: str) -> tuple[int, ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    out: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except Exception:
+            continue
+    return tuple(out)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -80,17 +101,21 @@ def _latest_wf_run_dir() -> str | None:
 
 
 def main() -> None:
-    symbol = _env_str("BT_SYMBOL", "dogeusdt").upper()
-    days = _env_int("BT_DAYS", 360)
+    candle_sec_default = apply_crypto_pipeline_env(CRYPTO_PIPELINE_CANDLE_SEC)
+    symbol = _env_str("BT_SYMBOL", "xlmusdt").upper()
+    days = _env_int("BT_DAYS", 4*360)
     total_days_cache = _env_int("BT_TOTAL_DAYS_CACHE", 0)
     run_dir = _env_str("BT_RUN_DIR", "") or _latest_wf_run_dir()
     plot_out = _env_str("BT_PLOT_OUT", "data/generated/plots/crypto_single_symbol.html")
     plot_candles = _env_bool("BT_PLOT_CANDLES", True)
     save_plot = _env_bool("BT_SAVE_PLOT", True)
+    candle_sec = _env_int("BT_CANDLE_SEC", candle_sec_default)
+    contract = build_default_crypto_contract(candle_sec)
     disable_calib = _env_bool("BT_DISABLE_CALIB", False)
     long_only = _env_bool("BT_LONG_ONLY", True)
     use_exit_model = _env_bool("BT_USE_EXIT_MODEL", False)
-    tau_entry = _env_float("BT_TAU_ENTRY", 0.60)
+    tau_entry = _env_float("BT_TAU_ENTRY", 0.50)
+    force_period_days = _env_int_tuple("BT_FORCE_PERIOD_DAYS")
     exit_min_hold_bars = _env_int("BT_EXIT_MIN_HOLD_BARS", 0)
     exit_confirm_bars = _env_int("BT_EXIT_CONFIRM_BARS", 2)
     exit_span_center_smooth = _env_float("BT_EXIT_SPAN_CENTER_SMOOTH", 0.90)
@@ -102,8 +127,10 @@ def main() -> None:
         asset_class="crypto",
         symbol=symbol,
         days=days,
+        candle_sec=candle_sec,
         total_days_cache=total_days_cache,
         run_dir=run_dir,
+        contract=contract,
         save_plot=save_plot,
         plot_out=plot_out,
         plot_candles=plot_candles,
@@ -111,6 +138,7 @@ def main() -> None:
         long_only=long_only,
         use_exit_model=use_exit_model,
         override_tau_entry=tau_entry,
+        force_period_days=force_period_days,
         exit_min_hold_bars=exit_min_hold_bars,
         exit_confirm_bars=exit_confirm_bars,
         exit_span_center_smooth=exit_span_center_smooth,

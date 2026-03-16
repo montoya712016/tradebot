@@ -11,6 +11,22 @@ from pathlib import Path
 from typing import Union
 
 
+def _timeframe_tag_from_env() -> str:
+    raw = (
+        os.getenv("SNIPER_CANDLE_SEC")
+        or os.getenv("PF_CRYPTO_CANDLE_SEC")
+        or os.getenv("CRYPTO_PIPELINE_CANDLE_SEC")
+        or "60"
+    )
+    try:
+        candle_sec = max(1, int(str(raw).strip()))
+    except Exception:
+        candle_sec = 60
+    if candle_sec % 60 == 0:
+        return f"{int(candle_sec // 60)}m"
+    return f"{int(candle_sec)}s"
+
+
 def modules_root() -> Path:
     """Retorna a raiz do diretório `modules/`."""
     # core/utils/paths.py -> utils -> core -> repo_root -> modules
@@ -82,7 +98,7 @@ def feature_cache_root() -> Path:
     v = (os.getenv("SNIPER_FEATURE_CACHE_DIR") or "").strip()
     if v:
         return Path(v).expanduser().resolve()
-    return cache_sniper_root() / "features_pf_1m"
+    return cache_sniper_root() / f"features_pf_{_timeframe_tag_from_env()}"
 
 
 def ohlc_cache_root() -> Path:

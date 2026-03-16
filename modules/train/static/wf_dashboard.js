@@ -80,36 +80,70 @@
     }
   }
 
-  function renderGallery(images) {
-    const grid = document.getElementById("gallery-grid");
+  function renderArtifacts(artifacts) {
+    const grid = document.getElementById("artifact-grid");
+    const preview = document.getElementById("artifact-preview");
     if (!grid) return;
     grid.innerHTML = "";
-    for (const item of images) {
+    let firstHtml = null;
+    for (const item of artifacts) {
       const ret = toFloat(item.ret_pct, 0);
       const dd = toFloat(item.max_dd, 0);
       const pf = toFloat(item.profit_factor, 0);
+      const href = "/artifact/" + encodeURI(item.artifact || "");
+      const isHtml = (item.artifact_type || "").toLowerCase() === "html";
+      if (!firstHtml && isHtml) firstHtml = href;
       const card = document.createElement("div");
       card.className = "gallery-card";
-      card.innerHTML = `
-        <img src="/img/${item.img}" alt="equity" loading="lazy" />
-        <div class="gallery-body">
-          <div class="gallery-title mono">${item.train_id}/${item.backtest_id}</div>
-          <div class="gallery-meta">
-            <span class="${ret > 0 ? "value-pos" : ret < 0 ? "value-neg" : ""}">
-              ${fmtPct(ret)}
-            </span>
-            <span>DD ${fmtPct(dd * 100.0)}</span>
-            <span>PF ${fmtNum(pf)}</span>
+      card.innerHTML = isHtml
+        ? `
+          <div class="gallery-body">
+            <div class="gallery-title mono">${item.train_id}/${item.backtest_id}</div>
+            <div class="gallery-meta">
+              <span class="${ret > 0 ? "value-pos" : ret < 0 ? "value-neg" : ""}">${fmtPct(ret)}</span>
+              <span>DD ${fmtPct(dd * 100.0)}</span>
+              <span>PF ${fmtNum(pf)}</span>
+            </div>
+            <div class="gallery-meta">
+              <button class="btn ghost artifact-open" data-href="${href}">Show Plot</button>
+            </div>
           </div>
-        </div>
-      `;
+        `
+        : `
+          <img src="${href}" alt="equity" loading="lazy" />
+          <div class="gallery-body">
+            <div class="gallery-title mono">${item.train_id}/${item.backtest_id}</div>
+            <div class="gallery-meta">
+              <span class="${ret > 0 ? "value-pos" : ret < 0 ? "value-neg" : ""}">${fmtPct(ret)}</span>
+              <span>DD ${fmtPct(dd * 100.0)}</span>
+              <span>PF ${fmtNum(pf)}</span>
+            </div>
+            <div class="gallery-meta">
+              <a class="btn ghost" href="${href}" target="_blank" rel="noreferrer">Open PNG</a>
+            </div>
+          </div>
+        `;
       grid.appendChild(card);
     }
-    if (!images.length) {
+    if (preview && firstHtml) {
+      const current = preview.getAttribute("src") || "";
+      if (!current || current === "about:blank") {
+        preview.setAttribute("src", firstHtml);
+      }
+    }
+    grid.querySelectorAll(".artifact-open").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (!preview) return;
+        const href = btn.getAttribute("data-href") || "";
+        if (href) preview.setAttribute("src", href);
+      });
+    });
+    if (!artifacts.length) {
       const empty = document.createElement("div");
       empty.className = "muted";
-      empty.textContent = "No equity images yet.";
+      empty.textContent = "No backtest artifacts yet.";
       grid.appendChild(empty);
+      if (preview) preview.setAttribute("src", "about:blank");
     }
   }
 
@@ -131,7 +165,7 @@
     const meta = state.meta || {};
     const summary = state.summary || {};
     const rows = state.rows || [];
-    const images = state.images || [];
+    const artifacts = state.artifacts || [];
     const logs = state.logs || {};
 
     setText("meta-rows", String(meta.rows_total || 0));
@@ -160,10 +194,10 @@
 
     const backtests = rows.filter((r) => (r.stage || "").toLowerCase() === "backtest");
     setText("runs-count", String(backtests.length));
-    renderTable(backtests.slice(-30).reverse());
+    renderTable(backtests.slice().reverse());
 
-    setText("img-count", String(images.length));
-    renderGallery(images);
+    setText("artifact-count", String(artifacts.length));
+    renderArtifacts(artifacts);
     renderLogs(logs);
   }
 

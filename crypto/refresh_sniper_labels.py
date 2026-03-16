@@ -24,7 +24,11 @@ def main() -> None:
     os.environ.setdefault("SNIPER_ASSET_CLASS", "crypto")
     # Refresh robusto (evita abort por RAM em lotes longos).
     os.environ["SNIPER_LABELS_REFRESH_WORKERS"] = "1"
-    os.environ["PF_ENTRY_LABEL_NET_PROFIT_THR"] = "0.005"
+    os.environ["PF_ENTRY_LABEL_NET_PROFIT_THR"] = "0.03"
+    os.environ["PF_ENTRY_LABEL_PROFIT_ONLY"] = "1"
+    os.environ["PF_ENTRY_LABEL_REQUIRE_NO_DIP"] = "0"
+    os.environ["PF_ENTRY_LABEL_ENABLE_NEUTRAL"] = "0"
+    os.environ["PF_ENTRY_LABEL_ANY_CANONICAL"] = "0"
     os.environ["PF_ENTRY_WEIGHT_RET_SCALE_POS"] = "0.04"
     os.environ["PF_ENTRY_WEIGHT_RET_SCALE_NEG"] = "0.03"
     os.environ["PF_ENTRY_WEIGHT_RET_DEADZONE"] = "0.002"
@@ -38,20 +42,18 @@ def main() -> None:
     os.environ["PF_ENTRY_WEIGHT_MAX"] = "20.0"
     os.environ["SNIPER_ENTRY_WEIGHT_BIN_STEP_X10"] = "5"
     os.environ["SNIPER_ENTRY_WEIGHT_BIN_MAX"] = "20.0"
-    from trade_contract import TradeContract  # type: ignore
+    from crypto.trade_contract import (  # type: ignore
+        CRYPTO_PIPELINE_CANDLE_SEC,
+        apply_crypto_pipeline_env,
+        build_default_crypto_contract,
+    )
     from prepare_features.refresh_sniper_labels_in_cache import (  # type: ignore
         RefreshLabelsSettings,
         run as refresh_run,
     )
-
-    contract = TradeContract(
-        entry_label_windows_minutes=(240,),
-        entry_label_min_profit_pcts=(0.02,),
-        entry_label_weight_alpha=0.5,
-        exit_ema_span=60,
-        exit_ema_init_offset_pct=0.005,
-    )
-    settings = RefreshLabelsSettings(contract=contract, candle_sec=60)
+    candle_sec = apply_crypto_pipeline_env(CRYPTO_PIPELINE_CANDLE_SEC)
+    contract = build_default_crypto_contract(candle_sec)
+    settings = RefreshLabelsSettings(contract=contract, candle_sec=candle_sec)
     settings.workers = 1
     settings.max_ram_pct = 72.0
     settings.min_free_mb = 4096.0

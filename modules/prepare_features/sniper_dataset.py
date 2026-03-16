@@ -121,7 +121,7 @@ def build_sniper_datasets(
     entry_df["cycle_dd_pct"] = 0.0
     entry_df["cycle_avg_entry_price"] = entry_df["close"]
     entry_df["cycle_last_fill_price"] = entry_df["close"]
-    entry_df["label_entry"] = entry_df[str(entry_label_col)].astype(np.uint8)
+    entry_df["label_entry"] = pd.to_numeric(entry_df[str(entry_label_col)], errors="coerce").astype(np.float32)
 
     empty_cols = list(df.columns) + [
         "ts",

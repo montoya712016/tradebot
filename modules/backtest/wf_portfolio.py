@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 """
@@ -505,13 +505,14 @@ def main() -> None:
     ap.add_argument("--corr-signed", dest="corr_abs", action="store_false", help="Usa correlacao assinada em vez de absoluta.")
     ap.add_argument("--corr-debug", action="store_true", help="Loga resumo de filtro de correlacao por batch.")
     ap.set_defaults(corr_abs=True)
+    ap.add_argument("--exposure-multiplier", type=float, default=3.0, help="Quando >0, total_exposure = equity * multiplier (limita exposição ao valor da carteira x N).")
 
-    # Universo dinÃ¢mico (walk-forward):
-    # - step 0: opera TODOS os sÃ­mbolos disponÃ­veis no step
+    # Universo dinâmico (walk-forward):
+    # - step 0: opera TODOS os símbolos disponíveis no step
     # - step i: opera o universo "selecionado" no step i-1
-    # - em todos os steps: ainda assim simula TODOS os sÃ­mbolos do step para selecionar o prÃ³ximo
-    ap.add_argument("--dynamic-universe", action="store_true", help="Ativa seleÃ§Ã£o walk-forward de universo (default: desativado).")
-    ap.add_argument("--no-dynamic-universe", action="store_true", help="Legado: desativa seleÃ§Ã£o walk-forward de universo.")
+    # - em todos os steps: ainda assim simula TODOS os símbolos do step para selecionar o próximo
+    ap.add_argument("--dynamic-universe", action="store_true", default=True, help="Ativa seleção walk-forward de universo (default: ativado).")
+    ap.add_argument("--no-dynamic-universe", dest="dynamic_universe", action="store_false", help="Desativa seleção walk-forward de universo.")
     ap.add_argument(
         "--active-target",
         type=int,
@@ -763,6 +764,7 @@ def main() -> None:
         corr_keep_top_n=int(getattr(args, "corr_keep_top_n", 1) or 0),
         corr_abs=bool(getattr(args, "corr_abs", True)),
         corr_debug=bool(getattr(args, "corr_debug", False)),
+        exposure_multiplier=float(getattr(args, "exposure_multiplier", 0.0) or 0.0),
     )
     print(
         f"[wf] corr_filter={cfg.corr_filter_enabled} window={cfg.corr_window_bars} "
@@ -800,7 +802,7 @@ def main() -> None:
     stride = max(1, int(args.bar_stride))
     min_span = pd.Timedelta(minutes=int(min_bars) * int(stride))
 
-    dynamic_universe_on = bool(getattr(args, "dynamic_universe", False)) and (not bool(getattr(args, "no_dynamic_universe", False)))
+    dynamic_universe_on = bool(getattr(args, "dynamic_universe", True))
     prev_selected: list[str] = []  # universo selecionado no step anterior (para operar step atual)
     prev_active: list[str] = []  # universo realmente operado no step anterior (para churn quando hÃ¡ teto)
     ewm_score: dict[str, float] = {}  # score suavizado por sÃ­mbolo (para ranking do prÃ³ximo step)
@@ -1242,7 +1244,7 @@ def main() -> None:
             )
 
             # Selecao para o PROXIMO step:
-            # sem filtros (PF/win/DD/score/trades), para isolar analise da correlacao.
+            # Filtro principal: apenas criptos com retorno total historico positivo.
             min_pf = float(getattr(args, "universe_min_pf", 1.0) or 1.0)
             min_win = float(getattr(args, "universe_min_win", 0.30) or 0.30)
             max_dd_f = float(getattr(args, "universe_max_dd", 1.0) or 1.0)
@@ -1256,7 +1258,17 @@ def main() -> None:
             pf_col = "profit_factor_eff" if (use_eff and ("profit_factor_eff" in dfm_rank.columns)) else "profit_factor"
             win_col = "win_rate_eff" if (use_eff and ("win_rate_eff" in dfm_rank.columns)) else "win_rate"
 
-            sel_mask = pd.Series(np.ones(len(dfm_rank), dtype=bool), index=dfm_rank.index)
+            # Filtro walk-forward: exclui criptos com retorno historico <= 0
+            sel_mask = dfm_rank["ret_total"] > 0.0
+            n_pos = int(sel_mask.sum())
+            n_all = int(len(dfm_rank))
+            print(
+                f"[wf] universe filter: {n_pos}/{n_all} symbols with positive history",
+                flush=True,
+            )
+            # Fallback: se nenhuma passar, aceita todas (evita colapsar o universo).
+            if n_pos == 0:
+                sel_mask = pd.Series(np.ones(len(dfm_rank), dtype=bool), index=dfm_rank.index)
             selected_next = [str(s).upper() for s in dfm_rank.loc[sel_mask, "symbol"].astype(str).tolist() if str(s).strip()]
 
             # aplica teto (se houver) com churn limitado (se configurado)

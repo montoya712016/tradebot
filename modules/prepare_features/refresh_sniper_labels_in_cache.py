@@ -147,7 +147,7 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
     except Exception:
         pass
     asset_class = os.getenv("SNIPER_ASSET_CLASS", "").strip().lower()
-    cache_dir = _cache_dir(asset_class or None)
+    cache_dir = _cache_dir(asset_class or None, int(s.candle_sec))
     fmt = _cache_format()
 
     symbols = [x.strip().upper() for x in (s.symbols or []) if str(x).strip()]

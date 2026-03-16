@@ -53,13 +53,21 @@ except Exception:
     import sys
 
     here = Path(__file__).resolve()
+    train_dir = here.parent
+    modules_dir = None
+    repo_root = None
     for p in here.parents:
         if p.name.lower() == "modules":
-            sp = str(p)
-            if sp not in sys.path:
-                sys.path.insert(0, sp)
+            modules_dir = p
+            repo_root = p.parent
             break
-    from train.wf_dashboard_server import DashboardConfig, create_app  # type: ignore
+    for cand in (train_dir, modules_dir, repo_root):
+        if cand is None:
+            continue
+        sp = str(cand)
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
+    from wf_dashboard_server import DashboardConfig, create_app  # type: ignore
 
 try:
     from utils.pushover_notify import load_default as _pushover_load_default, send_pushover as _pushover_send
@@ -278,7 +286,7 @@ def run_monolith() -> None:
         out_root=_env_first(["WF_DASH_OUT_ROOT"], "wf_random_loop"),
         results_csv=_env_first(["WF_DASH_RESULTS_CSV"], "random_runs.csv"),
         max_rows=int(_env_first(["WF_DASH_MAX_ROWS"], "200")),
-        max_images=int(_env_first(["WF_DASH_MAX_IMAGES"], "24")),
+        max_images=int(_env_first(["WF_DASH_MAX_IMAGES"], "0")),  # 0 = unlimited
         refresh_sec=float(_env_first(["WF_DASH_REFRESH_SEC"], "6")),
         demo_csv=_env_bool("WF_DASH_DEMO_CSV", False),
         loop_log_path=_env_first(["WF_DASH_LOOP_LOG"], "") or None,

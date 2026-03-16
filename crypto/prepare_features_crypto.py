@@ -34,13 +34,22 @@ from modules.prepare_features import pf_config as cfg
 from modules.prepare_features import features as featmod
 from modules.prepare_features.plotting import plot_all
 from modules.prepare_features.feature_studio import render_feature_studio
-from crypto.trade_contract import DEFAULT_TRADE_CONTRACT as CRYPTO_CONTRACT
+from crypto.trade_contract import (
+    CRYPTO_PIPELINE_CANDLE_SEC,
+    apply_crypto_pipeline_env,
+    build_default_crypto_contract,
+)
 from modules.prepare_features.prepare_features import (
     DEFAULT_CANDLE_SEC,
     DEFAULT_U_THRESHOLD,
     DEFAULT_GREY_ZONE,
 )
 from modules.prepare_features import labels as lblmod
+
+
+_CRYPTO_PIPELINE_CANDLE_SEC = apply_crypto_pipeline_env(CRYPTO_PIPELINE_CANDLE_SEC)
+CRYPTO_CONTRACT = build_default_crypto_contract(_CRYPTO_PIPELINE_CANDLE_SEC)
+CRYPTO_DEFAULT_CANDLE_SEC = int(getattr(CRYPTO_CONTRACT, "timeframe_sec", DEFAULT_CANDLE_SEC) or DEFAULT_CANDLE_SEC)
 
 
 # Exemplo pronto (compatível com o estilo antigo) — pode importar direto como FLAGS
@@ -78,18 +87,18 @@ FLAGS_CRYPTO: dict[str, bool] = {
 
 
 CFG_CRYPTO_WINDOWS = {
-    "ATR_MIN": (30, 60, 5760),
-    "RSI_PRICE_MIN": (14,),
-    "RSI_EMA_PAIRS": ((9, 14),),
-    "SLOPE_MIN": (15, 30),
-    "VOL_MIN": (240, 720, 1440, 10080),
-    "KELTNER_WIDTH_MIN": (30, 60),
-    "KELTNER_CENTER_MIN": (60, 240, 720),
-    "KELTNER_POS_MIN": (360, 2880),
-    "KELTNER_Z_MIN": (),
-    "ADX_MIN": (15, 30, 120),
-    "CUM_LOGRET_MIN": (1440,),
-    "EFF_MIN": (30, 60, 120, 240),
+    "ATR_MIN": (30, 60, 240, 1440),
+    "RSI_PRICE_MIN": (30, 60, 240),
+    "RSI_EMA_PAIRS": ((30, 60), (60, 240)),
+    "SLOPE_MIN": (30, 60, 240, 720),
+    "VOL_MIN": (60, 240, 720, 1440, 10080),
+    "KELTNER_WIDTH_MIN": (30, 60, 240),
+    "KELTNER_CENTER_MIN": (60, 240, 720, 1440),
+    "KELTNER_POS_MIN": (240, 1440, 4320),
+    "KELTNER_Z_MIN": (240, 1440),
+    "ADX_MIN": (30, 60, 240),
+    "CUM_LOGRET_MIN": (60, 240, 1440),
+    "EFF_MIN": (30, 60, 240, 720, 1440),
 }
 
 
@@ -462,16 +471,11 @@ def main() -> None:
     # Pipeline padrao atual: entry-only (sem labels de exit).
     os.environ.setdefault("PF_ENTRY_ONLY", "1")
     # Label/weight alinhado ao treino: prioriza trades com caminho futuro consistente.
-    os.environ.setdefault("PF_ENTRY_LABEL_NET_PROFIT_THR", "0.0045")
-    os.environ.setdefault("PF_ENTRY_LABEL_MIN_FUTURE_AVG_NET", "0.0012")
-    os.environ.setdefault("PF_ENTRY_LABEL_EARLY_WINDOW_MIN", "15")
-    os.environ.setdefault("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_AVG_NET", "0.0005")
-    os.environ.setdefault("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_WORST_NET", "-0.0035")
-    os.environ.setdefault("PF_ENTRY_LABEL_MIN_RISK_SCORE", "0.0000")
-    os.environ.setdefault("PF_ENTRY_LABEL_MIN_FUTURE_EFF", "0.09")
-    os.environ.setdefault("PF_ENTRY_LABEL_MIN_FUTURE_POS_FRAC", "0.52")
-    os.environ.setdefault("PF_ENTRY_LABEL_MIN_CONSISTENCY_SCORE", "0.0015")
-    os.environ.setdefault("PF_ENTRY_LABEL_MIN_CONTRACT_MAE", "-0.010")
+    os.environ.setdefault("PF_ENTRY_LABEL_NET_PROFIT_THR", "0.03")
+    os.environ.setdefault("PF_ENTRY_LABEL_PROFIT_ONLY", "1")
+    os.environ.setdefault("PF_ENTRY_LABEL_REQUIRE_NO_DIP", "0")
+    os.environ.setdefault("PF_ENTRY_LABEL_ENABLE_NEUTRAL", "0")
+    os.environ.setdefault("PF_ENTRY_LABEL_ANY_CANONICAL", "0")
     os.environ.setdefault("PF_ENTRY_WEIGHT_RET_SCALE_POS", "0.04")
     os.environ.setdefault("PF_ENTRY_WEIGHT_RET_SCALE_NEG", "0.03")
     os.environ.setdefault("PF_ENTRY_WEIGHT_RET_DEADZONE", "0.002")
@@ -497,9 +501,9 @@ def main() -> None:
 
     _apply_crypto_windows()
     sym = 'XLMUSDT'
-    days = 60
+    days = 90
     tail = 0
-    candle_sec = int(os.getenv("PF_CRYPTO_CANDLE_SEC", DEFAULT_CANDLE_SEC) or DEFAULT_CANDLE_SEC)
+    candle_sec = int(os.getenv("PF_CRYPTO_CANDLE_SEC", str(CRYPTO_DEFAULT_CANDLE_SEC)) or CRYPTO_DEFAULT_CANDLE_SEC)
 
     feat_list_raw = os.getenv("PF_CRYPTO_FEATURES", os.getenv("PF_CRYPTO_FEATURE", "")).strip()
     feats = [f.strip().lower() for f in feat_list_raw.replace(";", ",").split(",") if f.strip()]

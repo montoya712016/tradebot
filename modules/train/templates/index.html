@@ -101,14 +101,25 @@
   <section class="panel">
     <div class="panel-head">
       <div>
-        <h2 class="panel-title">Equity curves</h2>
-        <div class="panel-sub muted">Latest saved PNGs</div>
+        <h2 class="panel-title">Backtest Artifacts</h2>
+        <div class="panel-sub muted">Latest Plotly HTML / PNG outputs</div>
       </div>
       <div class="panel-actions">
-        <span class="pill" id="img-count">--</span>
+        <span class="pill" id="artifact-count">--</span>
       </div>
     </div>
-    <div class="gallery" id="gallery-grid"></div>
+    <div class="gallery" id="artifact-grid"></div>
+    <div class="card" style="margin-top:16px;">
+      <div class="panel-head" style="padding:16px 16px 0 16px;">
+        <div>
+          <h3 class="panel-title" style="font-size:1rem;">Preview</h3>
+          <div class="panel-sub muted">Selected Plotly artifact</div>
+        </div>
+      </div>
+      <div style="padding:16px;">
+        <iframe id="artifact-preview" title="artifact preview" style="width:100%;min-height:760px;border:1px solid rgba(255,255,255,.08);border-radius:12px;background:#0b0d12;"></iframe>
+      </div>
+    </div>
   </section>
 
   <section class="panel">

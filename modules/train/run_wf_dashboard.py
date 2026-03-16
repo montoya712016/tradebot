@@ -25,7 +25,7 @@ def main() -> None:
     ap.add_argument("--out-root", type=str, default="wf_random_loop")
     ap.add_argument("--results-csv", type=str, default="random_runs.csv")
     ap.add_argument("--max-rows", type=int, default=200)
-    ap.add_argument("--max-images", type=int, default=24)
+    ap.add_argument("--max-images", type=int, default=0)
     ap.add_argument("--refresh-sec", type=float, default=6.0)
     ap.add_argument("--demo-csv", action="store_true", default=_env_bool("WF_DASH_DEMO_CSV", False))
     ap.add_argument("--loop-log-path", type=str, default=os.getenv("WF_DASH_LOOP_LOG", ""))

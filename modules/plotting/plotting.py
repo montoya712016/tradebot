@@ -1479,7 +1479,8 @@ def plot_equity_and_correlation(
     template: str = DARK_TEMPLATE,
 ) -> Any:
     """
-    Plot 2 painéis: equity no topo e métricas de correlação/filtro embaixo.
+    Plot equity (e opcionalmente métricas de correlação/filtro embaixo).
+    Se não há dados de correlação, mostra apenas o painel de equity.
     """
     if equity is None or len(equity) == 0:
         raise ValueError("equity vazio para plot_equity_and_correlation")
@@ -1488,14 +1489,24 @@ def plot_equity_and_correlation(
         eq.index = pd.to_datetime(eq.index)
     eq = eq.sort_index()
 
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.06,
-        row_heights=[0.65, 0.35],
-        subplot_titles=("Equity", "Correlation/Filter"),
-    )
+    has_corr = corr_df is not None and len(corr_df) > 0
+
+    if has_corr:
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.06,
+            row_heights=[0.65, 0.35],
+            subplot_titles=("Equity", "Correlation/Filter"),
+        )
+    else:
+        fig = make_subplots(
+            rows=1,
+            cols=1,
+            subplot_titles=("Equity",),
+        )
+
     fig.add_trace(
         go.Scatter(
             x=eq.index,
@@ -1508,7 +1519,7 @@ def plot_equity_and_correlation(
         col=1,
     )
 
-    if corr_df is not None and len(corr_df) > 0:
+    if has_corr:
         cdf = corr_df.copy()
         if not isinstance(cdf.index, pd.DatetimeIndex):
             cdf.index = pd.to_datetime(cdf.index)
@@ -1539,9 +1550,13 @@ def plot_equity_and_correlation(
         hovermode="x unified",
         legend=dict(orientation="h"),
     )
-    fig.update_xaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="tempo", row=2, col=1)
-    fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="equity", row=1, col=1)
-    fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="corr/filter", row=2, col=1)
+    if has_corr:
+        fig.update_xaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="tempo", row=2, col=1)
+        fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="equity", row=1, col=1)
+        fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="corr/filter", row=2, col=1)
+    else:
+        fig.update_xaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="tempo", row=1, col=1)
+        fig.update_yaxes(gridcolor=DARK_GRID, zerolinecolor=DARK_GRID, title_text="equity", row=1, col=1)
 
     if save_path:
         from plotly.io import write_html

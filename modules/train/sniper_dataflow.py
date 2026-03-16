@@ -242,23 +242,43 @@ def _repo_root() -> Path:
         return p.parents[2]
 
 
-def _cache_dir(asset_class: str | None = None) -> Path:
+def _timeframe_tag(candle_sec: int) -> str:
+    candle_sec = int(max(1, candle_sec))
+    if candle_sec % 60 == 0:
+        return f"{int(candle_sec // 60)}m"
+    return f"{int(candle_sec)}s"
+
+
+def _infer_candle_sec_from_df(df: pd.DataFrame) -> int:
+    try:
+        idx = pd.DatetimeIndex(df.index)
+        if len(idx) >= 2:
+            dt = float((idx[1] - idx[0]).total_seconds())
+            if np.isfinite(dt) and dt > 0.0:
+                return int(round(dt))
+    except Exception:
+        pass
+    return 60
+
+
+def _cache_dir(asset_class: str | None = None, candle_sec: int | None = None) -> Path:
     v = os.getenv("SNIPER_FEATURE_CACHE_DIR", "").strip()
     if v:
         return Path(v).expanduser().resolve()
     asset = str(asset_class or "crypto").lower()
+    candle_sec = int(max(1, candle_sec or _env_int("SNIPER_CANDLE_SEC", 60)))
     try:
-        from utils.paths import feature_cache_root  # type: ignore
+        from utils.paths import cache_sniper_root  # type: ignore
 
-        base = feature_cache_root()
+        base = cache_sniper_root() / f"features_pf_{_timeframe_tag(candle_sec)}"
     except Exception:
         try:
-            from utils.paths import feature_cache_root  # type: ignore[import]
+            from utils.paths import cache_sniper_root  # type: ignore[import]
 
-            base = feature_cache_root()
+            base = cache_sniper_root() / f"features_pf_{_timeframe_tag(candle_sec)}"
         except Exception:
             # fallback extremo (mantém compat)
-            base = _repo_root() / "cache_sniper" / "features_pf_1m"
+            base = _repo_root() / "cache_sniper" / f"features_pf_{_timeframe_tag(candle_sec)}"
     if asset and asset != "crypto":
         return base / asset
     return base
@@ -418,6 +438,7 @@ def _build_features_for_symbol(
     Retorna (df_pf, timings parciais).
     """
     asset = str(asset_class or "crypto").lower()
+    candle_sec = int(getattr(contract, "timeframe_sec", 60) or 60)
     t0 = time.perf_counter()
     if asset == "stocks":
         try:
@@ -431,7 +452,7 @@ def _build_features_for_symbol(
     if raw.empty:
         raise RuntimeError("sem dados 1m no intervalo solicitado")
 
-    df_all = to_ohlc_from_1m(raw, 60)
+    df_all = to_ohlc_from_1m(raw, candle_sec)
     if remove_tail_days > 0:
         cutoff = df_all.index[-1] - pd.Timedelta(days=int(remove_tail_days))
         df_all = df_all[df_all.index < cutoff]
@@ -473,6 +494,7 @@ def ensure_feature_cache(
     # Se True, o cache só conta como "hit" se a meta indicar que foi construído
     # com `total_days` compatível com o solicitado (inclui o caso total_days<=0 => histórico completo).
     strict_total_days: bool = False,
+    allow_build: bool = True,
     asset_class: str = "crypto",
     abort_ram_pct: float = 85.0,
 ) -> Dict[str, Path]:
@@ -480,7 +502,8 @@ def ensure_feature_cache(
     Garante que existe um cache de features+labels Sniper por símbolo (computado 1x).
     Retorna mapa symbol -> caminho do arquivo cache.
     """
-    cache_dir = cache_dir or _cache_dir(asset_class)
+    desired_candle_sec = int(getattr(contract, "timeframe_sec", 60) or 60)
+    cache_dir = cache_dir or _cache_dir(asset_class, desired_candle_sec)
     cache_dir.mkdir(parents=True, exist_ok=True)
     fmt = _cache_format()
     refresh = _cache_refresh() if refresh is None else bool(refresh)
@@ -518,29 +541,44 @@ def ensure_feature_cache(
                         start_ts = pd.Timestamp(idx.min()).tz_localize(None).to_pydatetime().isoformat()
                         end_ts = pd.Timestamp(idx.max()).tz_localize(None).to_pydatetime().isoformat()
                         total_days_meta = int(max(0, ((idx.max() - idx.min()) / pd.Timedelta(days=1))))
+                        inferred_candle_sec = _infer_candle_sec_from_df(df_meta)
                         meta = {
                             "symbol": sym,
                             "rows": int(len(df_meta)),
                             "start_ts_utc": str(start_ts),
                             "end_ts_utc": str(end_ts),
-                            "candle_sec": 60,
+                            "candle_sec": int(inferred_candle_sec),
                             "total_days": int(total_days_meta),
                             "format": real_fmt,
                             "path": str(data_path),
                             "asset_class": asset_class,
                         }
                         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-                        out[sym] = data_path
-                        hits.append(sym)
-                        continue
+                        if int(inferred_candle_sec) == int(desired_candle_sec):
+                            out[sym] = data_path
+                            hits.append(sym)
+                            continue
                 except Exception:
                     pass
 
         if data_path.exists() and meta_path.exists() and (not refresh) and _is_valid_cache_file(data_path):
             ok_hit = True
+            meta = {}
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+            try:
+                meta_candle_sec = int(meta.get("candle_sec") or 0)
+            except Exception:
+                meta_candle_sec = 0
+            meta_asset = str(meta.get("asset_class") or asset_class or "crypto").lower()
+            if meta_candle_sec != int(desired_candle_sec):
+                ok_hit = False
+            if meta_asset != str(asset_class or "crypto").lower():
+                ok_hit = False
             if bool(strict_total_days):
                 try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     meta_days = meta.get("total_days", None)
                     req_days = int(total_days)
                     if meta_days is None:
@@ -586,6 +624,15 @@ def ensure_feature_cache(
         flush=True,
     )
 
+    if (not bool(allow_build)) and to_build:
+        missing_preview = ",".join(str(x) for x in to_build[:12])
+        if len(to_build) > 12:
+            missing_preview += ",..."
+        raise RuntimeError(
+            f"feature cache missing for {len(to_build)} symbols in {cache_dir} "
+            f"(timeframe={_timeframe_tag(desired_candle_sec)} allow_build=0 missing={missing_preview})"
+        )
+
     def _build_one(sym: str) -> tuple[str, Path | None, str | None]:
         # retorna (sym, path|None, err|None)
         _thermal_wait(f"feature_cache_build:{sym}")
@@ -619,7 +666,7 @@ def ensure_feature_cache(
                 "rows": int(len(df_pf)),
                 "start_ts_utc": str(pd.Timestamp(df_pf.index.min()).tz_localize(None).to_pydatetime().isoformat()),
                 "end_ts_utc": str(pd.Timestamp(df_pf.index.max()).tz_localize(None).to_pydatetime().isoformat()),
-                "candle_sec": 60,
+                "candle_sec": int(desired_candle_sec),
                 "total_days": int(total_days),
                 "format": real_fmt,
                 "path": str(real_path),
@@ -1014,6 +1061,9 @@ def prepare_sniper_dataset(
             # sem positivos -> evita gerar dataset extremamente enviesado
             return df_in.iloc[0:0].copy()
 
+        use_weight_bins = str(os.getenv("SNIPER_ENTRY_USE_WEIGHT_BINS", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+        pos_favor_high = str(os.getenv("SNIPER_ENTRY_POS_FAVOR_HIGH", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+
         def _sample_weight_bins(
             idx_src: np.ndarray,
             target_n: int,
@@ -1028,7 +1078,7 @@ def prepare_sniper_dataset(
                 out_all.sort()
                 return out_all
 
-            if (not weight_col) or (weight_col not in df_in.columns):
+            if (not use_weight_bins) or (not weight_col) or (weight_col not in df_in.columns):
                 take = rng.choice(idx_src, size=target_n, replace=False)
                 take.sort()
                 return take.astype(np.int64, copy=False)
@@ -1143,16 +1193,23 @@ def prepare_sniper_dataset(
         ratio = float(max(0.0, ratio_neg_per_pos))
         max_rows = int(max_rows)
         if weight_col and weight_col in df_in.columns:
+            w_all = pd.to_numeric(df_in[weight_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
             try:
                 pos_min_w = float(os.getenv("SNIPER_ENTRY_POS_MIN_WEIGHT", "0.0") or "0.0")
             except Exception:
                 pos_min_w = 0.0
             if np.isfinite(pos_min_w) and pos_min_w > 0.0:
-                w_all_pos = pd.to_numeric(df_in[weight_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-                wp = np.nan_to_num(w_all_pos[pos_idx], nan=0.0, posinf=0.0, neginf=0.0)
+                wp = np.nan_to_num(w_all[pos_idx], nan=0.0, posinf=0.0, neginf=0.0)
                 pos_idx = pos_idx[wp >= float(pos_min_w)]
                 if pos_idx.size == 0:
                     return df_in.iloc[0:0].copy()
+            try:
+                neg_min_w = float(os.getenv("SNIPER_ENTRY_NEG_MIN_WEIGHT", "0.0") or "0.0")
+            except Exception:
+                neg_min_w = 0.0
+            if np.isfinite(neg_min_w) and neg_min_w > 0.0:
+                wn = np.nan_to_num(w_all[neg_idx], nan=0.0, posinf=0.0, neginf=0.0)
+                neg_idx = neg_idx[wn >= float(neg_min_w)]
         pos_keep_n = int(pos_idx.size)
         try:
             pos_keep_frac = float(os.getenv("SNIPER_ENTRY_POS_KEEP_FRACTION", "1.0") or "1.0")
@@ -1168,7 +1225,7 @@ def prepare_sniper_dataset(
             pos_keep_n = min(pos_keep_n, max_pos)
 
         # Positivos: prioriza weights altos para reduzir ruido de retornos marginais.
-        pos_keep = _sample_weight_bins(pos_idx, pos_keep_n, favor_high=True)
+        pos_keep = _sample_weight_bins(pos_idx, pos_keep_n, favor_high=bool(pos_favor_high))
 
         neg_target = int(round(pos_keep_n * ratio))
         if max_rows > 0:
@@ -1528,7 +1585,7 @@ def prepare_sniper_dataset_from_cache(
     if not symbols:
         raise RuntimeError("symbols vazio")
 
-    cache_dir = _cache_dir(asset_class)
+    cache_dir = _cache_dir(asset_class, int(getattr(contract, "timeframe_sec", 60) or 60))
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     if cache_map is None:
@@ -1614,6 +1671,9 @@ def prepare_sniper_dataset_from_cache(
             # sem positivos -> evita gerar dataset extremamente enviesado
             return df_in.iloc[0:0].copy()
 
+        use_weight_bins = str(os.getenv("SNIPER_ENTRY_USE_WEIGHT_BINS", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+        pos_favor_high = str(os.getenv("SNIPER_ENTRY_POS_FAVOR_HIGH", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+
         def _sample_weight_bins(
             idx_src: np.ndarray,
             target_n: int,
@@ -1628,7 +1688,7 @@ def prepare_sniper_dataset_from_cache(
                 out_all.sort()
                 return out_all
 
-            if (not weight_col) or (weight_col not in df_in.columns):
+            if (not use_weight_bins) or (not weight_col) or (weight_col not in df_in.columns):
                 take = rng.choice(idx_src, size=target_n, replace=False)
                 take.sort()
                 return take.astype(np.int64, copy=False)
@@ -1734,16 +1794,23 @@ def prepare_sniper_dataset_from_cache(
         ratio = float(max(0.0, ratio_neg_per_pos))
         max_rows = int(max_rows)
         if weight_col and weight_col in df_in.columns:
+            w_all = pd.to_numeric(df_in[weight_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
             try:
                 pos_min_w = float(os.getenv("SNIPER_ENTRY_POS_MIN_WEIGHT", "0.0") or "0.0")
             except Exception:
                 pos_min_w = 0.0
             if np.isfinite(pos_min_w) and pos_min_w > 0.0:
-                w_all_pos = pd.to_numeric(df_in[weight_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-                wp = np.nan_to_num(w_all_pos[pos_idx], nan=0.0, posinf=0.0, neginf=0.0)
+                wp = np.nan_to_num(w_all[pos_idx], nan=0.0, posinf=0.0, neginf=0.0)
                 pos_idx = pos_idx[wp >= float(pos_min_w)]
                 if pos_idx.size == 0:
                     return df_in.iloc[0:0].copy()
+            try:
+                neg_min_w = float(os.getenv("SNIPER_ENTRY_NEG_MIN_WEIGHT", "0.0") or "0.0")
+            except Exception:
+                neg_min_w = 0.0
+            if np.isfinite(neg_min_w) and neg_min_w > 0.0:
+                wn = np.nan_to_num(w_all[neg_idx], nan=0.0, posinf=0.0, neginf=0.0)
+                neg_idx = neg_idx[wn >= float(neg_min_w)]
         pos_keep_n = int(pos_idx.size)
         try:
             pos_keep_frac = float(os.getenv("SNIPER_ENTRY_POS_KEEP_FRACTION", "1.0") or "1.0")
@@ -1758,7 +1825,7 @@ def prepare_sniper_dataset_from_cache(
             max_pos = int(max(1, round(max_rows / (1.0 + ratio))))
             pos_keep_n = min(pos_keep_n, max_pos)
 
-        pos_keep = _sample_weight_bins(pos_idx, pos_keep_n, favor_high=True)
+        pos_keep = _sample_weight_bins(pos_idx, pos_keep_n, favor_high=bool(pos_favor_high))
 
         neg_target = int(round(pos_keep_n * ratio))
         if max_rows > 0:

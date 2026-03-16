@@ -92,7 +92,9 @@ def select_entry_mid(p_entry_map: dict[str, np.ndarray]) -> np.ndarray:
         a = np.asarray(p_entry_map["long"], dtype=np.float32)
         b = np.asarray(p_entry_map["short"], dtype=np.float32)
         if a.shape == b.shape:
-            return np.maximum(a, b)
+            # `short` pode vir inteiro como NaN quando o lado está desabilitado.
+            # `np.maximum` propagaria NaN e zeraria o score do portfolio.
+            return np.fmax(a, b)
     if "long" in p_entry_map:
         return p_entry_map["long"]
     if "short" in p_entry_map:

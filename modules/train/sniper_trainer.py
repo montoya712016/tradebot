@@ -225,6 +225,133 @@ def _split_train_val(batch: SniperBatch, val_frac: float = 0.2) -> Tuple[np.ndar
     return tr_idx, va_idx
 
 
+def _entry_objective_mode() -> str:
+    v = str(os.getenv("SNIPER_ENTRY_OBJECTIVE_MODE", "binary") or "binary").strip().lower()
+    if v in {"rank", "rank_pairwise", "pairwise"}:
+        return "rank_pairwise"
+    if v in {"rank_ndcg", "ndcg", "lambdarank"}:
+        return "rank_ndcg"
+    return "binary"
+
+
+def _entry_rank_group_minutes() -> int:
+    try:
+        v = int(float(os.getenv("SNIPER_ENTRY_RANK_GROUP_MINUTES", "4320") or "4320"))
+    except Exception:
+        v = 4320
+    return int(max(60, v))
+
+
+def _build_entry_rank_qid(ts: np.ndarray, sym_id: np.ndarray, *, group_minutes: int) -> np.ndarray:
+    if ts.size == 0:
+        return np.empty((0,), dtype=np.uint32)
+    gmin = int(max(1, group_minutes))
+    ts_min = np.asarray(ts, dtype="datetime64[m]").astype(np.int64, copy=False)
+    bucket = np.floor_divide(ts_min, np.int64(gmin)).astype(np.int64, copy=False)
+    bucket0 = bucket - int(np.min(bucket))
+    span = int(np.max(bucket0)) + 1 if bucket0.size else 1
+    sid = np.asarray(sym_id, dtype=np.int64)
+    qid = sid * np.int64(max(1, span)) + bucket0
+    return np.asarray(qid, dtype=np.uint32)
+
+
+def _sort_rank_arrays(
+    X: np.ndarray,
+    y: np.ndarray,
+    ts: np.ndarray,
+    qid: np.ndarray,
+    w: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    order = np.lexsort((np.asarray(ts, dtype="datetime64[ns]").astype(np.int64, copy=False), np.asarray(qid, dtype=np.uint64)))
+    Xo = X[order]
+    yo = y[order]
+    tso = ts[order]
+    qido = qid[order]
+    wo = (w[order] if w is not None else None)
+    return Xo, yo, tso, qido, wo
+
+
+def _entry_top_metric_specs() -> list[float]:
+    raw = str(os.getenv("SNIPER_ENTRY_TOP_METRIC_QS", "0.001,0.0025,0.005") or "").strip()
+    out: list[float] = []
+    for tok in raw.replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            q = float(tok)
+        except Exception:
+            continue
+        if 0.0 < q < 1.0:
+            out.append(float(q))
+    if not out:
+        out = [0.001, 0.0025, 0.005]
+    uniq = sorted({float(q) for q in out})
+    return uniq
+
+
+def _precision_at_top_fraction(
+    y_true: np.ndarray,
+    pred: np.ndarray,
+    *,
+    top_frac: float,
+    min_count: int,
+) -> float:
+    yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    yp = np.asarray(pred, dtype=np.float64).reshape(-1)
+    m = np.isfinite(yt) & np.isfinite(yp)
+    if int(m.sum()) <= 0:
+        return float("nan")
+    yt = yt[m]
+    yp = yp[m]
+    n = int(yt.size)
+    if n <= 0:
+        return float("nan")
+    k = int(round(float(top_frac) * float(n)))
+    k = max(int(min_count), k)
+    if k > n:
+        k = n
+    if k <= 0:
+        return float("nan")
+    idx = np.argpartition(-yp, k - 1)[:k]
+    return float(np.mean(yt[idx] >= 0.5))
+
+
+def _entry_top_combo_metric(
+    y_true: np.ndarray,
+    pred: np.ndarray,
+) -> tuple[float, dict[str, float]]:
+    qs = _entry_top_metric_specs()
+    try:
+        min_count = int(os.getenv("SNIPER_ENTRY_TOP_METRIC_MIN_COUNT", "64") or "64")
+    except Exception:
+        min_count = 64
+    min_count = max(1, min_count)
+    vals: list[float] = []
+    parts: dict[str, float] = {}
+    for q in qs:
+        v = _precision_at_top_fraction(y_true, pred, top_frac=float(q), min_count=min_count)
+        if np.isfinite(v):
+            vals.append(float(v))
+            parts[f"p_at_{q:.4f}"] = float(v)
+    if not vals:
+        return float("nan"), parts
+    return float(np.mean(vals)), parts
+
+
+def _slice_booster_to_best(booster: xgb.Booster, best_iteration: int | None) -> xgb.Booster:
+    try:
+        bi = int(best_iteration if best_iteration is not None else -1)
+    except Exception:
+        bi = -1
+    if bi < 0:
+        return booster
+    try:
+        return booster[: bi + 1]
+    except Exception:
+        return booster
+
+
 def _entry_weight_bin_max() -> float:
     try:
         v = float(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_MAX", "") or "nan")
@@ -538,7 +665,9 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
     if tr_idx.size == 0 or va_idx.size == 0:
         raise RuntimeError("Dataset muito pequeno para treinar")
     device = str(params.get("device", "cpu")).lower()
-    use_quantile = device.startswith("cuda")
+    objective_mode = _entry_objective_mode()
+    is_ranking = objective_mode in {"rank_pairwise", "rank_ndcg"}
+    use_quantile = device.startswith("cuda") and (not is_ranking)
     Xtr = batch.X[tr_idx]
     ytr = batch.y[tr_idx]
     Xva = batch.X[va_idx]
@@ -577,26 +706,47 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
     except Exception:
         pass
 
-    # Blindagem: evita erro de base_score quando o dataset ficar com 1-classe por sampling.
-    y_mean = float(np.mean(ytr)) if ytr.size else 0.5
-    if not (0.0 < y_mean < 1.0):
-        # Se acontecer, o treino não é informativo (sem negativos/positivos).
-        # Não quebra: define base_score neutro e segue (ou você pode optar por "pular período").
-        print(f"[xgb] AVISO: y_mean={y_mean:.6f} (1-classe). Ajustando base_score=0.5", flush=True)
-        params = dict(params)
-        params["base_score"] = 0.5
-    elif "base_score" not in params:
-        # ajuda convergência / estabilidade
-        eps = 1e-6
-        params = dict(params)
-        params["base_score"] = float(min(1.0 - eps, max(eps, y_mean)))
+    params = dict(params)
+    if is_ranking:
+        params["objective"] = ("rank:ndcg" if objective_mode == "rank_ndcg" else "rank:pairwise")
+        params["eval_metric"] = str(os.getenv("SNIPER_ENTRY_RANK_EVAL_METRIC", "ndcg@32") or "ndcg@32").strip()
+    else:
+        # Blindagem: evita erro de base_score quando o dataset ficar com 1-classe por sampling.
+        y_mean = float(np.mean(ytr)) if ytr.size else 0.5
+        if not (0.0 < y_mean < 1.0):
+            # Se acontecer, o treino não é informativo (sem negativos/positivos).
+            # Não quebra: define base_score neutro e segue (ou você pode optar por "pular período").
+            print(f"[xgb] AVISO: y_mean={y_mean:.6f} (1-classe). Ajustando base_score=0.5", flush=True)
+            params["base_score"] = 0.5
+        elif "base_score" not in params:
+            # ajuda convergência / estabilidade
+            eps = 1e-6
+            params["base_score"] = float(min(1.0 - eps, max(eps, y_mean)))
 
     # Para GPU + hist, QuantileDMatrix reduz VRAM.
     # IMPORTANTE: o dvalid precisa referenciar o dtrain via `ref=...`.
-    if use_quantile:
+    if is_ranking:
+        group_minutes = _entry_rank_group_minutes()
+        qid_tr = _build_entry_rank_qid(batch.ts[tr_idx], batch.sym_id[tr_idx], group_minutes=group_minutes)
+        qid_va = _build_entry_rank_qid(batch.ts[va_idx], batch.sym_id[va_idx], group_minutes=group_minutes)
+        Xtr, ytr, ts_tr, qid_tr, _ = _sort_rank_arrays(Xtr, ytr, batch.ts[tr_idx], qid_tr, None)
+        Xva, yva, ts_va, qid_va, _ = _sort_rank_arrays(Xva, yva, batch.ts[va_idx], qid_va, None)
+        dtrain = xgb.DMatrix(Xtr, label=ytr, qid=qid_tr)
+        dvalid = xgb.DMatrix(Xva, label=yva, qid=qid_va)
+        try:
+            ngrp_tr = int(np.unique(qid_tr).size)
+            ngrp_va = int(np.unique(qid_va).size)
+            print(
+                f"[xgb] ranking groups: train={ngrp_tr:,} val={ngrp_va:,} group_min={group_minutes}".replace(",", "."),
+                flush=True,
+            )
+        except Exception:
+            pass
+        wtr_eff = None
+        wva_eff = None
+    elif use_quantile:
         mb = int(params.get("max_bin", 256))
         # garante consistência entre Booster params e QuantileDMatrix bins
-        params = dict(params)
         params["max_bin"] = mb
         try:
             # Nem todas as versões expõem max_bin no construtor; por isso try/except.
@@ -615,14 +765,43 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
         dtrain = xgb.DMatrix(Xtr, label=ytr, weight=wtr_eff)
         dvalid = xgb.DMatrix(Xva, label=yva, weight=wva_eff)
     watch = [(dtrain, "train"), (dvalid, "val")]
-    print(f"[xgb] train rows={len(tr_idx):,} val rows={len(va_idx):,} feats={batch.X.shape[1]:,}".replace(",", "."), flush=True)
+    print(
+        f"[xgb] train rows={len(tr_idx):,} val rows={len(va_idx):,} feats={batch.X.shape[1]:,} objective={params.get('objective')}".replace(",", "."),
+        flush=True,
+    )
+    metric_mode = str(os.getenv("SNIPER_ENTRY_MODEL_SELECTION", "aucpr") or "aucpr").strip().lower()
+    custom_metric = None
+    callbacks = []
+    if metric_mode in {"top_precision", "top_precision_combo", "topq", "precision_top"}:
+        def _xgb_top_precision_metric(predt: np.ndarray, dmat: xgb.DMatrix) -> tuple[str, float]:
+            y_eval = dmat.get_label()
+            score, _parts = _entry_top_combo_metric(y_eval, predt)
+            if not np.isfinite(score):
+                score = 0.0
+            return "top_precision_combo", float(score)
+
+        custom_metric = _xgb_top_precision_metric
+        try:
+            callbacks.append(
+                xgb.callback.EarlyStopping(
+                    rounds=200,
+                    metric_name="top_precision_combo",
+                    data_name="val",
+                    maximize=True,
+                    save_best=True,
+                )
+            )
+        except Exception:
+            callbacks = []
     try:
         booster = xgb.train(
             params=params,
             dtrain=dtrain,
             num_boost_round=2000,
             evals=watch,
-            early_stopping_rounds=200,
+            custom_metric=custom_metric,
+            early_stopping_rounds=(None if callbacks else 200),
+            callbacks=(callbacks or None),
             verbose_eval=50,
         )
     except Exception as e:
@@ -632,21 +811,31 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
             params_cpu = dict(params)
             params_cpu["device"] = "cpu"
             params_cpu["tree_method"] = "hist"
-            dtrain = xgb.DMatrix(Xtr, label=ytr)
-            dvalid = xgb.DMatrix(Xva, label=yva)
+            if is_ranking:
+                dtrain = xgb.DMatrix(Xtr, label=ytr, qid=qid_tr)
+                dvalid = xgb.DMatrix(Xva, label=yva, qid=qid_va)
+            else:
+                dtrain = xgb.DMatrix(Xtr, label=ytr)
+                dvalid = xgb.DMatrix(Xva, label=yva)
             watch = [(dtrain, "train"), (dvalid, "val")]
             booster = xgb.train(
                 params=params_cpu,
                 dtrain=dtrain,
                 num_boost_round=2000,
                 evals=watch,
-                early_stopping_rounds=200,
+                custom_metric=custom_metric,
+                early_stopping_rounds=(None if callbacks else 200),
+                callbacks=(callbacks or None),
                 verbose_eval=50,
             )
         else:
             raise
-    val_pred = booster.predict(dvalid, iteration_range=(0, booster.best_iteration + 1))
+    best_iteration = int(getattr(booster, "best_iteration", -1))
+    if metric_mode in {"top_precision", "top_precision_combo", "topq", "precision_top"} and best_iteration >= 0:
+        booster = _slice_booster_to_best(booster, best_iteration)
+    val_pred = booster.predict(dvalid)
     val_true = batch.y[va_idx]
+    top_metric_value, top_metric_parts = _entry_top_combo_metric(val_true, val_pred)
     target_pos_rate = getattr(batch, "natural_pos_rate", None)
     calib = _fit_platt(val_pred, val_true, sample_weight=wva_eff, target_pos_rate=target_pos_rate)
     try:
@@ -668,9 +857,19 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
         )
     except Exception:
         pass
+    try:
+        if np.isfinite(top_metric_value):
+            top_msg = " ".join([f"{k}={v:.4f}" for k, v in sorted(top_metric_parts.items())])
+            print(f"[xgb] top_metric val={top_metric_value:.4f} {top_msg}".strip(), flush=True)
+    except Exception:
+        pass
     meta = {
         "calibrator": calib["params"],
-        "best_iteration": booster.best_iteration,
+        "best_iteration": best_iteration,
+        "selection_metric": metric_mode,
+        "objective_mode": objective_mode,
+        "top_metric_value": float(top_metric_value) if np.isfinite(top_metric_value) else None,
+        "top_metric_parts": top_metric_parts,
         "loss_weight_bins": loss_bin_stats,
     }
     return booster, meta
@@ -1151,6 +1350,203 @@ def _fit_platt(
         return {"params": {"type": "identity"}, "transform": lambda p: p}
 
 
+def _calib_stability_enabled() -> bool:
+    return str(os.getenv("SNIPER_ENTRY_CALIB_STABILITY_ENABLE", "1") or "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def _robust_center_scale(values: np.ndarray) -> tuple[float, float]:
+    vv = np.asarray(values, dtype=np.float64)
+    vv = vv[np.isfinite(vv)]
+    if vv.size == 0:
+        return 0.0, 1.0
+    center = float(np.median(vv))
+    mad = float(np.median(np.abs(vv - center)))
+    sigma = max(1e-6, 1.4826 * mad)
+    return center, sigma
+
+
+def _local_weighted_mean(values: np.ndarray, idx: int) -> float:
+    n = int(values.size)
+    idxs = [j for j in (idx - 1, idx, idx + 1) if 0 <= j < n]
+    if not idxs:
+        return float(values[idx])
+    ww = np.asarray([2.0 if j == idx else 1.0 for j in idxs], dtype=np.float64)
+    return float(np.average(values[np.asarray(idxs, dtype=np.int32)], weights=ww))
+
+
+def _stabilize_saved_entry_calibrations(period_records: list[tuple[int, Path]]) -> None:
+    if len(period_records) < 3 or (not _calib_stability_enabled()):
+        return
+    try:
+        history_blend = float(os.getenv("SNIPER_ENTRY_CALIB_STABILITY_GLOBAL_BLEND", "0.20") or "0.20")
+    except Exception:
+        history_blend = 0.20
+    try:
+        neighbor_blend = float(os.getenv("SNIPER_ENTRY_CALIB_STABILITY_NEIGHBOR_BLEND", "0.35") or "0.35")
+    except Exception:
+        neighbor_blend = 0.35
+    try:
+        clip_sigma = float(os.getenv("SNIPER_ENTRY_CALIB_STABILITY_ROBUST_CLIP_SIGMA", "2.0") or "2.0")
+    except Exception:
+        clip_sigma = 2.0
+    history_blend = float(np.clip(history_blend, 0.0, 1.0))
+    neighbor_blend = float(np.clip(neighbor_blend, 0.0, 1.0))
+    if history_blend + neighbor_blend > 1.0:
+        total = history_blend + neighbor_blend
+        history_blend = float(history_blend / total)
+        neighbor_blend = float(neighbor_blend / total)
+    clip_sigma = max(0.0, float(clip_sigma))
+
+    metas: list[dict] = []
+    for tail, period_dir in sorted(period_records, key=lambda x: int(x[0])):
+        meta_path = period_dir / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        metas.append(
+            {
+                "tail": int(tail),
+                "period_dir": period_dir,
+                "meta_path": meta_path,
+                "meta": meta,
+                "dirty": False,
+            }
+        )
+    if len(metas) < 3:
+        return
+
+    for side in ("long", "short"):
+        rows: list[dict] = []
+        for item in metas:
+            side_meta = item["meta"].get(f"entry_{side}")
+            if not isinstance(side_meta, dict):
+                continue
+            calib = dict(side_meta.get("calibration") or {})
+            if str(calib.get("type", "")).strip().lower() != "platt":
+                continue
+            try:
+                coef = float(calib.get("coef", 1.0))
+                intercept = float(calib.get("intercept", 0.0))
+            except Exception:
+                continue
+            if (not np.isfinite(coef)) or (not np.isfinite(intercept)):
+                continue
+            rows.append(
+                {
+                    "item": item,
+                    "tail": int(item["tail"]),
+                    "calib": calib,
+                    "coef_raw": float(coef),
+                    "intercept_raw": float(intercept),
+                }
+            )
+        if len(rows) < 3:
+            continue
+
+        rows = sorted(rows, key=lambda r: int(r["tail"]), reverse=True)
+        coef_raw = np.asarray([r["coef_raw"] for r in rows], dtype=np.float64)
+        intercept_raw = np.asarray([r["intercept_raw"] for r in rows], dtype=np.float64)
+        coef_final = coef_raw.copy()
+        intercept_final = intercept_raw.copy()
+        for idx in range(len(rows)):
+            if idx == 0:
+                continue
+            ref_coef = coef_final[:idx]
+            ref_intercept = intercept_final[:idx]
+            coef_center, coef_sigma = _robust_center_scale(ref_coef)
+            intercept_center, intercept_sigma = _robust_center_scale(ref_intercept)
+            if clip_sigma > 0.0 and idx >= 3:
+                coef_lo = coef_center - clip_sigma * coef_sigma
+                coef_hi = coef_center + clip_sigma * coef_sigma
+                int_lo = intercept_center - clip_sigma * intercept_sigma
+                int_hi = intercept_center + clip_sigma * intercept_sigma
+            else:
+                coef_lo, coef_hi = -np.inf, np.inf
+                int_lo, int_hi = -np.inf, np.inf
+            coef_clip = float(np.clip(coef_raw[idx], coef_lo, coef_hi))
+            intercept_clip = float(np.clip(intercept_raw[idx], int_lo, int_hi))
+            coef_neighbor = float(coef_final[idx - 1])
+            intercept_neighbor = float(intercept_final[idx - 1])
+            if idx == 1:
+                local_history_blend = 0.0
+                local_neighbor_blend = min(0.12, neighbor_blend)
+            elif idx == 2:
+                local_history_blend = min(0.10, history_blend)
+                local_neighbor_blend = min(0.18, neighbor_blend)
+            else:
+                local_history_blend = history_blend
+                local_neighbor_blend = neighbor_blend
+            keep_w = max(0.0, 1.0 - local_history_blend - local_neighbor_blend)
+            coef_v = keep_w * coef_clip + local_history_blend * coef_center + local_neighbor_blend * coef_neighbor
+            int_v = keep_w * intercept_clip + local_history_blend * intercept_center + local_neighbor_blend * intercept_neighbor
+            coef_final[idx] = float(np.clip(coef_v, coef_lo, coef_hi))
+            intercept_final[idx] = float(np.clip(int_v, int_lo, int_hi))
+
+        side_changes = 0
+        for idx, row in enumerate(rows):
+            new_coef = float(coef_final[idx])
+            new_intercept = float(intercept_final[idx])
+            old_coef = float(row["coef_raw"])
+            old_intercept = float(row["intercept_raw"])
+            if abs(new_coef - old_coef) < 1e-9 and abs(new_intercept - old_intercept) < 1e-9:
+                continue
+            calib = dict(row["calib"])
+            calib["coef_raw"] = float(old_coef)
+            calib["intercept_raw"] = float(old_intercept)
+            calib["coef"] = float(new_coef)
+            calib["intercept"] = float(new_intercept)
+            calib["stability_adjusted"] = True
+            calib["stability_causal"] = True
+            calib["stability_blend"] = {
+                "history": float(history_blend),
+                "neighbor": float(neighbor_blend),
+                "clip_sigma": float(clip_sigma),
+            }
+            item = row["item"]
+            item["meta"][f"entry_{side}"]["calibration"] = calib
+            base_side = "long" if "entry_long" in item["meta"] else ("short" if "entry_short" in item["meta"] else "")
+            if base_side == side and isinstance(item["meta"].get("entry"), dict):
+                item["meta"]["entry"]["calibration"] = dict(calib)
+            item["dirty"] = True
+            side_changes += 1
+            print(
+                f"[sniper-train] calib-causal {side} T-{int(row['tail'])}d: "
+                f"coef {old_coef:.3f}->{new_coef:.3f} "
+                f"intercept {old_intercept:.3f}->{new_intercept:.3f}",
+                flush=True,
+            )
+        if side_changes > 0:
+            print(
+                f"[sniper-train] calib-causal {side}: adjusted={side_changes} "
+                f"history_blend={history_blend:.2f} neighbor_blend={neighbor_blend:.2f}",
+                flush=True,
+            )
+
+    for item in metas:
+        if not bool(item["dirty"]):
+            continue
+        try:
+            item["meta_path"].write_text(
+                json.dumps(item["meta"], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(
+                f"[sniper-train] calib-stability save failed {item['meta_path']}: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+
+
 def _next_run_dir(base: Path, prefix: str = "wf_") -> Path:
     base.mkdir(parents=True, exist_ok=True)
     existing = [p for p in base.glob(f"{prefix}*") if p.is_dir()]
@@ -1225,17 +1621,34 @@ def _full_pool_cache_key(
         "bin_max": str(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_MAX", "7.0") or "7.0"),
         "pos_keep_fraction": str(os.getenv("SNIPER_ENTRY_POS_KEEP_FRACTION", "1.0") or "1.0"),
         "pos_min_weight": str(os.getenv("SNIPER_ENTRY_POS_MIN_WEIGHT", "0.0") or "0.0"),
+        "neg_min_weight": str(os.getenv("SNIPER_ENTRY_NEG_MIN_WEIGHT", "0.0") or "0.0"),
+        "pos_favor_high": str(os.getenv("SNIPER_ENTRY_POS_FAVOR_HIGH", "1") or "1"),
         "neg_favor_high": str(os.getenv("SNIPER_ENTRY_NEG_FAVOR_HIGH", "0") or "0"),
-        "pf_entry_label_net_profit_thr": str(os.getenv("PF_ENTRY_LABEL_NET_PROFIT_THR", "0.005") or "0.005"),
+        "use_weight_bins": str(os.getenv("SNIPER_ENTRY_USE_WEIGHT_BINS", "1") or "1"),
+        "pf_entry_label_net_profit_thr": str(os.getenv("PF_ENTRY_LABEL_NET_PROFIT_THR", "0.03") or "0.03"),
         "pf_entry_label_min_future_avg_net": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_AVG_NET", "0.0") or "0.0"),
         "pf_entry_label_early_window_min": str(os.getenv("PF_ENTRY_LABEL_EARLY_WINDOW_MIN", "15") or "15"),
         "pf_entry_label_min_future_early_avg_net": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_AVG_NET", "0.0") or "0.0"),
         "pf_entry_label_min_future_early_worst_net": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_EARLY_WORST_NET", "-1.0") or "-1.0"),
         "pf_entry_label_min_risk_score": str(os.getenv("PF_ENTRY_LABEL_MIN_RISK_SCORE", "0.0") or "0.0"),
+        "pf_entry_label_min_future_end_net": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_END_NET", "0.0") or "0.0"),
         "pf_entry_label_min_future_eff": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_EFF", "0.0") or "0.0"),
         "pf_entry_label_min_future_pos_frac": str(os.getenv("PF_ENTRY_LABEL_MIN_FUTURE_POS_FRAC", "0.0") or "0.0"),
         "pf_entry_label_min_consistency_score": str(os.getenv("PF_ENTRY_LABEL_MIN_CONSISTENCY_SCORE", "0.0") or "0.0"),
         "pf_entry_label_min_contract_mae": str(os.getenv("PF_ENTRY_LABEL_MIN_CONTRACT_MAE", "-1.0") or "-1.0"),
+        "pf_entry_label_enable_neutral": str(os.getenv("PF_ENTRY_LABEL_ENABLE_NEUTRAL", "1") or "1"),
+        "pf_entry_label_neg_net_profit_thr": str(os.getenv("PF_ENTRY_LABEL_NEG_NET_PROFIT_THR", "0.0") or "0.0"),
+        "pf_entry_label_neg_max_future_avg_net": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_FUTURE_AVG_NET", "0.0") or "0.0"),
+        "pf_entry_label_neg_max_future_early_avg_net": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_FUTURE_EARLY_AVG_NET", "0.0") or "0.0"),
+        "pf_entry_label_neg_max_future_early_worst_net": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_FUTURE_EARLY_WORST_NET", "-1.0") or "-1.0"),
+        "pf_entry_label_neg_max_risk_score": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_RISK_SCORE", "0.0") or "0.0"),
+        "pf_entry_label_neg_max_future_end_net": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_FUTURE_END_NET", "0.0") or "0.0"),
+        "pf_entry_label_neg_max_future_eff": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_FUTURE_EFF", "1.0") or "1.0"),
+        "pf_entry_label_neg_max_future_pos_frac": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_FUTURE_POS_FRAC", "1.0") or "1.0"),
+        "pf_entry_label_neg_max_consistency_score": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_CONSISTENCY_SCORE", "0.0") or "0.0"),
+        "pf_entry_label_neg_max_contract_mae": str(os.getenv("PF_ENTRY_LABEL_NEG_MAX_CONTRACT_MAE", "-1.0") or "-1.0"),
+        "pf_entry_label_neg_min_failures": str(os.getenv("PF_ENTRY_LABEL_NEG_MIN_FAILURES", "1") or "1"),
+        "pf_entry_label_any_canonical": str(os.getenv("PF_ENTRY_LABEL_ANY_CANONICAL", "1") or "1"),
         "pf_entry_weight_mode": str(os.getenv("PF_ENTRY_WEIGHT_MODE", "ret_curve") or "ret_curve"),
         "pf_entry_weight_future_window_min": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_WINDOW_MIN", "60") or "60"),
         "pf_entry_weight_future_dd_penalty": str(os.getenv("PF_ENTRY_WEIGHT_FUTURE_DD_PENALTY", "1.5") or "1.5"),
@@ -1741,6 +2154,8 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         except Exception:
             pass
 
+    saved_periods: list[tuple[int, Path]] = []
+
     for tail in cfg.offsets_days:
         print(f"[sniper-train] periodo T-{tail}d", flush=True)
         if full_pool_pack is not None:
@@ -1981,6 +2396,9 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             }
         (period_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[sniper-train] {tail}d salvo em {period_dir}")
+        saved_periods.append((int(tail), period_dir))
+
+    _stabilize_saved_entry_calibrations(saved_periods)
 
     return run_dir
 

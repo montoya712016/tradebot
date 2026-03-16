@@ -30,9 +30,10 @@ def _ensure_modules_on_sys_path() -> None:
     here = Path(__file__).resolve()
     for p in here.parents:
         if p.name.lower() == "modules":
-            sp = str(p)
-            if sp not in sys.path:
-                sys.path.insert(0, sp)
+            for cand in (p.parent, p):
+                sp = str(cand)
+                if sp not in sys.path:
+                    sys.path.insert(0, sp)
             return
 
 
@@ -52,35 +53,45 @@ from plotting.plotting import plot_backtest_single
 
 def _best_run_contract() -> TradeContract:
     """
-    Contrato alinhado com o treino WF crypto atual.
-    - janela de entry: 240m
-    - min_profit: 2.0%
-    - exit EMA fixo: 60 (sem modelo de exit)
-    - offset de EMA exit: 0.5%
+    Contrato alinhado com o pipeline crypto atual.
+    O timeframe efetivo vem de `crypto.trade_contract.CRYPTO_PIPELINE_CANDLE_SEC`.
     """
-    base = DEFAULT_TRADE_CONTRACT
-    return TradeContract(
-        timeframe_sec=60,
-        entry_label_windows_minutes=(240,),
-        entry_label_min_profit_pcts=(0.02,),
-        entry_label_weight_alpha=base.entry_label_weight_alpha,
-        exit_ema_span=60,
-        exit_ema_init_offset_pct=0.005,
-        fee_pct_per_side=base.fee_pct_per_side,
-        slippage_pct=base.slippage_pct,
-        max_adds=base.max_adds,
-        add_spacing_pct=base.add_spacing_pct,
-        add_sizing=base.add_sizing,
-        risk_max_cycle_pct=base.risk_max_cycle_pct,
-        dd_intermediate_limit_pct=base.dd_intermediate_limit_pct,
-        danger_drop_pct=base.danger_drop_pct,
-        danger_recovery_pct=base.danger_recovery_pct,
-        danger_timeout_hours=base.danger_timeout_hours,
-        danger_fast_minutes=base.danger_fast_minutes,
-        danger_drop_pct_critical=base.danger_drop_pct_critical,
-        danger_stabilize_recovery_pct=base.danger_stabilize_recovery_pct,
-        danger_stabilize_bars=base.danger_stabilize_bars,
-    )
+    try:
+        from crypto.trade_contract import (  # type: ignore
+            CRYPTO_PIPELINE_CANDLE_SEC as _CRYPTO_PIPELINE_CANDLE_SEC,
+            apply_crypto_pipeline_env as _apply_crypto_pipeline_env,
+            build_default_crypto_contract as _build_default_crypto_contract,
+        )
+
+        candle_sec = _apply_crypto_pipeline_env(_CRYPTO_PIPELINE_CANDLE_SEC)
+        return _build_default_crypto_contract(candle_sec)
+    except Exception:
+        base = DEFAULT_TRADE_CONTRACT
+        return TradeContract(
+            timeframe_sec=300,
+            entry_label_windows_minutes=(240,),
+            entry_label_min_profit_pcts=(0.01,),
+            entry_label_weight_alpha=base.entry_label_weight_alpha,
+            exit_ema_span=24,
+            exit_ema_init_offset_pct=0.005,
+            fee_pct_per_side=base.fee_pct_per_side,
+            slippage_pct=base.slippage_pct,
+            max_adds=base.max_adds,
+            add_spacing_pct=base.add_spacing_pct,
+            add_sizing=base.add_sizing,
+            risk_max_cycle_pct=base.risk_max_cycle_pct,
+            dd_intermediate_limit_pct=base.dd_intermediate_limit_pct,
+            danger_drop_pct=base.danger_drop_pct,
+            danger_recovery_pct=base.danger_recovery_pct,
+            danger_timeout_hours=base.danger_timeout_hours,
+            danger_fast_minutes=base.danger_fast_minutes,
+            danger_drop_pct_critical=base.danger_drop_pct_critical,
+            danger_stabilize_recovery_pct=base.danger_stabilize_recovery_pct,
+            danger_stabilize_bars=base.danger_stabilize_bars,
+        )
+
+
+_CRYPTO_DEFAULT_CANDLE_SEC = int(getattr(_best_run_contract(), "timeframe_sec", 300) or 300)
 
 
 def _default_flags_for_asset(asset_class: str) -> dict:
@@ -115,7 +126,7 @@ class SingleSymbolDemoSettings:
     symbol: str = "ADAUSDT"
     # janela parecida com o WF campeÃ£o (aprox. 6 anos)
     days: int = 6 * 365 + 30
-    candle_sec: int = 60
+    candle_sec: int = _CRYPTO_DEFAULT_CANDLE_SEC
     # Se quiser fixar um WF especÃ­fico, preencha; senÃ£o, pega o wf_* mais recente.
     run_dir: str | None = None
     # Cache (tamanho total que serÃ¡ carregado/garantido em disco)
@@ -136,6 +147,7 @@ class SingleSymbolDemoSettings:
     print_signal_diagnostics: bool = True
     # Thresholds sÃ£o definidos manualmente em config/thresholds.py.
     override_tau_entry: float | None = None
+    force_period_days: tuple[int, ...] = ()
     disable_entry_calibration: bool = False
     long_only: bool = False
     # Contrato usado para cache/simulaÃ§Ã£o
@@ -175,6 +187,18 @@ def run(settings: SingleSymbolDemoSettings | None = None) -> None:
 
     run_dir = _find_latest_wf_dir(settings.run_dir, asset_class=asset)
     periods = load_period_models(run_dir)
+    force_period_days = tuple(
+        int(x) for x in (getattr(settings, "force_period_days", ()) or ()) if int(x) >= 0
+    )
+    if force_period_days:
+        force_set = {int(x) for x in force_period_days}
+        periods = [pm for pm in periods if int(pm.period_days) in force_set]
+        if not periods:
+            raise RuntimeError(f"Nenhum period_* correspondente a force_period_days={sorted(force_set)}")
+        print(
+            f"[backtest-single] forced periods={','.join(str(int(pm.period_days)) for pm in periods)}",
+            flush=True,
+        )
     if bool(getattr(settings, "disable_entry_calibration", False)):
         periods = [
             replace(

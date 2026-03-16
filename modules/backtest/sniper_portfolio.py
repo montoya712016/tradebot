@@ -55,6 +55,16 @@ class PortfolioConfig:
     corr_keep_top_n: int = 0
     corr_abs: bool = True
     corr_debug: bool = False
+    # Diversificacao contra o livro JA aberto.
+    corr_open_filter_enabled: bool = False
+    corr_open_window_bars: int = 144
+    corr_open_min_obs: int = 96
+    corr_open_reduce_start: float = 0.60
+    corr_open_hard_reject: float = 0.92
+    corr_open_min_weight_mult: float = 0.20
+    # Exposure multiplier: quando > 0, total_exposure efetivo = equity * multiplier
+    # (substitui cap fixo por cap proporcional ao valor atual da carteira).
+    exposure_multiplier: float = 0.0
 
 
 @dataclass
@@ -146,6 +156,70 @@ def _window_returns(sd: SymbolData, i: int, bars: int) -> tuple[pd.DatetimeIndex
     with np.errstate(divide="ignore", invalid="ignore"):
         rets = np.diff(np.log(sl_px.astype(np.float64, copy=False)))
     return pd.DatetimeIndex(sl_idx), rets
+
+
+def _window_returns_at_ts(sd: SymbolData, ts: pd.Timestamp, bars: int) -> tuple[pd.DatetimeIndex, np.ndarray]:
+    idx = sd.idx if (sd.idx is not None) else pd.to_datetime(sd.df.index)
+    if len(idx) == 0:
+        return pd.DatetimeIndex([]), np.empty((0,), dtype=np.float64)
+    pos = int(np.searchsorted(idx.values, np.datetime64(pd.to_datetime(ts)), side="right") - 1)
+    if pos <= 0:
+        return pd.DatetimeIndex([]), np.empty((0,), dtype=np.float64)
+    return _window_returns(sd, pos, bars)
+
+
+def _corr_stats_against_open(
+    *,
+    sym: str,
+    ts: pd.Timestamp,
+    symbols: Dict[str, SymbolData],
+    open_weights: dict[str, float],
+    cfg: PortfolioConfig,
+) -> dict[str, float]:
+    if (not bool(cfg.corr_open_filter_enabled)) or (not open_weights):
+        return {}
+    sd = symbols.get(sym)
+    if sd is None:
+        return {}
+    bars = int(max(4, int(cfg.corr_open_window_bars)))
+    min_obs = int(max(3, int(cfg.corr_open_min_obs)))
+    corr_abs = bool(cfg.corr_abs)
+    idx_w, ret_w = _window_returns_at_ts(sd, ts, bars=bars)
+    if ret_w.size == 0:
+        return {}
+    vals: list[tuple[str, float, float]] = []
+    for osym, ow in open_weights.items():
+        if not np.isfinite(float(ow)) or float(ow) <= 0.0 or osym == sym:
+            continue
+        osd = symbols.get(osym)
+        if osd is None:
+            continue
+        oidx, oret = _window_returns_at_ts(osd, ts, bars=bars)
+        if oret.size == 0:
+            continue
+        if len(idx_w) == len(oidx) and len(idx_w) > 0 and bool(np.array_equal(idx_w.values, oidx.values)):
+            rc = _safe_corr(ret_w, oret, min_obs=min_obs)
+        else:
+            s1 = pd.Series(ret_w, index=idx_w)
+            s2 = pd.Series(oret, index=oidx)
+            j = s1.to_frame("a").join(s2.to_frame("b"), how="inner")
+            rc = _safe_corr(j["a"].to_numpy(np.float64, copy=False), j["b"].to_numpy(np.float64, copy=False), min_obs=min_obs)
+        if np.isfinite(rc):
+            vals.append((osym, abs(float(rc)) if corr_abs else float(rc), float(ow)))
+    if not vals:
+        return {}
+    corr_vals = np.asarray([v[1] for v in vals], dtype=np.float64)
+    w_vals = np.asarray([max(0.0, v[2]) for v in vals], dtype=np.float64)
+    w_sum = float(np.sum(w_vals))
+    weighted_mean = float(np.sum(corr_vals * w_vals) / w_sum) if w_sum > 0.0 else float(np.mean(corr_vals))
+    correlated_exposure = float(np.sum(w_vals[corr_vals >= float(max(0.0, cfg.corr_open_reduce_start))]))
+    return {
+        "open_corr_count": float(len(vals)),
+        "open_max_corr": float(np.max(corr_vals)),
+        "open_mean_corr": float(np.mean(corr_vals)),
+        "open_weighted_mean_corr": float(weighted_mean),
+        "open_correlated_exposure": float(correlated_exposure),
+    }
 
 
 def _filter_batch_by_correlation(
@@ -474,6 +548,7 @@ def simulate_portfolio(
 ) -> PortfolioBacktestResult:
     cfg = cfg or PortfolioConfig()
     contract = contract or DEFAULT_TRADE_CONTRACT
+    default_exit_span = int(max(1, exit_ema_span_from_window(contract, int(candle_sec))))
 
     # heap de próximos candidatos: (ts, -score, symbol, idx)
     entry_heap: list[tuple[pd.Timestamp, float, str, int, str, float, float, int]] = []
@@ -517,23 +592,33 @@ def simulate_portfolio(
         idx = sd.idx if (sd.idx is not None) else pd.to_datetime(df.index)
         n = int(len(df))
         i = int(ptr[sym])
-        while i < n:
-            pe = float(sd.p_entry[i]) if np.isfinite(sd.p_entry[i]) else 0.0
-            best_win = None
-            if sd.entry_windows_minutes is not None and len(sd.entry_windows_minutes) > 0:
-                best_win = sd.entry_windows_minutes[0]
-            if sd.p_exit is not None and i < len(sd.p_exit) and np.isfinite(sd.p_exit[i]) and float(sd.p_exit[i]) > 1.0:
-                ema_span = int(max(2, round(float(sd.p_exit[i]))))
-            else:
-                ema_span = int(max(1, round((float(best_win or 0.0) * 60.0) / float(max(1, candle_sec))))) if best_win else 0
+        pe_slice = sd.p_entry[i:]
+        valid_mask = (pe_slice >= float(sd.tau_entry)) & np.isfinite(pe_slice)
+        
+        if not np.any(valid_mask):
+            ptr[sym] = n
+            return None
+            
+        first_valid_offset = int(np.argmax(valid_mask))
+        match_i = i + first_valid_offset
+        pe = float(sd.p_entry[match_i])
+        
+        best_win = None
+        if sd.entry_windows_minutes is not None and len(sd.entry_windows_minutes) > 0:
+            best_win = sd.entry_windows_minutes[0]
+            
+        if sd.p_exit is not None and match_i < len(sd.p_exit) and np.isfinite(sd.p_exit[match_i]) and float(sd.p_exit[match_i]) > 1.0:
+            ema_span = int(max(2, round(float(sd.p_exit[match_i]))))
+        else:
+            ema_span = (
+                int(max(1, round((float(best_win or 0.0) * 60.0) / float(max(1, candle_sec)))))
+                if best_win
+                else int(default_exit_span)
+            )
 
-            if pe >= float(sd.tau_entry):
-                sc = _rank_score(pe, 0.0, cfg.rank_mode)
-                ptr[sym] = i
-                return pd.to_datetime(idx[i]), float(sc), int(i), float(pe), float(sd.tau_entry), int(ema_span)
-            i += 1
-        ptr[sym] = n
-        return None
+        sc = _rank_score(pe, 0.0, cfg.rank_mode)
+        ptr[sym] = match_i
+        return pd.to_datetime(idx[match_i]), float(sc), int(match_i), float(pe), float(sd.tau_entry), int(ema_span)
 
     for sym in list(symbols.keys()):
         nxt = _next_entry(sym)
@@ -545,6 +630,7 @@ def simulate_portfolio(
     # heap de posições abertas: (exit_ts, symbol, entry_ts, weight, r_net, reason, num_adds)
     open_heap: list[tuple[pd.Timestamp, str, pd.Timestamp, float, float, str, int]] = []
     open_set: set[str] = set()
+    open_weights: dict[str, float] = {}
     used_exposure = 0.0
 
     eq = 1.0
@@ -562,6 +648,7 @@ def simulate_portfolio(
             exit_ts, sym, entry_ts, w, r_net, reason, num_adds = heapq.heappop(open_heap)
             if sym in open_set:
                 open_set.remove(sym)
+                open_weights.pop(sym, None)
                 used_exposure = max(0.0, float(used_exposure) - float(w))
             eq = float(eq) * (1.0 + float(w) * float(r_net))
             eq_events.append((pd.to_datetime(exit_ts), float(eq)))
@@ -624,7 +711,11 @@ def simulate_portfolio(
                     heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
                 continue
 
-            remaining = float(cfg.total_exposure) - float(used_exposure)
+            if float(cfg.exposure_multiplier) > 0.0:
+                effective_total_exposure = float(eq) * float(cfg.exposure_multiplier)
+            else:
+                effective_total_exposure = float(cfg.total_exposure)
+            remaining = float(effective_total_exposure) - float(used_exposure)
             if remaining <= 1e-9:
                 ptr[_sym] = int(_i) + 1
                 nxt = _next_entry(_sym)
@@ -633,8 +724,49 @@ def simulate_portfolio(
                     heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
                 continue
 
-            desired = float(cfg.total_exposure) / float(max(1, len(open_set) + 1))
+            desired = float(effective_total_exposure) / float(max(1, len(open_set) + 1))
             w = float(min(float(cfg.max_trade_exposure), remaining, desired))
+            open_corr_stats = _corr_stats_against_open(
+                sym=str(_sym),
+                ts=pd.to_datetime(t),
+                symbols=symbols,
+                open_weights=open_weights,
+                cfg=cfg,
+            )
+            if open_corr_stats:
+                max_corr = float(open_corr_stats.get("open_max_corr", float("nan")))
+                weighted_mean_corr = float(open_corr_stats.get("open_weighted_mean_corr", float("nan")))
+                if np.isfinite(max_corr) and max_corr >= float(cfg.corr_open_hard_reject):
+                    ptr[_sym] = int(_i) + 1
+                    nxt = _next_entry(_sym)
+                    if nxt is not None:
+                        nts, sc, ni, pe0, te0, ema_span = nxt
+                        heapq.heappush(entry_heap, (nts, -sc, _sym, ni, pe0, te0, ema_span))
+                    corr_rows.append(
+                        {
+                            "ts": pd.to_datetime(t),
+                            "open_filter_reject": 1,
+                            "symbol": str(_sym),
+                            **open_corr_stats,
+                        }
+                    )
+                    continue
+                if np.isfinite(weighted_mean_corr):
+                    reduce_start = float(max(0.0, min(0.99, cfg.corr_open_reduce_start)))
+                    if weighted_mean_corr > reduce_start:
+                        rel = (weighted_mean_corr - reduce_start) / max(1e-9, 1.0 - reduce_start)
+                        mult = 1.0 - rel
+                        mult = float(max(float(cfg.corr_open_min_weight_mult), min(1.0, mult)))
+                        w *= mult
+                corr_rows.append(
+                    {
+                        "ts": pd.to_datetime(t),
+                        "open_filter_reject": 0,
+                        "symbol": str(_sym),
+                        "post_weight": float(w),
+                        **open_corr_stats,
+                    }
+                )
             if w < float(cfg.min_trade_exposure):
                 ptr[_sym] = int(_i) + 1
                 nxt = _next_entry(_sym)
@@ -666,6 +798,7 @@ def simulate_portfolio(
 
             tr.symbol = str(_sym)
             open_set.add(str(_sym))
+            open_weights[str(_sym)] = float(w)
             used_exposure = float(used_exposure) + float(w)
             heapq.heappush(
                 open_heap,
@@ -692,8 +825,14 @@ def simulate_portfolio(
         last_ts = max([x[0] for x in open_heap])
         _close_until(pd.to_datetime(last_ts))
 
-    if not eq_events:
-        eq_events = [(pd.Timestamp.utcnow(), float(eq))]
+    start_ts = None
+    try:
+        start_ts = min(pd.to_datetime(sd.df.index.min()) for sd in symbols.values() if sd.df is not None and len(sd.df))
+    except Exception:
+        start_ts = None
+    if start_ts is None:
+        start_ts = pd.Timestamp.utcnow()
+    eq_events = [(pd.to_datetime(start_ts), 1.0)] + list(eq_events)
 
     eq_ser = pd.Series(
         data=[e for _, e in eq_events],

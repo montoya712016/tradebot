@@ -67,11 +67,17 @@ def _purge_invalid_parquet(cache_dir: Path, *, label: str) -> int:
 
 
 def _auto_heal() -> None:
+    raw_candle = (os.getenv("SNIPER_CANDLE_SEC") or os.getenv("PF_CRYPTO_CANDLE_SEC") or "60").strip()
+    try:
+        candle_sec = max(1, int(raw_candle))
+    except Exception:
+        candle_sec = 60
+    feat_tag = f"{int(candle_sec // 60)}m" if candle_sec % 60 == 0 else f"{int(candle_sec)}s"
     feat_cache = os.getenv("SNIPER_FEATURE_CACHE_DIR", "").strip()
     if feat_cache:
         feat_dir = Path(feat_cache)
     else:
-        feat_dir = WORKSPACE_ROOT / "cache_sniper" / "features_pf_1m"
+        feat_dir = WORKSPACE_ROOT / "cache_sniper" / f"features_pf_{feat_tag}"
     ohlc_cache = os.getenv("PF_OHLC_CACHE_DIR", "").strip()
     if ohlc_cache:
         ohlc_dir = Path(ohlc_cache)

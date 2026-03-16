@@ -6,6 +6,7 @@ from pathlib import Path
 from collections import deque
 import csv
 import io
+import mimetypes
 import random
 import time
 import sys
@@ -35,7 +36,7 @@ class DashboardConfig:
     out_root: str = "wf_random_loop"
     results_csv: str = "random_runs.csv"
     max_rows: int = 200
-    max_images: int = 24
+    max_images: int = 0  # 0 = unlimited
     refresh_sec: float = 6.0
     demo_csv: bool = False
     loop_log_path: str | None = None
@@ -58,6 +59,21 @@ def _to_float(v: object, default: float | None = None) -> float | None:
 
 
 def _get_results_header() -> list[str]:
+    try:
+        from flask import request  # type: ignore
+
+        csv_hint = str(request.args.get("results_csv", "") or "")
+    except Exception:
+        csv_hint = ""
+    if "explore" in csv_hint.lower():
+        try:
+            from train import wf_portfolio_explorer as _wfexp  # type: ignore
+
+            header = getattr(_wfexp, "RESULTS_HEADER", None)
+            if isinstance(header, list) and header:
+                return list(header)
+        except Exception:
+            pass
     try:
         from train import wf_random_loop as _wfrl  # type: ignore
 
@@ -309,22 +325,25 @@ class LoopStateLoader:
         best_win = pick_max("win_rate")
         best_dd = pick_min("max_dd")
 
-        images = []
+        artifacts = []
         for r in reversed(backtests):
-            rel = _safe_relpath(str(r.get("equity_png") or ""), self.out_root)
+            rel_html = _safe_relpath(str(r.get("equity_html") or ""), self.out_root)
+            rel_png = _safe_relpath(str(r.get("equity_png") or ""), self.out_root)
+            rel = rel_html or rel_png
             if not rel:
                 continue
-            images.append(
+            artifacts.append(
                 {
                     "train_id": r.get("train_id") or "",
                     "backtest_id": r.get("backtest_id") or "",
                     "ret_pct": _to_float(r.get("ret_pct"), 0.0) or 0.0,
                     "max_dd": _to_float(r.get("max_dd"), 0.0) or 0.0,
                     "profit_factor": _to_float(r.get("profit_factor"), 0.0) or 0.0,
-                    "img": rel,
+                    "artifact": rel,
+                    "artifact_type": "html" if rel_html else "png",
                 }
             )
-            if len(images) >= int(self.cfg.max_images):
+            if int(self.cfg.max_images) > 0 and len(artifacts) >= int(self.cfg.max_images):
                 break
 
         return {
@@ -348,7 +367,7 @@ class LoopStateLoader:
                 "best_dd": best_dd or {},
             },
             "rows": rows,
-            "images": images,
+            "artifacts": artifacts,
         }
 
 
@@ -375,8 +394,8 @@ def create_app(cfg: DashboardConfig | None = None) -> tuple[Flask, LoopStateLoad
     def api_health() -> object:
         return jsonify({"ok": True})
 
-    @app.get("/img/<path:relpath>")
-    def img(relpath: str) -> object:
+    @app.get("/artifact/<path:relpath>")
+    def artifact(relpath: str) -> object:
         root = loader.out_root.resolve()
         target = (root / relpath).resolve()
         try:
@@ -385,7 +404,8 @@ def create_app(cfg: DashboardConfig | None = None) -> tuple[Flask, LoopStateLoad
             abort(404)
         if not target.exists():
             abort(404)
-        return send_file(target, mimetype="image/png")
+        mime, _ = mimetypes.guess_type(str(target))
+        return send_file(target, mimetype=mime or "application/octet-stream")
 
     @app.get("/api/config")
     def api_config() -> object:
