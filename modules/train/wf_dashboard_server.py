@@ -35,7 +35,7 @@ from utils.paths import resolve_generated_path  # noqa: E402
 class DashboardConfig:
     out_root: str = "wf_random_loop"
     results_csv: str = "random_runs.csv"
-    max_rows: int = 200
+    max_rows: int = 5000
     max_images: int = 0  # 0 = unlimited
     refresh_sec: float = 6.0
     demo_csv: bool = False

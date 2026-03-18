@@ -1,3 +1,0 @@
-"""
-Tiingo helpers for stocks.
-"""

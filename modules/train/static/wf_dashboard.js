@@ -1,7 +1,41 @@
 (() => {
   const refreshSec = Number(window.__REFRESH_SEC__ || 6);
-  let paused = false;
   let timer = null;
+  
+  let currentState = null;
+  let expandedRows = new Set(); // Track expanded bt_ids
+  let currentSortCol = "score";
+  let currentSortAsc = false;
+
+  let isRefreshing = false;
+  let loopActive = true;
+  let runsLimit = 50;
+
+  function calcScore(row) {
+    const ret = toFloat(row.ret_pct, 0.0);
+    const dd = toFloat(row.max_dd, 0.0);
+    const win = toFloat(row.win_rate, 0.0);
+    const pf = toFloat(row.profit_factor, 1.0);
+    const trades = toFloat(row.trades, 0.0);
+    
+    // Extracted consistency metrics (defaulting to win rate if not present)
+    const monthPos = toFloat(row.month_pos_frac, win);
+    const semPos = toFloat(row.semester_pos_frac, win);
+
+    if (ret <= 0) return ret; // Penalize immediately if negative
+
+    // 1. Exponential Decay on SQUARED drawdown
+    const dd_penalty = Math.exp(-25.0 * Math.pow(dd, 2));
+
+    // 2. Square Root of the return to prevent outlier domination
+    const smoothed_ret = Math.sqrt(ret) * 10;
+
+    const consistency_mult = 0.2 + monthPos + semPos;
+    const trade_mult = Math.min(1.0, trades / 100.0);
+    const pf_mult = Math.min(3.0, pf);
+
+    return smoothed_ret * dd_penalty * consistency_mult * trade_mult * pf_mult;
+  }
 
   function setText(id, text) {
     const el = document.getElementById(id);
@@ -41,132 +75,116 @@
   function renderTable(rows) {
     const tbody = document.getElementById("runs-tbody");
     if (!tbody) return;
+
+    // Create a new fresh tbody content
+    const fragment = document.createDocumentFragment();
+
+    rows.forEach((r, idx) => {
+        const t_id = r.train_id || "--";
+        const b_id = r.backtest_id || "--";
+        const status = (r.status || "").toLowerCase();
+        
+        const eqEnd = parseFloat(r.eq_end) || 0;
+        const maxDd = parseFloat(r.max_dd) || 0;
+        const winR = parseFloat(r.win_rate) || 0;
+        const pf = parseFloat(r.profit_factor) || 0;
+        const trds = parseInt(r.trades) || 0;
+        const tauE = r.tau_entry || "--";
+        
+        const score = calcScore(r);
+        const rowId = fmtId(r);
+        const isExpanded = expandedRows.has(rowId);
+
+        const tr = document.createElement("tr");
+        tr.style.cursor = "pointer"; // indicate clickability
+        
+        // Using exactly 10 columns matching the <thead>
+        tr.innerHTML = `
+            <td class="mono">${t_id}</td>
+            <td class="mono">${b_id}</td>
+            <td>
+              <span class="badge ${status === "ok" ? "ok" : "err"}">
+                ${status || "--"}
+              </span>
+            </td>
+            <td class="right">
+                <span class="pill outline" style="color:var(--c-accent)">
+                    ${score.toFixed(4)}
+                </span>
+            </td>
+            <td class="right ${eqEnd - 1 > 0 ? "value-pos" : eqEnd - 1 < 0 ? "value-neg" : ""}">
+                ${fmtPct((eqEnd - 1) * 100.0)}
+            </td>
+            <td class="right" style="color:var(--c-danger)">
+                ${(maxDd * 100).toFixed(2)}%
+            </td>
+            <td class="right">${fmtNum(pf)}</td>
+            <td class="right">${fmtPct(winR * 100.0)}</td>
+            <td class="right">${trds}</td>
+            <td class="right">${tauE}</td>
+        `;
+
+        tr.addEventListener("click", () => {
+            if (expandedRows.has(rowId)) {
+                expandedRows.delete(rowId);
+            } else {
+                expandedRows.add(rowId);
+            }
+            if (currentState) renderState(currentState, true); 
+        });
+
+        fragment.appendChild(tr);
+
+        // Sub-row for expanded iframe
+        if (isExpanded && r.equity_html) {
+            const subTr = document.createElement("tr");
+            subTr.style.backgroundColor = "rgba(0, 0, 0, 0.4)";
+            
+            // Generate path to HTML file using the server's /artifact/ endpoint
+            const htmlPath = "/artifact/" + encodeURI(r.equity_html);
+            
+            // subTr spans all columns (10 standard table columns)
+            subTr.innerHTML = `
+                <td colspan="10" style="padding: 0;">
+                    <div style="width: 100%; border-bottom: 1px solid rgba(255,255,255,.08); background: #0b0d12; overflow: hidden; display: flex; flex-direction: column;">
+                        <iframe src="${htmlPath}" title="artifact preview" 
+                                style="width: 100%; height: 600px; border: none; background: transparent;">
+                        </iframe>
+                    </div>
+                </td>
+            `;
+            fragment.appendChild(subTr);
+        }
+    });
+
     tbody.innerHTML = "";
-
-    for (const row of rows) {
-      const ret = toFloat(row.ret_pct);
-      const dd = toFloat(row.max_dd);
-      const pf = toFloat(row.profit_factor);
-      const win = toFloat(row.win_rate);
-      const trades = row.trades || "0";
-      const tauE = row.tau_entry || "--";
-      const status = (row.status || "").toLowerCase();
-
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td class="mono">${row.train_id || "--"}</td>
-        <td class="mono">${row.backtest_id || "--"}</td>
-        <td>
-          <span class="badge ${status === "ok" ? "ok" : "err"}">
-            ${status || "--"}
-          </span>
-        </td>
-        <td class="right ${ret > 0 ? "value-pos" : ret < 0 ? "value-neg" : ""}">
-          ${fmtPct(ret || 0)}
-        </td>
-        <td class="right">${fmtPct((dd || 0) * 100.0)}</td>
-        <td class="right">${fmtNum(pf || 0)}</td>
-        <td class="right">${fmtPct((win || 0) * 100.0)}</td>
-        <td class="right">${trades}</td>
-        <td class="right">${tauE}</td>
-      `;
-      tbody.appendChild(tr);
-    }
+    tbody.appendChild(fragment);
 
     if (!rows.length) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td colspan="9" class="muted">No data yet.</td>`;
+      tr.innerHTML = `<td colspan="10" class="muted">No data yet.</td>`;
       tbody.appendChild(tr);
-    }
-  }
-
-  function renderArtifacts(artifacts) {
-    const grid = document.getElementById("artifact-grid");
-    const preview = document.getElementById("artifact-preview");
-    if (!grid) return;
-    grid.innerHTML = "";
-    let firstHtml = null;
-    for (const item of artifacts) {
-      const ret = toFloat(item.ret_pct, 0);
-      const dd = toFloat(item.max_dd, 0);
-      const pf = toFloat(item.profit_factor, 0);
-      const href = "/artifact/" + encodeURI(item.artifact || "");
-      const isHtml = (item.artifact_type || "").toLowerCase() === "html";
-      if (!firstHtml && isHtml) firstHtml = href;
-      const card = document.createElement("div");
-      card.className = "gallery-card";
-      card.innerHTML = isHtml
-        ? `
-          <div class="gallery-body">
-            <div class="gallery-title mono">${item.train_id}/${item.backtest_id}</div>
-            <div class="gallery-meta">
-              <span class="${ret > 0 ? "value-pos" : ret < 0 ? "value-neg" : ""}">${fmtPct(ret)}</span>
-              <span>DD ${fmtPct(dd * 100.0)}</span>
-              <span>PF ${fmtNum(pf)}</span>
-            </div>
-            <div class="gallery-meta">
-              <button class="btn ghost artifact-open" data-href="${href}">Show Plot</button>
-            </div>
-          </div>
-        `
-        : `
-          <img src="${href}" alt="equity" loading="lazy" />
-          <div class="gallery-body">
-            <div class="gallery-title mono">${item.train_id}/${item.backtest_id}</div>
-            <div class="gallery-meta">
-              <span class="${ret > 0 ? "value-pos" : ret < 0 ? "value-neg" : ""}">${fmtPct(ret)}</span>
-              <span>DD ${fmtPct(dd * 100.0)}</span>
-              <span>PF ${fmtNum(pf)}</span>
-            </div>
-            <div class="gallery-meta">
-              <a class="btn ghost" href="${href}" target="_blank" rel="noreferrer">Open PNG</a>
-            </div>
-          </div>
-        `;
-      grid.appendChild(card);
-    }
-    if (preview && firstHtml) {
-      const current = preview.getAttribute("src") || "";
-      if (!current || current === "about:blank") {
-        preview.setAttribute("src", firstHtml);
-      }
-    }
-    grid.querySelectorAll(".artifact-open").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (!preview) return;
-        const href = btn.getAttribute("data-href") || "";
-        if (href) preview.setAttribute("src", href);
-      });
-    });
-    if (!artifacts.length) {
-      const empty = document.createElement("div");
-      empty.className = "muted";
-      empty.textContent = "No backtest artifacts yet.";
-      grid.appendChild(empty);
-      if (preview) preview.setAttribute("src", "about:blank");
     }
   }
 
   function renderLogs(logs) {
     const loopEl = document.getElementById("log-loop");
     const dashEl = document.getElementById("log-dash");
-    const loopLines = (logs && logs.loop) || [];
-    const dashLines = (logs && logs.dash) || [];
+    const loopLines = logs || [];
     if (loopEl) {
       loopEl.textContent = loopLines.length ? loopLines.join("") : "No logs yet.";
     }
+    // dashEl is not used in the new log structure, but keep it for robustness if HTML still has it
     if (dashEl) {
-      dashEl.textContent = dashLines.length ? dashLines.join("") : "No logs yet.";
+      dashEl.textContent = "Dashboard logs are not available in this view.";
     }
-    setText("log-count", String(loopLines.length + dashLines.length));
+    setText("log-count", String(loopLines.length));
   }
 
-  function renderState(state) {
-    const meta = state.meta || {};
-    const summary = state.summary || {};
-    const rows = state.rows || [];
-    const artifacts = state.artifacts || [];
-    const logs = state.logs || {};
+  function renderState(data, userAction = false) {
+    currentState = data; // Update global state reference
+    const meta = data.meta || {};
+    const summary = data.summary || {};
 
     setText("meta-rows", String(meta.rows_total || 0));
     setText("meta-status", meta.last_status || "--");
@@ -192,13 +210,63 @@
     setText("kpi-best-dd", fmtPct(toFloat(bestDd.max_dd, 0) * 100.0));
     setText("kpi-best-dd-id", fmtId(bestDd));
 
-    const backtests = rows.filter((r) => (r.stage || "").toLowerCase() === "backtest");
-    setText("runs-count", String(backtests.length));
-    renderTable(backtests.slice().reverse());
+    // Handle runs logic
+    const allRuns = Array.isArray(data.rows) ? data.rows : [];
+    const backtests = allRuns.filter(r => (r.stage || "").toLowerCase() === "backtest");
 
-    setText("artifact-count", String(artifacts.length));
-    renderArtifacts(artifacts);
-    renderLogs(logs);
+    backtests.sort((a, b) => {
+        let valA, valB;
+
+        if (currentSortCol === "score") {
+            valA = calcScore(a);
+            valB = calcScore(b);
+        } else if (currentSortCol === "status" || currentSortCol === "train_id" || currentSortCol === "backtest_id") {
+            valA = (a[currentSortCol] || "").toLowerCase();
+            valB = (b[currentSortCol] || "").toLowerCase();
+        } else if (currentSortCol === "ret_pct") {
+            // Prefer eq_end if available (as used in table rendering)
+            valA = a.eq_end !== undefined ? toFloat(a.eq_end, 1) - 1 : toFloat(a.ret_pct, 0);
+            valB = b.eq_end !== undefined ? toFloat(b.eq_end, 1) - 1 : toFloat(b.ret_pct, 0);
+        } else {
+            valA = toFloat(a[currentSortCol], 0);
+            valB = toFloat(b[currentSortCol], 0);
+        }
+
+        if (valA < valB) return currentSortAsc ? -1 : 1;
+        if (valA > valB) return currentSortAsc ? 1 : -1;
+
+        // tie-breaker: score
+        return calcScore(b) - calcScore(a);
+    });
+
+    const backtestsToShow = backtests.slice(0, runsLimit);
+    
+    setText("runs-count", `${backtestsToShow.length} of ${backtests.length}`);
+    
+    // Only re-render the physical DOM table if the user explicitly clicked something (sort/expand)
+    // OR if no plots are currently expanded. This prevents the auto-refresh from destroying the iframe state.
+    const shouldRenderTable = userAction || expandedRows.size === 0;
+    if (shouldRenderTable) {
+        renderTable(backtestsToShow);
+    }
+
+    const subtitle = document.getElementById("table-subtitle");
+    if (subtitle) {
+        if (expandedRows.size > 0 && !userAction) {
+            subtitle.innerHTML = 'Latest rows from random_runs.csv <span style="color:var(--c-warning); margin-left:8px; font-weight:600;">⏸️ Table frozen while plot is open</span>';
+        } else if (expandedRows.size === 0) {
+            subtitle.innerHTML = 'Latest rows from random_runs.csv';
+        }
+    }
+
+    // Limit load more button visibility
+    const btnLoadMoreRuns = document.getElementById("btn-load-more-runs");
+    if (btnLoadMoreRuns) {
+        btnLoadMoreRuns.style.display = runsLimit >= backtests.length ? "none" : "inline-block";
+    }
+
+    // Render logs
+    renderLogs(data.loop_log);
   }
 
   async function fetchJson(url) {
@@ -208,19 +276,24 @@
   }
 
   async function refreshOnce() {
+    if (isRefreshing) return;
+    isRefreshing = true;
     try {
-      const st = await fetchJson("/api/state");
-      renderState(st);
+      const data = await fetchJson("/api/state");
+      renderState(data, false); // false = not a user action (auto refresh)
       setOnline(true);
     } catch (e) {
       setOnline(false);
+      console.error("Failed to fetch state:", e);
+    } finally {
+      isRefreshing = false;
     }
   }
 
   function startPolling() {
     stopPolling();
     timer = setInterval(() => {
-      if (!paused) refreshOnce();
+      if (loopActive) refreshOnce();
     }, Math.max(1000, refreshSec * 1000));
   }
 
@@ -232,13 +305,51 @@
   function wireUI() {
     const btnRefresh = document.getElementById("btn-refresh");
     if (btnRefresh) btnRefresh.addEventListener("click", refreshOnce);
-    const btnPause = document.getElementById("btn-pause");
+
+    const btnPause = document.getElementById("btn-pause-refresh");
     if (btnPause) {
-      btnPause.addEventListener("click", () => {
-        paused = !paused;
-        btnPause.textContent = paused ? "Resume" : "Pause";
-      });
+        btnPause.addEventListener("click", () => {
+            loopActive = !loopActive;
+            btnPause.className = loopActive ? "btn ghost" : "btn primary";
+            btnPause.textContent = loopActive ? "Pause Auto-Refresh" : "Resume Auto-Refresh";
+        });
     }
+
+    const btnLoadMoreRuns = document.getElementById("btn-load-more-runs");
+    if (btnLoadMoreRuns) {
+        btnLoadMoreRuns.addEventListener("click", () => {
+            runsLimit += 50;
+            if (currentState) renderState(currentState, true);
+        });
+    }
+
+    // Attach row sorting logic to headers
+    document.querySelectorAll("th[data-sort]").forEach(th => {
+        th.style.cursor = "pointer";
+        th.addEventListener("click", () => {
+            const col = th.getAttribute("data-sort");
+            if (currentSortCol === col) {
+                currentSortAsc = !currentSortAsc; // toggle direction
+            } else {
+                currentSortCol = col;
+                // Default descending for most metrics (Score, Return, PF, WinRate)
+                // Default ascending for Drawdown (lower is better) or strings
+                currentSortAsc = (col === "max_dd" || col === "status" || col === "train_id" || col === "backtest_id") ? true : false;
+            }
+
+            // Update arrow icons
+            document.querySelectorAll("th[data-sort] .sort-icon").forEach(icon => {
+                icon.textContent = "";
+            });
+            const icon = th.querySelector(".sort-icon");
+            if (icon) {
+                icon.textContent = currentSortAsc ? "▲" : "▼";
+            }
+
+            // Re-render table with new sorting without refetching
+            if (currentState) renderState(currentState, true);
+        });
+    });
   }
 
   wireUI();

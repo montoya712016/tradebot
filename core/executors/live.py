@@ -11,7 +11,7 @@ class LiveExecutor:
 
     def __init__(self, notify: bool = False):
         try:
-            from crypto.trading_client import BinanceTrader  # lazy import
+            from data_providers.binance.trading_client import BinanceTrader  # lazy import
         except Exception as e:  # pragma: no cover
             raise RuntimeError(f"BinanceTrader indisponível: {e}")
         self.trader = BinanceTrader()

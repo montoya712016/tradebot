@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
-try:
-    # execução como pacote (recomendado quando `modules/` esta no sys.path)
-    from .dashboard_server import create_app
-except Exception:
-    # fallback para execução direta: python realtime/run_dashboard.py
-    import sys
-
+def _add_repo_paths() -> None:
     here = Path(__file__).resolve()
+    repo_root = here
     for p in here.parents:
-        if p.name.lower() == "modules":
-            sp = str(p)
-            if sp not in sys.path:
-                sys.path.insert(0, sp)
+        if p.name.lower() == "tradebot":
+            repo_root = p
             break
-    from realtime.dashboard_server import create_app  # type: ignore
+    for cand in (repo_root, repo_root / "modules"):
+        if str(cand) not in sys.path:
+            sys.path.insert(0, str(cand))
 
+_add_repo_paths()
+
+try:
+    from realtime.dashboard_server import create_app
+except ImportError:
+    # fallback se modules/ estiver em outro lugar
+    from modules.realtime.dashboard_server import create_app
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Dashboard em tempo real (Flask).")
@@ -36,7 +40,5 @@ def main() -> None:
     print(f"[OK] Dashboard online em http://{args.host}:{args.port}")
     app.run(host=args.host, port=int(args.port), debug=False, use_reloader=False)
 
-
 if __name__ == "__main__":
     main()
-

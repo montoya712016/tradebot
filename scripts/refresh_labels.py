@@ -42,7 +42,7 @@ def main() -> None:
     os.environ["PF_ENTRY_WEIGHT_MAX"] = "20.0"
     os.environ["SNIPER_ENTRY_WEIGHT_BIN_STEP_X10"] = "5"
     os.environ["SNIPER_ENTRY_WEIGHT_BIN_MAX"] = "20.0"
-    from crypto.trade_contract import (  # type: ignore
+    from config.trade_contract import (  # type: ignore
         CRYPTO_PIPELINE_CANDLE_SEC,
         apply_crypto_pipeline_env,
         build_default_crypto_contract,

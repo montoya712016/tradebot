@@ -44,7 +44,7 @@ def main() -> None:
         seed=_env_int("WF_EXPLORE_SEED", 42),
         max_label_trials=_env_int("WF_EXPLORE_LABEL_TRIALS", 3),
         retrains_per_label=_env_int("WF_EXPLORE_RETRAINS_PER_LABEL", 3),
-        backtests_per_retrain=_env_int("WF_EXPLORE_BACKTESTS_PER_RETRAIN", 15),
+        backtests_per_retrain=_env_int("WF_EXPLORE_BACKTESTS_PER_RETRAIN", 100),
         days=_env_int("WF_EXPLORE_DAYS", 4 * 360),
         max_symbols=_env_int("WF_EXPLORE_MAX_SYMBOLS", 0),
         candle_sec=_env_int("WF_EXPLORE_CANDLE_SEC", 300),

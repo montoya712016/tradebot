@@ -85,13 +85,19 @@ CRYPTO_EXIT_EMA_INIT_OFFSET_PCT: float = _float_env("CRYPTO_EXIT_EMA_INIT_OFFSET
 
 def build_default_crypto_contract(candle_sec: int | None = None) -> TradeContract:
     candle_sec_i = int(max(1, candle_sec or CRYPTO_PIPELINE_CANDLE_SEC))
+    
+    # Read ENVs dynamically so overrides in train.py actually work
+    label_profit = _float_env("CRYPTO_ENTRY_LABEL_MIN_PROFIT_PCT", 0.03)
+    exit_span_min = _int_env("CRYPTO_EXIT_EMA_SPAN_MINUTES", 120)
+    exit_offset = _float_env("CRYPTO_EXIT_EMA_INIT_OFFSET_PCT", 0.005)
+    
     return TradeContract(
         timeframe_sec=candle_sec_i,
-        entry_label_windows_minutes=CRYPTO_ENTRY_LABEL_WINDOWS_MINUTES,
-        entry_label_min_profit_pcts=CRYPTO_ENTRY_LABEL_MIN_PROFIT_PCTS,
+        entry_label_windows_minutes=(240,),
+        entry_label_min_profit_pcts=(label_profit,),
         entry_label_weight_alpha=0.01,
-        exit_ema_span=bars_from_minutes(CRYPTO_EXIT_EMA_SPAN_MINUTES, candle_sec_i, min_bars=2),
-        exit_ema_init_offset_pct=CRYPTO_EXIT_EMA_INIT_OFFSET_PCT,
+        exit_ema_span=bars_from_minutes(float(exit_span_min), candle_sec_i, min_bars=2),
+        exit_ema_init_offset_pct=exit_offset,
         fee_pct_per_side=0.0005,
         slippage_pct=0.0,
         max_adds=0,

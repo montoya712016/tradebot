@@ -22,12 +22,12 @@ def _add_repo_paths() -> None:
 _add_repo_paths()
 
 from backtest.portfolio import PortfolioDemoSettings, run, _default_portfolio_cfg  # type: ignore
-from crypto.trade_contract import (  # type: ignore
+from config.trade_contract import (  # type: ignore
     CRYPTO_PIPELINE_CANDLE_SEC,
     apply_crypto_pipeline_env,
     build_default_crypto_contract,
 )
-from crypto.portfolio_symbol_filters import DEFAULT_PORTFOLIO_BAD_SYMBOLS  # type: ignore
+from backtest.portfolio_symbol_filters import DEFAULT_PORTFOLIO_BAD_SYMBOLS  # type: ignore
 
 
 def _env_int(name: str, default: int) -> int:
@@ -117,8 +117,8 @@ def main() -> None:
     plot_out = _env_str("BT_PLOT_OUT", "data/generated/plots/crypto_portfolio_equity.html")
     save_plot = _env_bool("BT_SAVE_PLOT", True)
     candle_sec = _env_int("BT_CANDLE_SEC", candle_sec_default)
-    tau_entry = _env_float("BT_TAU_ENTRY", 0.50)
-    max_symbols = _env_int("BT_MAX_SYMBOLS", 10)
+    tau_entry = _env_float("BT_TAU_ENTRY", 0.61)
+    max_symbols = _env_int("BT_MAX_SYMBOLS", 200)
     align_global_window = _env_bool("BT_ALIGN_GLOBAL_WINDOW", True)
     require_feature_cache = _env_bool("BT_REQUIRE_FEATURE_CACHE", False)
     rebuild_on_score_error = _env_bool("BT_REBUILD_ON_SCORE_ERROR", True)
@@ -128,7 +128,15 @@ def main() -> None:
         exclude_symbols = sorted(set(exclude_symbols).union(DEFAULT_PORTFOLIO_BAD_SYMBOLS))
     contract = build_default_crypto_contract(candle_sec)
     cfg = _default_portfolio_cfg()
-    if _env_bool("BT_DISABLE_CORRELATION", False):
+    # Alinhamento exato com label_017 do Explore:
+    # Vencedores costumam ter seletividade via tau, mas filtros de corr desabilitados
+    # ou configurados manualmente de forma permissiva.
+    cfg.max_positions = 18
+    cfg.total_exposure = 0.53
+    cfg.max_trade_exposure = 0.15
+    cfg.min_trade_exposure = 0.05
+    
+    if _env_bool("BT_DISABLE_CORRELATION", True):
         cfg.corr_filter_enabled = False
         cfg.corr_open_filter_enabled = False
     v = _env_optional_float("BT_CORR_MAX_WITH_MARKET")

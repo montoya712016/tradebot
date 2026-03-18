@@ -50,7 +50,7 @@ from backtest.portfolio import (  # noqa: E402
     prepare_portfolio_data,
     run_prepared_portfolio,
 )
-from crypto.trade_contract import TradeContract, bars_from_minutes, apply_crypto_pipeline_env  # noqa: E402
+from config.trade_contract import TradeContract, bars_from_minutes, apply_crypto_pipeline_env  # noqa: E402
 from prepare_features.refresh_sniper_labels_in_cache import RefreshLabelsSettings, run as refresh_labels  # noqa: E402
 
 
@@ -129,26 +129,26 @@ class ExploreSettings:
     max_symbols: int = 0
     candle_sec: int = 300
     safe_threads: int = 1
-    label_profit_choices: tuple[float, ...] = (0.025, 0.03)  # Focus on smaller targets to keep win rate high
-    exit_span_choices: tuple[int, ...] = (80, 90, 100)  # Focus around 90
-    exit_offset_choices: tuple[float, ...] = (0.005, 0.007, 0.009) # Focus around 0.007
-    neg_pos_choices: tuple[float, ...] = (4.0, 4.5)  # Focus around 4.5
-    tail_blend_choices: tuple[float, ...] = (0.75, 0.80)
-    tail_boost_choices: tuple[float, ...] = (1.15, 1.25)
-    top_q_presets: tuple[str, ...] = ("0.001,0.0025,0.005", "0.0005,0.001,0.0025")
-    top_min_count_choices: tuple[int, ...] = (48,)
-    tau_entry_choices: tuple[float, ...] = (0.55, 0.60, 0.65)  # Focus around 0.60
-    corr_enabled_choices: tuple[bool, ...] = (False,)
-    corr_max_with_market_choices: tuple[float, ...] = (0.80,)
-    corr_max_pair_choices: tuple[float, ...] = (0.85,)
-    corr_open_reduce_start_choices: tuple[float, ...] = (0.60,)
-    corr_open_hard_reject_choices: tuple[float, ...] = (0.92,)
-    corr_open_min_weight_mult_choices: tuple[float, ...] = (0.25,)
-    max_positions_choices: tuple[int, ...] = (12, 15, 18)  # Focus around 15
-    total_exposure_choices: tuple[float, ...] = (0.70, 0.75, 0.80)  # Focus around 0.75
-    max_trade_exposure_choices: tuple[float, ...] = (0.06, 0.08, 0.10)
-    min_trade_exposure_choices: tuple[float, ...] = (0.02, 0.03)
-    exposure_multiplier_choices: tuple[float, ...] = (2.0, 3.0, 4.0)
+    label_profit_choices: tuple[float, ...] = (0.01, 0.025, 0.04, 0.06, 0.10)
+    exit_span_choices: tuple[int, ...] = (30, 60, 90, 150, 300, 600)
+    exit_offset_choices: tuple[float, ...] = (0.001, 0.005, 0.01, 0.02, 0.04)
+    neg_pos_choices: tuple[float, ...] = (1.5, 3.0, 5.0, 8.0, 12.0)
+    tail_blend_choices: tuple[float, ...] = (0.40, 0.60, 0.80, 0.95)
+    tail_boost_choices: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0, 3.0)
+    top_q_presets: tuple[str, ...] = ("0.001,0.0025,0.005", "0.0005,0.001,0.0025", "0.005,0.01,0.02", "0.01,0.02,0.05")
+    top_min_count_choices: tuple[int, ...] = (12, 32, 48, 96, 128)
+    tau_entry_choices: tuple[float, ...] = (0.45, 0.60, 0.75, 0.85)
+    corr_enabled_choices: tuple[bool, ...] = (False, True)
+    corr_max_with_market_choices: tuple[float, ...] = (0.60, 0.80, 0.95)
+    corr_max_pair_choices: tuple[float, ...] = (0.70, 0.85, 0.98)
+    corr_open_reduce_start_choices: tuple[float, ...] = (0.30, 0.60, 0.80)
+    corr_open_hard_reject_choices: tuple[float, ...] = (0.80, 0.92, 0.99)
+    corr_open_min_weight_mult_choices: tuple[float, ...] = (0.05, 0.25, 0.50)
+    max_positions_choices: tuple[int, ...] = (5, 15, 30, 60, 100)
+    total_exposure_choices: tuple[float, ...] = (0.50, 1.0, 2.0, 4.0)
+    max_trade_exposure_choices: tuple[float, ...] = (0.05, 0.15, 0.30, 0.50)
+    min_trade_exposure_choices: tuple[float, ...] = (0.005, 0.02, 0.05, 0.10)
+    exposure_multiplier_choices: tuple[float, ...] = (1.0, 3.0, 6.0, 12.0)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -221,7 +221,7 @@ def _latest_wf_mtime(asset: str = "crypto") -> tuple[Path | None, float]:
 
 def _run_train_subprocess(env_overrides: dict[str, str], log_path: Path) -> str:
     before_run, before_mtime = _latest_wf_mtime("crypto")
-    cmd = [sys.executable, "-u", str((_repo_root() / "crypto" / "train_sniper_wf.py").resolve())]
+    cmd = [sys.executable, "-u", str((_repo_root() / "scripts" / "train.py").resolve())]
     env = os.environ.copy()
     env.update({k: str(v) for k, v in env_overrides.items()})
     
@@ -241,36 +241,41 @@ def _run_train_subprocess(env_overrides: dict[str, str], log_path: Path) -> str:
     log_lines = []
     run_dir_found = None
     
-    prog_pool = LineProgressPrinter(prefix="train-data", total=100, width=26)
+    prog_pool = None
     prog_wf = None
-    
-    # We will simulate the dataset progress linearly for a few seconds since we don't have exact counts,
-    # or just keep it active until the first walk-forward step starts.
-    pool_done = 0
     
     for line in proc.stdout:
         log_lines.append(line)
         line_lower = line.strip().lower()
         
         # Catch run_dir early
-        m = re.search(r"run_dir:\s*(.+)", line)
-        if m:
-            run_dir_found = m.group(1).strip()
+        m_run = re.search(r"run_dir:\s*(.+)", line)
+        if m_run:
+            run_dir_found = m_run.group(1).strip()
             
+        # Parse dataset progress
+        if "sniper-ds" in line_lower:
+            m_ds = re.search(r"(\d+)/(\d+)", line_lower)
+            if m_ds:
+                done = int(m_ds.group(1))
+                total = int(m_ds.group(2))
+                if prog_pool is None:
+                    prog_pool = LineProgressPrinter(prefix="train-data", total=total, width=26)
+                prog_pool.update(done, current="Reading Parquets...")
+                
+        # Transition to walk-forward
         m_per = re.search(r"periodos=(\d+)", line_lower)
         if m_per and prog_wf is None:
-            # Datasets are done! The models are compiling.
-            prog_pool.update(100, current="Pools Assembled")
-            prog_pool.close()
+            if prog_pool is not None:
+                prog_pool.update(prog_pool.total, current="Pools Assembled")
+                prog_pool.close()
             total_steps = int(m_per.group(1))
             prog_wf = LineProgressPrinter(prefix="train-wf", total=total_steps, width=26)
             prog_wf.update(0, current="Starting walk-forward...")
             
+        # Track walk-forward steps
         if "d salvo em" in line_lower or "salvo em wf_" in line_lower:
             if prog_wf is not None:
-                current_done = prog_wf._calc_pct(1) # hack to get inner counter, we will just increment
-                # Actually LineProgressPrinter just takes the raw `done` count.
-                # So we need to track it.
                 if not hasattr(prog_wf, "steps_done"):
                     prog_wf.steps_done = 0
                 prog_wf.steps_done += 1
@@ -281,11 +286,6 @@ def _run_train_subprocess(env_overrides: dict[str, str], log_path: Path) -> str:
                 prog_wf.steps_done = prog_wf.total
             prog_wf.update(prog_wf.total, current="Done")
             prog_wf.close()
-            
-        # If we are still in pool phase, just tick an idle progress to show it's alive
-        if prog_wf is None:
-            pool_done = min(99, pool_done + 1)
-            prog_pool.update(pool_done, current="Reading Parquets...")
 
     proc.wait()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -363,7 +363,7 @@ def _metrics_from_portfolio_output(res_obj: object) -> dict[str, float]:
     pos_weighted = weighted[weighted > 0.0]
     out: dict[str, float] = {
         "eq_end": float(getattr(res_obj, "eq_end", 1.0) if not isinstance(res_obj, dict) else res_obj.get("eq_end", 1.0)),
-        "ret_pct": float(((getattr(res_obj, "ret_total", 0.0) if not isinstance(res_obj, dict) else res_obj.get("ret_total", 0.0)) or 0.0) * 100.0),
+        "ret_pct": float(((getattr(res_obj, "ret_total", 0.0) if not isinstance(res_obj, dict) else res_obj.get("ret_total", 0.0)) or 0.0)),
         "max_dd": float(getattr(res, "max_dd", 0.0)),
         "trades": float(len(trades)),
         "win_rate": float(np.mean(raw > 0.0)) if raw.size else 0.0,
@@ -455,26 +455,33 @@ def _sample_train_cfg(rng: random.Random, s: ExploreSettings) -> dict[str, objec
 
 
 def _sample_bt_cfg(rng: random.Random, s: ExploreSettings) -> dict[str, object]:
-    corr_enabled = bool(rng.choice(s.corr_enabled_choices))
+    corr_enabled = bool(rng.random() < 0.4) 
+    tau_entry = round(rng.uniform(0.30, 0.95), 2)
+    
     return {
-        "tau_entry": float(rng.choice(s.tau_entry_choices)),
+        "tau_entry": float(tau_entry),
         "corr_enabled": corr_enabled,
-        "corr_max_with_market": float(rng.choice(s.corr_max_with_market_choices)),
-        "corr_max_pair": float(rng.choice(s.corr_max_pair_choices)),
-        "corr_open_reduce_start": float(rng.choice(s.corr_open_reduce_start_choices)),
-        "corr_open_hard_reject": float(rng.choice(s.corr_open_hard_reject_choices)),
-        "corr_open_min_weight_mult": float(rng.choice(s.corr_open_min_weight_mult_choices)),
-        "max_positions": int(rng.choice(s.max_positions_choices)),
-        "total_exposure": float(rng.choice(s.total_exposure_choices)),
-        "max_trade_exposure": float(rng.choice(s.max_trade_exposure_choices)),
-        "min_trade_exposure": float(rng.choice(s.min_trade_exposure_choices)),
-        "exposure_multiplier": float(rng.choice(s.exposure_multiplier_choices)),
+        "corr_max_with_market": round(rng.uniform(0.50, 0.98), 2),
+        "corr_max_pair": round(rng.uniform(0.60, 0.99), 2),
+        "corr_open_reduce_start": round(rng.uniform(0.20, 0.85), 2),
+        "corr_open_hard_reject": round(rng.uniform(0.70, 0.99), 2),
+        "corr_open_min_weight_mult": round(rng.uniform(0.01, 0.60), 2),
+        "max_positions": rng.randint(2, 120),
+        "total_exposure": round(rng.uniform(0.20, 5.0), 2),
+        "max_trade_exposure": round(rng.uniform(0.01, 0.60), 2),
+        "min_trade_exposure": round(rng.uniform(0.001, 0.15), 2),
+        "exposure_multiplier": round(rng.uniform(1.0, 15.0), 1),
     }
 
 
 def run(settings: ExploreSettings | None = None) -> None:
     s = settings or ExploreSettings()
-    rng = random.Random(int(s.seed))
+    random_seed = int(s.seed)
+    # If seed is 0 or negative, we use current time to make it truly random every run
+    if random_seed <= 0:
+        random_seed = int(time.time() * 1000) % 2**32
+        
+    rng = random.Random(random_seed)
     out_root = resolve_generated_path(s.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     results_csv = out_root / s.results_csv
@@ -569,6 +576,14 @@ def run(settings: ExploreSettings | None = None) -> None:
                     "TRAIN_OVR_SNIPER_ENTRY_TOP_METRIC_QS": str(train_cfg["top_qs"]),
                     "TRAIN_OVR_SNIPER_ENTRY_TOP_METRIC_MIN_COUNT": str(train_cfg["top_min_count"]),
                 }
+                
+                # OPTIMIZATION: Only train offsets actually used in the backtest segment
+                # Each segment in walk-forward is 180 days. We need models at the START of each segment.
+                # PLUS the offset 0 (end of window) which is the model we are actually optimizing.
+                num_segments = max(1, math.ceil(int(s.days) / 180))
+                active_offsets = [(i + 1) * 180 for i in range(num_segments)]
+                env["TRAIN_OFFSETS_DAYS"] = ",".join(map(str, active_offsets))
+                
                 train_run_dir = _run_train_subprocess(env, model_dir / "train.log")
                 log.write(f"[explore] {label_id}/{model_id} train done run_dir={train_run_dir}")
             except Exception as e:
@@ -722,7 +737,7 @@ def run(settings: ExploreSettings | None = None) -> None:
                         sym_weight[str(getattr(tr, "symbol", ""))] += float(getattr(tr, "r_net", 0.0)) * float(getattr(tr, "weight", 0.0))
                     top_symbols = ",".join([s0 for s0, _ in sym_weight.most_common(10)])
                     log.write(
-                        f"[explore] {label_id}/{model_id}/{bt_id} score={score:.6f} ret={metrics.get('ret_pct', 0.0):+.2f}% "
+                        f"[explore] {label_id}/{model_id}/{bt_id} score={score:.6f} ret={metrics.get('ret_pct', 0.0):+.2%} "
                         f"dd={metrics.get('max_dd', 0.0):.2%} trades={int(metrics.get('trades', 0.0))}"
                     )
                 except Exception as e:

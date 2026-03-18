@@ -1,17 +1,22 @@
 # modules/prepare_features
 
-Feature engineering and labeling pipeline for both crypto and stocks.
+Feature engineering and labeling pipeline for the Sniper Trading System.
 
-## Main scripts / modules
-- `feature_builder.py` — computes price/volume features, EMAs, ATR, ranges.
-- `label_maker.py` — generates forward‑return labels and meta info (hit windows).
-- `dataset_export.py` — writes training matrices to Parquet/CSV for model fitting.
-- `db_ops.py` — fetch/store OHLCV windows in MySQL; chunked to avoid RAM spikes.
+## Main Scripts / Modules
+- `prepare_features.py` — computes price/volume features, EMAs, ATR, ranges.
+- `labels.py` — generates forward-return labels and meta info (hit windows).
+- `sniper_dataset.py` — writes training matrices to Parquet/Pickle for model fitting.
+- `refresh_sniper_labels_in_cache.py` — rapidly rewrites target labels for hyperparameter exploration without recalculating base OHLC features.
 
-## Usage examples
+## Usage Environment
+All interactions with this module should be done via the unified CLI in `scripts/`:
+
 ```bash
-python crypto/prepare_features_crypto.py      # uses these helpers
-python stocks/prepare_features_stocks.py      # same idea for equities
+# To build caches (downloads OHLC and generates parquets)
+python scripts/data_sync.py
+
+# To refresh labels rapidly during threshold tuning
+python scripts/refresh_labels.py
 ```
 
-The outputs land in MySQL feature tables and `data/generated/` for training/backtests.
+The outputs land in `d:\astra\cache_sniper\` for training and backtests.

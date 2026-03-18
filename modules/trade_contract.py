@@ -1,15 +1,7 @@
 # -*- coding: utf-8 -*-
-from __future__ import annotations
-
 """
-Shim para compatibilidade: importa de core.contracts.
+Re-export shim: mantém compatibilidade com `from trade_contract import ...`
+quando `modules/` está no sys.path.  O módulo real vive em config/trade_contract.py.
 """
-
-from core.contracts import TradeContract, DEFAULT_TRADE_CONTRACT
-from core.contracts.base import exit_ema_span_from_window
-
-__all__ = [
-    "TradeContract",
-    "DEFAULT_TRADE_CONTRACT",
-    "exit_ema_span_from_window",
-]
+from config.trade_contract import *  # noqa: F401,F403
+from config.trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window  # noqa: F401

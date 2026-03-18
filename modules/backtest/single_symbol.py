@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 """
@@ -57,7 +57,7 @@ def _best_run_contract() -> TradeContract:
     O timeframe efetivo vem de `crypto.trade_contract.CRYPTO_PIPELINE_CANDLE_SEC`.
     """
     try:
-        from crypto.trade_contract import (  # type: ignore
+        from config.trade_contract import (  # type: ignore
             CRYPTO_PIPELINE_CANDLE_SEC as _CRYPTO_PIPELINE_CANDLE_SEC,
             apply_crypto_pipeline_env as _apply_crypto_pipeline_env,
             build_default_crypto_contract as _build_default_crypto_contract,

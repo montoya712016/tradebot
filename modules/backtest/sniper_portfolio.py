@@ -651,7 +651,7 @@ def simulate_portfolio(
                 open_weights.pop(sym, None)
                 used_exposure = max(0.0, float(used_exposure) - float(w))
             eq = float(eq) * (1.0 + float(w) * float(r_net))
-            eq_events.append((pd.to_datetime(exit_ts), float(eq)))
+            
             out_trades.append(
                 ExecutedTrade(
                     symbol=str(sym),
@@ -664,9 +664,23 @@ def simulate_portfolio(
                 )
             )
 
+            # Bankruptcy check: if equity is below ruin threshold (1.0% of original), the account is ruined.
+            if eq < 0.01:
+                eq = 0.0
+                eq_events.append((pd.to_datetime(exit_ts), float(eq)))
+                open_heap.clear()
+                open_set.clear()
+                open_weights.clear()
+                used_exposure = 0.0
+                break
+                
+            eq_events.append((pd.to_datetime(exit_ts), float(eq)))
+
     iter_n = 0
     pevery = int(max(1, int(progress_every)))
     while entry_heap:
+        if eq < 0.01:
+            break
         ts, neg_sc, sym, i, pe0, te0, ema_span = heapq.heappop(entry_heap)
         t = pd.to_datetime(ts)
         iter_n += 1

@@ -49,7 +49,7 @@ from realtime.market_data.websocket import WsKlineIngestor
 
 # Imports opcionais (downloader, dashboard state, ngrok)
 try:
-    from crypto.binance.download_to_mysql import (
+    from data_providers.binance.download_to_mysql import (
         DownloadSettings as DLSettings,
         MySQLConfig as DLMySQLConfig,
         run as dl_run,
@@ -313,13 +313,9 @@ class LiveDecisionBot:
 
     def _load_symbols(self) -> List[str]:
         if self.settings.symbols_file:
-            try:
-                from crypto.realtime_bot import load_symbols
-                syms = load_symbols(self.settings.symbols_file)
-            except ImportError:
-                syms = []
-                if Path(self.settings.symbols_file).exists():
-                    syms = [l.strip().split(":")[0] for l in Path(self.settings.symbols_file).read_text().splitlines() if l.strip() and not l.startswith("#")]
+            syms = []
+            if Path(self.settings.symbols_file).exists():
+                syms = [l.strip().split(":")[0] for l in Path(self.settings.symbols_file).read_text().splitlines() if l.strip() and not l.startswith("#")]
         else:
             fallback = self.settings.quote_symbols_fallback or str(default_top_market_cap_path())
             min_cap = float(self.settings.min_market_cap_usd or 0.0)

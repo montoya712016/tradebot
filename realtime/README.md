@@ -11,11 +11,12 @@ Módulo responsável pela execução do bot em tempo real.
 
 ## Execução
 
-```python
-from realtime.bot.sniper import LiveDecisionBot
-from realtime.bot.settings import LiveSettings
+Este módulo não deve ser executado diretamente. Utilize os scripts unificados na raiz do projeto:
 
-settings = LiveSettings()
-bot = LiveDecisionBot(settings)
-bot.run()
+```bash
+# Para rodar o bot (paper ou live)
+python scripts/bot_live.py
+
+# Para rodar o dashboard de monitoramento
+python scripts/bot_dashboard.py
 ```

@@ -1,17 +1,21 @@
 # modules/train
 
-Model training helpers (primarily XGBoost) shared across crypto and stock workflows.
+Model training logic and walk-forward handlers.
 
 ## Modules
-- `xgb_trainer.py` — fit/eval/persist XGBoost models; supports GPU/CPU and early stopping.
-- `cv_split.py` — time-series aware cross‑validation splits.
-- `sweep_runner.py` — lightweight hyperparam sweep harness (used in `data/generated/wf_backtest_sweep`).
-- `feature_select.py` — optional feature filtering / importance reports.
+- `sniper_trainer.py` — fit/eval/persist XGBoost models; handles train/val splitting and early stopping.
+- `train_sniper_wf.py` — walk-forward orchestration. Progresses through time, training distinct models on sliding periods.
+- `wf_portfolio_explorer.py` — hyperparameter sweep harness that orchestrates dataset prep, model training, and portfolio backtesting systematically.
 
-## Typical call
-```python
-from modules.train.xgb_trainer import train_model
-model, metrics = train_model(df_features, cfg)
+## Entry Points
+This module shouldn't be executed directly. Use the unified CLI:
+
+```bash
+# Standard Walk-Forward Training
+python scripts/train.py
+
+# Hyperparameter Exploration
+python scripts/explore.py
 ```
 
-Models are saved under `models_sniper/<asset_class>/...` and later loaded by the realtime bots.
+Models are saved externally to `d:\astra\models_sniper\models\` and loaded by the backtest suites and the real-time bot.

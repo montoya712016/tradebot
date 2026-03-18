@@ -72,7 +72,7 @@
     <div class="panel-head">
       <div>
         <h2 class="panel-title">Recent backtests</h2>
-        <div class="panel-sub muted">Latest rows from random_runs.csv</div>
+        <div class="panel-sub muted" id="table-subtitle">Latest rows from random_runs.csv</div>
       </div>
       <div class="panel-actions">
         <span class="pill" id="runs-count">--</span>
@@ -82,43 +82,23 @@
       <table class="runs-table">
         <thead>
           <tr>
-            <th>Train</th>
-            <th>BT</th>
-            <th>Status</th>
-            <th class="right">Ret %</th>
-            <th class="right">DD %</th>
-            <th class="right">PF</th>
-            <th class="right">Win %</th>
-            <th class="right">Trades</th>
-            <th class="right">Tau E</th>
+            <th data-sort="train_id">Train <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
+            <th data-sort="backtest_id">BT <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
+            <th data-sort="status">Status <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
+            <th class="right" data-sort="score">Score <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)">▼</span></th>
+            <th class="right" data-sort="ret_pct">Ret % <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
+            <th class="right" data-sort="max_dd">DD % <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
+            <th class="right" data-sort="profit_factor">PF <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
+            <th class="right" data-sort="win_rate">Win % <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
+            <th class="right" data-sort="trades">Trades <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
+            <th class="right" data-sort="tau_entry">Tau E <span class="sort-icon" style="font-size:0.8em; margin-left:4px; color:var(--c-accent)"></span></th>
           </tr>
         </thead>
         <tbody id="runs-tbody"></tbody>
       </table>
     </div>
-  </section>
-
-  <section class="panel">
-    <div class="panel-head">
-      <div>
-        <h2 class="panel-title">Backtest Artifacts</h2>
-        <div class="panel-sub muted">Latest Plotly HTML / PNG outputs</div>
-      </div>
-      <div class="panel-actions">
-        <span class="pill" id="artifact-count">--</span>
-      </div>
-    </div>
-    <div class="gallery" id="artifact-grid"></div>
-    <div class="card" style="margin-top:16px;">
-      <div class="panel-head" style="padding:16px 16px 0 16px;">
-        <div>
-          <h3 class="panel-title" style="font-size:1rem;">Preview</h3>
-          <div class="panel-sub muted">Selected Plotly artifact</div>
-        </div>
-      </div>
-      <div style="padding:16px;">
-        <iframe id="artifact-preview" title="artifact preview" style="width:100%;min-height:760px;border:1px solid rgba(255,255,255,.08);border-radius:12px;background:#0b0d12;"></iframe>
-      </div>
+    <div style="text-align: center; margin-top: 16px;">
+      <button id="btn-load-more-runs" class="btn ghost">Load More</button>
     </div>
   </section>
 

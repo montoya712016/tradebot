@@ -1,16 +1,10 @@
 # modules/config
 
-Centralized config handling.
+Centralized configuration handlers and typed definitions.
 
 ## Contents
-- `base_config.py` — common dataclasses (paths, DB, model, dashboard, ngrok).
-- `loaders.py` — YAML/JSON loaders with validation and env‑var expansion.
-- `defaults.py` — sane defaults used by scripts when flags are omitted.
+- `trade_contract.py` — definitions and validation for trading parameters (SL/TP ratios, spans, offsets).
+- `symbols.py` — logic to load active universes of symbols.
 
 ## Pattern
-```python
-from modules.config.loaders import load_config
-cfg = load_config("configs/realtime_crypto.yml")
-```
-
-Configs are shared by training, backtests, and the realtime bot for consistency.
+Configurations are shared by training, backtests, and the realtime bot for absolute consistency. The modules here provide programmatic defaults that scripts can override via environment variables.

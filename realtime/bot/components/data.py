@@ -14,7 +14,7 @@ from modules.utils.time_utils import window_days_for_minutes
 
 # Optional downloader import
 try:
-    from crypto.binance.download_to_mysql import (
+    from data_providers.binance.download_to_mysql import (
         VALID_TIMEFRAMES,
         download_ohlc_threaded,
     )

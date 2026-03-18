@@ -1,17 +1,18 @@
 # modules/backtest
 
-Backtesting utilities for both single symbols and portfolios.
+Backtesting utilities for portfolio simulation and single-symbol debugging.
 
-## Key pieces
-- `portfolio_backtester.py` — multi‑symbol, capital‑aware executor; supports fee, slippage, position sizing, and walk‑forward style evaluation.
-- `single_symbol_bt.py` — fast single‑symbol simulation for debugging labels/thresholds.
-- `plot_equity.py` — helpers to plot equity curves and drawdowns.
-- `perf_metrics.py` — CAGR, max DD, Sharpe, hit‑rate, turnover, exposure stats.
+## Key Pieces
+- `sniper_portfolio.py` — multi-symbol, capital-aware executor; supports fees, slippage, position sizing, concurrency limits, and walk-forward evaluations directly from disk models.
+- `single_symbol.py` — fast single-symbol simulation for deep-dive debugging of labels/thresholds. Generates rich Plotly HTML reports.
+- `sniper_walkforward.py` — loads walk-forward models and predicts probability scores dynamically across time boundaries.
 
-## Typical use
+## Typical Use
+Use the `scripts/` interface to interact with this module:
+
 ```bash
-python modules/backtest/single_symbol_bt.py --symbol BTCUSDT --threshold 0.7
-python modules/backtest/portfolio_backtester.py --config configs/bt_crypto.yml
+# Run a portfolio backtest across all loaded assets
+python scripts/backtest.py
 ```
 
-Outputs (CSV/PNG) are written beside the config or to `data/generated/*` depending on the caller.
+Outputs (CSV metrics) and dashboard plots are written to `data/generated/`.

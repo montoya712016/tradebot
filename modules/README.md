@@ -1,14 +1,16 @@
 # modules/
 
-Shared building blocks used across training, backtesting, realtime bots, and sweep tooling.
+Shared building blocks used across feature prep, training, backtesting, and the real-time bot.
 
 ## Subpackages
-- `backtest/` — portfolio and single‑symbol backtest engines plus plotting aids.
-- `config/` — typed configuration loaders and defaults shared by scripts.
-- `prepare_features/` — feature engineering, labeling, and dataset assembly.
-- `realtime/` — websocket ingestion, decision loop helpers, dashboard server.
-- `thresholds/` — utilities to search/score entry/exit thresholds.
-- `train/` — model training helpers (XGBoost wrappers, CV, sweep support).
-- `utils/` — generic helpers: MySQL, caching, date/time, logging, etc.
+- `backtest/` — portfolio and single-symbol backtest engines.
+- `config/` — structural definitions and dynamic loading of configs (e.g., `trade_contract.py`, `symbols.py`).
+- `data_providers/` — modular integrations for external data sources (e.g., `binance/`).
+- `prepare_features/` — feature engineering, labeling, and dataset assembly mechanisms.
+- `plotting/` — tools to generate HTML visualizations and equity curves.
+- `realtime/` — dashboard state manager and API.
+- `thresholds/` — utilities to tune and search optimal threshold hyperparameters.
+- `train/` — XGBoost wrappers, walk-forward orchestrators, and exploration logic.
+- `utils/` — generic helpers: logging, parallelization, math, etc.
 
-Each subfolder has its own README with entry points and key functions.
+Each subfolder contains the core business logic. Entry points are located at the root `scripts/` directory.

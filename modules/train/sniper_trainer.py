@@ -784,7 +784,7 @@ def _train_xgb_classifier(batch: SniperBatch, params: dict) -> tuple[xgb.Booster
         try:
             callbacks.append(
                 xgb.callback.EarlyStopping(
-                    rounds=200,
+                    rounds=400,
                     metric_name="top_precision_combo",
                     data_name="val",
                     maximize=True,

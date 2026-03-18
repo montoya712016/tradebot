@@ -267,18 +267,22 @@ def _cache_dir(asset_class: str | None = None, candle_sec: int | None = None) ->
         return Path(v).expanduser().resolve()
     asset = str(asset_class or "crypto").lower()
     candle_sec = int(max(1, candle_sec or _env_int("SNIPER_CANDLE_SEC", 60)))
+    
+    tag = _timeframe_tag(candle_sec)
+    tail = int(os.getenv("SNIPER_REMOVE_TAIL_DAYS", "0") or "0")
+    if tail > 0:
+        tag = f"{tag}_tail_{tail}d"
+        
     try:
         from utils.paths import cache_sniper_root  # type: ignore
-
-        base = cache_sniper_root() / f"features_pf_{_timeframe_tag(candle_sec)}"
+        base = cache_sniper_root() / f"features_pf_{tag}"
     except Exception:
         try:
             from utils.paths import cache_sniper_root  # type: ignore[import]
-
-            base = cache_sniper_root() / f"features_pf_{_timeframe_tag(candle_sec)}"
+            base = cache_sniper_root() / f"features_pf_{tag}"
         except Exception:
             # fallback extremo (mantém compat)
-            base = _repo_root() / "cache_sniper" / f"features_pf_{_timeframe_tag(candle_sec)}"
+            base = _repo_root() / "cache_sniper" / f"features_pf_{tag}"
     if asset and asset != "crypto":
         return base / asset
     return base
@@ -651,7 +655,7 @@ def ensure_feature_cache(
             df_pf, t_stats = _build_features_for_symbol(
                 sym,
                 total_days=int(total_days),
-                remove_tail_days=0,
+                remove_tail_days=int(os.getenv("SNIPER_REMOVE_TAIL_DAYS", "0") or "0"),
                 contract=contract,
                 flags=flags_run,
                 asset_class=asset_class,
