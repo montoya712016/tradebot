@@ -105,17 +105,24 @@ def main():
         
         days_from_start = (is_end - min_date).days
         # Find the correct selection pool (snapshot of 'what was known')
+        # Calculate T-minus days for the current date
+        t_minus_now = (max_date - is_end).days
+        
         if is_fair_mode:
-            # We use the step directory that corresponds to 'days_from_start'
-            # Rounded to the nearest step available
-            valid_steps = [s for s in selection_pools.keys() if s <= days_from_start + 10]
+            # We want the step that finished its OOS window at t_minus_now.
+            # Example: step_1440d finishes its OOS at T-1260.
+            # So if t_minus_now = 1260, we want target_step = 1440.
+            target_step = t_minus_now + 180
+            
+            # Find the closest step available in pools within a reasonable margin
+            valid_steps = [s for s in selection_pools.keys() if abs(s - target_step) <= 20]
             if not valid_steps:
-                print(f"  [SKIP] No fair step data for {days_from_start} days")
+                print(f"  [SKIP] No fair step data near {target_step}d (T-{t_minus_now}d)")
                 current_date = oos_end
                 continue
-            active_step = max(valid_steps)
+            active_step = min(valid_steps, key=lambda x: abs(x - target_step))
             candidates = selection_pools[active_step]
-            print(f"[STEP] Date: {is_end.date()} | OOS: {oos_end.date()} | USING FAIR POOL: {active_step}d")
+            print(f"[STEP] Date: {is_end.date()} | T-{t_minus_now:<4} | OOS -> {oos_end.date()} | POOL: {active_step}d")
         else:
             candidates = [(tid, None) for tid in all_curves.keys()]
             print(f"[STEP] Date: {is_end.date()} | OOS: {oos_end.date()} | USING HINDSIGHT POOL")

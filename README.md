@@ -26,19 +26,19 @@ All primary operations are executed via the `scripts/` directory.
 3) Train Walk-Forward Models  
    - `python scripts/train.py` (Executes the full dataset assembly and walk-forward training pipeline)
 
-4) Backtest & Exploration  
-   - `python scripts/backtest.py` (Runs portfolio-level backtesting across available assets)
-   - `python scripts/explore.py` (Explores hyperparameter combinations across walk-forward models)
-   - `python scripts/resume_explore.py` (Auto-resumes the latest exploration run)
+4) Walk-Forward Exploration (The "Fair Universe" Protocol)  
+   - `python scripts/run_independent_step_explores.py` (Runs the orchestrator to build selection pools for 8 historical milestones)
+   - `python scripts/verify_rolling_wf.py` (Stitches the best models into a final, bias-free robustness curve)
+   - *Note: Exploration features a granular, trial-level resume system safe against interruptions.*
 
 5) Live Bot + Dashboard Execution
    - `python scripts/bot_live.py` (Runs the production trading bot in paper/live mode)
-   - `python scripts/bot_dashboard.py` (Runs the real-time web UI and ngrok tunnel for remote access)
+   - `python scripts/bot_dashboard.py` (Real-time web UI showing equity history, open positions, and latency)
 
 Dashboards
 ----------
-- **Real-time Live Bot**: Hosted via `scripts/bot_dashboard.py`. Features an interactive UI showing equity history, open positions, recent trades, and latency metrics.
-- **Walk-Forward Explorer**: Hosted automatically during `scripts/explore_monolith.py`. Shows backtest equity curves and metric tables.
+- **Real-time Live Bot**: Hosted via `scripts/bot_dashboard.py`.
+- **Fair Universe Explorer**: Launched automatically by the orchestrator. Hosted via `scripts/fair_dashboard.py`. Features an SPA with real-time trial tracking, sorting, and trade plots.
 
 Conventions and Paths
 ---------------------

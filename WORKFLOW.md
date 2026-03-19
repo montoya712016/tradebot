@@ -9,9 +9,10 @@ Run the orchestrator to explore multiple historical milestones independently. Th
 python scripts/run_independent_step_explores.py
 ```
 
-- **Objective**: Generate a pool of candidate models for each 180-day segment over the last 4 years.
-- **Monitoring**: Use the SPA Dashboard (automatically launched) to track progress, sorting trials by Score, Return, or Drawdown.
-- **Resume**: The script automatically detects finished milestones and resumes interrupted ones.
+1.  **Orquestrador de Exploração** (`run_independent_step_explores.py`):
+    -   Executa **80.000 backtests** (10.000 por milestone).
+    -   **Resumo Granular**: O sistema salva o progresso a cada backtest individual. Se você interromper (`Ctrl+C`), ele retoma exatamente de onde parou, sem perder modelos já treinados ou refreshes concluídos.
+    -   **Monitoramento**: O Dashboard SPA (lançado automaticamente) permite acompanhar os scores em tempo real.
 
 ## 2. Rolling Walk-Forward Verification
 Once all exploration steps (1440d down to 180d) are finished, run the verification script to generate the final robustness curve.

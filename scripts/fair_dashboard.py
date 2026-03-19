@@ -361,8 +361,27 @@ def index():
                     return valA - valB;
                 });
 
+                // If table already exists and we have an expanded plot, try to update surgically
+                const existingTable = document.getElementById('main-table');
+                if (existingTable && existingTable.getAttribute('data-step') === String(step) && existingTable.getAttribute('data-expanded-id') === String(state.expandedPlotId)) {
+                    rows.forEach(r => {
+                        const id = `${step}-${r.backtest_id}-${r.train_id}`;
+                        const scoreEl = document.getElementById(`score-${id}`);
+                        if (scoreEl) {
+                            scoreEl.textContent = r.score.toFixed(4);
+                            document.getElementById(`ret-${id}`).textContent = `+${(r.ret_pct * 100).toFixed(1)}%`;
+                            document.getElementById(`dd-${id}`).textContent = `${(r.max_dd * 100).toFixed(2)}%`;
+                            document.getElementById(`pf-${id}`).textContent = r.profit_factor.toFixed(2);
+                            document.getElementById(`win-${id}`).textContent = `${(r.win_rate * 100).toFixed(1)}%`;
+                            document.getElementById(`trades-${id}`).textContent = r.trades;
+                        }
+                    });
+                    // Skip full re-render to preserve iframe state (zoom)
+                    return;
+                }
+
                 const table = `
-                    <table>
+                    <table id="main-table" data-step="${step}" data-expanded-id="${state.expandedPlotId}">
                         <thead>
                             <tr>
                                 <th onclick="setSort('backtest_id')">Trial</th>
@@ -379,16 +398,16 @@ def index():
                                 const id = `${step}-${r.backtest_id}-${r.train_id}`;
                                 const isExpanded = state.expandedPlotId === id;
                                 return `
-                                    <tr class="row-clickable ${isExpanded?'row-active':''}" onclick="togglePlot('${id}')">
+                                    <tr class="row-clickable ${isExpanded?'row-active':''}" onclick="togglePlot('${id}')" id="row-${id}">
                                         <td class="metric" style="color: var(--text-muted)">${r.backtest_id}/${r.train_id}</td>
-                                        <td style="text-align: right"><span class="score-pill">${r.score.toFixed(4)}</span></td>
-                                        <td style="text-align: right; color: var(--green)" class="metric">+${(r.ret_pct * 100).toFixed(1)}%</td>
-                                        <td style="text-align: right; color: var(--red)" class="metric">${(r.max_dd * 100).toFixed(2)}%</td>
-                                        <td style="text-align: right" class="metric">${r.profit_factor.toFixed(2)}</td>
-                                        <td style="text-align: right" class="metric">${(r.win_rate * 100).toFixed(1)}%</td>
-                                        <td style="text-align: right" class="metric text-muted">${r.trades}</td>
+                                        <td style="text-align: right"><span class="score-pill" id="score-${id}">${r.score.toFixed(4)}</span></td>
+                                        <td style="text-align: right; color: var(--green)" class="metric" id="ret-${id}">+${(r.ret_pct * 100).toFixed(1)}%</td>
+                                        <td style="text-align: right; color: var(--red)" class="metric" id="dd-${id}">${(r.max_dd * 100).toFixed(2)}%</td>
+                                        <td style="text-align: right" class="metric" id="pf-${id}">${r.profit_factor.toFixed(2)}</td>
+                                        <td style="text-align: right" class="metric" id="win-${id}">${(r.win_rate * 100).toFixed(1)}%</td>
+                                        <td style="text-align: right" class="metric text-muted" id="trades-${id}">${r.trades}</td>
                                     </tr>
-                                    <tr class="iframe-row" style="display: ${isExpanded?'table-row':'none'}">
+                                    <tr class="iframe-row" id="iframe-row-${id}" style="display: ${isExpanded?'table-row':'none'}">
                                         <td colspan="7" style="padding: 0;">
                                             ${isExpanded ? `<iframe class="iframe-container" src="/artifact/${r.rel_html}"></iframe>` : ''}
                                         </td>
@@ -428,12 +447,15 @@ def artifact(relpath):
     return send_file(target, mimetype=mime or "application/octet-stream")
 
 if __name__ == "__main__":
-    # Start ngrok
-    ng_cfg = NgrokConfig()
-    ng_mgr = NgrokManager(ng_cfg)
-    ng_mgr.start()
+    # Start ngrok only in the main process (not the reloader child)
+    ng_mgr = None
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        ng_cfg = NgrokConfig()
+        ng_mgr = NgrokManager(ng_cfg)
+        ng_mgr.start()
     
     try:
-        app.run(host="127.0.0.1", port=5060)
+        app.run(host="127.0.0.1", port=5060, debug=True)
     finally:
-        ng_mgr.stop()
+        if ng_mgr:
+            ng_mgr.stop()

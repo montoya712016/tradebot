@@ -22,7 +22,8 @@ Thumbs.db
 # Outputs / artifacts
 models_sniper/
 cache_sniper/
-data/generated/
+data/
+!data/README.md
 test/out_*.png
 modules/data/generated/
 

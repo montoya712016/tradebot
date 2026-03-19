@@ -87,14 +87,18 @@ def main():
             # To test [T-m, T-(m-180)], we set simulation "Now" at T-(m-180)
             tail = max(0, m - 180)
             
-            # Consistent parameters for Fair Run
-            trials = 5
-            backtests = 60
+            # Balanced Production parameters for Fair Run
+            # Total: 10 labels * 3 models * 40 backtests = 1,200 per milestone
+            # Entire pipeline: 1,200 * 8 = 9,600 backtests (~30 hours total)
+            trials = 10
+            retrains = 3
+            backtests = 40
             
             # We override environment for run_step
             os.environ["SNIPER_REMOVE_TAIL_DAYS"] = str(tail)
             os.environ["WF_EXPLORE_DAYS"] = str(window_days)
             os.environ["WF_EXPLORE_LABEL_TRIALS"] = str(trials)
+            os.environ["WF_EXPLORE_RETRAINS_PER_LABEL"] = str(retrains)
             os.environ["WF_EXPLORE_BACKTESTS_PER_RETRAIN"] = str(backtests)
             
             success = run_step(

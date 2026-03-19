@@ -490,173 +490,126 @@ def run(settings: ExploreSettings | None = None) -> None:
     log.write(f"[explore] out_root={out_root}")
     log.write(f"[explore] seed={s.seed} label_trials={s.max_label_trials} retrains_per_label={s.retrains_per_label} backtests_per_retrain={s.backtests_per_retrain}")
 
-    start_label_idx = 1
-    while (out_root / f"label_{start_label_idx:03d}").exists():
-        start_label_idx += 1
-        
-    if start_label_idx > s.max_label_trials:
-        log.write(f"[explore] Already reached max_label_trials={s.max_label_trials}. Increase WF_EXPLORE_LABEL_TRIALS to run more.")
-        return
+    finished_set = set() # (stage, label_id, model_id, backtest_id)
+    train_run_dirs = {} # (label_id, model_id) -> run_dir
+    if results_csv.exists():
+        try:
+            df_old = pd.read_csv(results_csv)
+            # Ensure columns are treated as strings to avoid issues
+            for _, row in df_old.iterrows():
+                st = str(row.get("stage", ""))
+                lid = str(row.get("label_id", ""))
+                mid = str(row.get("model_id", "")).replace("nan", "")
+                bid = str(row.get("backtest_id", "")).replace("nan", "")
+                if str(row.get("status", "")) == "ok":
+                    finished_set.add((st, lid, mid, bid))
+                    if st == "train" and lid and mid:
+                        train_run_dirs[(lid, mid)] = str(row.get("train_run_dir", ""))
+            log.write(f"[explore] Loaded {len(finished_set)} existing successful stages from CSV.")
+        except Exception as e:
+            log.write(f"[explore] Warning: Could not load existing CSV for resume: {e}")
 
-    for label_idx in range(start_label_idx, int(s.max_label_trials) + 1):
+    for label_idx in range(1, int(s.max_label_trials) + 1):
         label_id = f"label_{label_idx:03d}"
         label_dir = out_root / label_id
-        label_dir.mkdir(parents=True, exist_ok=True)
         label_cfg = _sample_label_cfg(rng, s)
-        contract = _build_contract(
-            candle_sec=int(s.candle_sec),
-            label_profit_thr=float(label_cfg["label_profit_thr"]),
-            exit_span_min=int(label_cfg["exit_span_min"]),
-            exit_offset=float(label_cfg["exit_offset"]),
-        )
-        start_utc = _utc_now_iso()
-        status = "ok"
-        err = ""
-        refresh_info: dict[str, object] = {}
-        try:
-            log.write(f"[explore] {label_id} refresh start profit_thr={label_cfg['label_profit_thr']} exit_span={label_cfg['exit_span_min']} offset={label_cfg['exit_offset']}")
-            refresh_info = _refresh_labels(contract, int(s.candle_sec))
-            log.write(f"[explore] {label_id} refresh done ok={refresh_info.get('ok', 0)} fail={refresh_info.get('fail', 0)}")
-        except Exception as e:
-            status = "error"
-            err = f"{type(e).__name__}: {e}"
-            (label_dir / "refresh_error.txt").write_text(err, encoding="utf-8")
-            log.write(f"[explore] {label_id} refresh error {err}")
-        end_utc = _utc_now_iso()
-        _append_csv(
-            results_csv,
-            {
-                "label_id": label_id,
-                "model_id": "",
-                "backtest_id": "",
-                "train_id": label_id,
-                "stage": "refresh",
-                "status": status,
-                "start_utc": start_utc,
-                "end_utc": end_utc,
-                "duration_sec": max(0.0, (pd.to_datetime(end_utc) - pd.to_datetime(start_utc)).total_seconds()),
-                "seed": s.seed,
-                "error": err,
-                "label_profit_thr": label_cfg["label_profit_thr"],
-                "exit_ema_span_min": label_cfg["exit_span_min"],
-                "exit_ema_init_offset_pct": label_cfg["exit_offset"],
-            },
-        )
+        
+        if ("refresh", label_id, "", "") in finished_set:
+            log.write(f"[explore] {label_id} refresh skip (already done)")
+            status = "ok"
+        else:
+            label_dir.mkdir(parents=True, exist_ok=True)
+            contract = _build_contract(
+                candle_sec=int(s.candle_sec),
+                label_profit_thr=float(label_cfg["label_profit_thr"]),
+                exit_span_min=int(label_cfg["exit_span_min"]),
+                exit_offset=float(label_cfg["exit_offset"]),
+            )
+            start_utc = _utc_now_iso()
+            status = "ok"
+            err = ""
+            refresh_info: dict[str, object] = {}
+            try:
+                log.write(f"[explore] {label_id} refresh start profit_thr={label_cfg['label_profit_thr']} exit_span={label_cfg['exit_span_min']} offset={label_cfg['exit_offset']}")
+                refresh_info = _refresh_labels(contract, int(s.candle_sec))
+                log.write(f"[explore] {label_id} refresh done ok={refresh_info.get('ok', 0)} fail={refresh_info.get('fail', 0)}")
+            except Exception as e:
+                status = "error"
+                err = f"{type(e).__name__}: {e}"
+                (label_dir / "refresh_error.txt").write_text(err, encoding="utf-8")
+                log.write(f"[explore] {label_id} refresh error {err}")
+            end_utc = _utc_now_iso()
+            _append_csv(
+                results_csv,
+                {
+                    "label_id": label_id,
+                    "model_id": "",
+                    "backtest_id": "",
+                    "train_id": label_id,
+                    "stage": "refresh",
+                    "status": status,
+                    "start_utc": start_utc,
+                    "end_utc": end_utc,
+                    "duration_sec": max(0.0, (pd.to_datetime(end_utc) - pd.to_datetime(start_utc)).total_seconds()),
+                    "seed": s.seed,
+                    "error": err,
+                    "label_profit_thr": label_cfg["label_profit_thr"],
+                    "exit_ema_span_min": label_cfg["exit_span_min"],
+                    "exit_ema_init_offset_pct": label_cfg["exit_offset"],
+                },
+            )
+        
         if status != "ok":
             continue
 
         for model_idx in range(1, int(s.retrains_per_label) + 1):
             model_id = f"model_{model_idx:03d}"
             model_dir = label_dir / model_id
-            model_dir.mkdir(parents=True, exist_ok=True)
             train_cfg = _sample_train_cfg(rng, s)
-            train_start = _utc_now_iso()
-            train_status = "ok"
-            train_err = ""
-            train_run_dir = ""
-            try:
-                log.write(
-                    f"[explore] {label_id}/{model_id} train start neg_per_pos={train_cfg['neg_per_pos']} "
-                    f"tail_blend={train_cfg['tail_blend']} tail_boost={train_cfg['tail_boost']} qs={train_cfg['top_qs']}"
-                )
-                env = {
-                    "CRYPTO_PIPELINE_CANDLE_SEC": str(int(s.candle_sec)),
-                    "SNIPER_CANDLE_SEC": str(int(s.candle_sec)),
-                    "PF_CRYPTO_CANDLE_SEC": str(int(s.candle_sec)),
-                    "CRYPTO_ENTRY_LABEL_MIN_PROFIT_PCT": str(label_cfg["label_profit_thr"]),
-                    "CRYPTO_EXIT_EMA_SPAN_MINUTES": str(label_cfg["exit_span_min"]),
-                    "CRYPTO_EXIT_EMA_INIT_OFFSET_PCT": str(label_cfg["exit_offset"]),
-                    "TRAIN_ENTRY_RATIO_NEG_PER_POS": str(train_cfg["neg_per_pos"]),
-                    "TRAIN_REFRESH_LABELS": "0",
-                    "TRAIN_MAX_SYMBOLS": "0" if int(s.max_symbols) <= 0 else str(int(s.max_symbols)),
-                    "SNIPER_CACHE_WORKERS": str(int(s.safe_threads)),
-                    "SNIPER_DATASET_WORKERS": str(int(s.safe_threads)),
-                    "TRAIN_OVR_SNIPER_ENTRY_CALIB_TAIL_BLEND": str(train_cfg["tail_blend"]),
-                    "TRAIN_OVR_SNIPER_ENTRY_CALIB_TAIL_BOOST": str(train_cfg["tail_boost"]),
-                    "TRAIN_OVR_SNIPER_ENTRY_TOP_METRIC_QS": str(train_cfg["top_qs"]),
-                    "TRAIN_OVR_SNIPER_ENTRY_TOP_METRIC_MIN_COUNT": str(train_cfg["top_min_count"]),
-                }
-                
-                # OPTIMIZATION: Only train offsets actually used in the backtest segment
-                # Each segment in walk-forward is 180 days. We need models at the START of each segment.
-                # PLUS the offset 0 (end of window) which is the model we are actually optimizing.
-                num_segments = max(1, math.ceil(int(s.days) / 180))
-                active_offsets = [(i + 1) * 180 for i in range(num_segments)]
-                env["TRAIN_OFFSETS_DAYS"] = ",".join(map(str, active_offsets))
-                
-                train_run_dir = _run_train_subprocess(env, model_dir / "train.log")
-                log.write(f"[explore] {label_id}/{model_id} train done run_dir={train_run_dir}")
-            except Exception as e:
-                train_status = "error"
-                train_err = f"{type(e).__name__}: {e}"
-                log.write(f"[explore] {label_id}/{model_id} train error {train_err}")
-            train_end = _utc_now_iso()
-            _append_csv(
-                results_csv,
-                {
-                    "label_id": label_id,
-                    "model_id": model_id,
-                    "backtest_id": "",
-                    "train_id": f"{label_id}/{model_id}",
-                    "stage": "train",
-                    "status": train_status,
-                    "start_utc": train_start,
-                    "end_utc": train_end,
-                    "duration_sec": max(0.0, (pd.to_datetime(train_end) - pd.to_datetime(train_start)).total_seconds()),
-                    "seed": s.seed,
-                    "train_run_dir": train_run_dir,
-                    "error": train_err,
-                    "label_profit_thr": label_cfg["label_profit_thr"],
-                    "exit_ema_span_min": label_cfg["exit_span_min"],
-                    "exit_ema_init_offset_pct": label_cfg["exit_offset"],
-                    "entry_ratio_neg_per_pos": train_cfg["neg_per_pos"],
-                    "calib_tail_blend": train_cfg["tail_blend"],
-                    "calib_tail_boost": train_cfg["tail_boost"],
-                    "top_metric_qs": train_cfg["top_qs"],
-                    "top_metric_min_count": train_cfg["top_min_count"],
-                },
-            )
-            if train_status != "ok":
-                continue
-
-            prepared_portfolio = None
-            try:
-                prepare_cfg = _default_portfolio_cfg()
-                prepare_cfg.corr_filter_enabled = True
-                prepare_cfg.corr_open_filter_enabled = True
-                contract_prepare = _build_contract(
-                    candle_sec=int(s.candle_sec),
-                    label_profit_thr=float(label_cfg["label_profit_thr"]),
-                    exit_span_min=int(label_cfg["exit_span_min"]),
-                    exit_offset=float(label_cfg["exit_offset"]),
-                )
-                prepare_settings = PortfolioDemoSettings(
-                    asset_class="crypto",
-                    run_dir=train_run_dir,
-                    days=int(s.days),
-                    max_symbols=int(s.max_symbols),
-                    total_days_cache=0,
-                    symbols=[],
-                    cfg=prepare_cfg,
-                    save_plot=False,
-                    plot_out=None,
-                    override_tau_entry=None,
-                    candle_sec=int(s.candle_sec),
-                    contract=contract_prepare,
-                    long_only=True,
-                    require_feature_cache=True,
-                    rebuild_on_score_error=False,
-                    align_global_window=True,
-                )
-                log.write(f"[explore] {label_id}/{model_id} prepare start")
-                prepared_portfolio = prepare_portfolio_data(prepare_settings)
-                log.write(
-                    f"[explore] {label_id}/{model_id} prepare done symbols={prepared_portfolio.symbols_total} "
-                    f"tau_default={prepared_portfolio.tau_entry_default:.2f}"
-                )
-            except Exception as e:
-                train_err = f"prepare_portfolio failed: {type(e).__name__}: {e}"
-                log.write(f"[explore] {label_id}/{model_id} prepare error {train_err}")
+            
+            if ("train", label_id, model_id, "") in finished_set:
+                log.write(f"[explore] {label_id}/{model_id} train skip (already done)")
+                train_status = "ok"
+                train_run_dir = train_run_dirs.get((label_id, model_id), "")
+            else:
+                model_dir.mkdir(parents=True, exist_ok=True)
+                train_start = _utc_now_iso()
+                train_status = "ok"
+                train_err = ""
+                train_run_dir = ""
+                try:
+                    log.write(
+                        f"[explore] {label_id}/{model_id} train start neg_per_pos={train_cfg['neg_per_pos']} "
+                        f"tail_blend={train_cfg['tail_blend']} tail_boost={train_cfg['tail_boost']} qs={train_cfg['top_qs']}"
+                    )
+                    env = {
+                        "CRYPTO_PIPELINE_CANDLE_SEC": str(int(s.candle_sec)),
+                        "SNIPER_CANDLE_SEC": str(int(s.candle_sec)),
+                        "PF_CRYPTO_CANDLE_SEC": str(int(s.candle_sec)),
+                        "CRYPTO_ENTRY_LABEL_MIN_PROFIT_PCT": str(label_cfg["label_profit_thr"]),
+                        "CRYPTO_EXIT_EMA_SPAN_MINUTES": str(label_cfg["exit_span_min"]),
+                        "CRYPTO_EXIT_EMA_INIT_OFFSET_PCT": str(label_cfg["exit_offset"]),
+                        "TRAIN_ENTRY_RATIO_NEG_PER_POS": str(train_cfg["neg_per_pos"]),
+                        "TRAIN_REFRESH_LABELS": "0",
+                        "TRAIN_MAX_SYMBOLS": "0" if int(s.max_symbols) <= 0 else str(int(s.max_symbols)),
+                        "SNIPER_CACHE_WORKERS": str(int(s.safe_threads)),
+                        "SNIPER_DATASET_WORKERS": str(int(s.safe_threads)),
+                        "TRAIN_OVR_SNIPER_ENTRY_CALIB_TAIL_BLEND": str(train_cfg["tail_blend"]),
+                        "TRAIN_OVR_SNIPER_ENTRY_CALIB_TAIL_BOOST": str(train_cfg["tail_boost"]),
+                        "TRAIN_OVR_SNIPER_ENTRY_TOP_METRIC_QS": str(train_cfg["top_qs"]),
+                        "TRAIN_OVR_SNIPER_ENTRY_TOP_METRIC_MIN_COUNT": str(train_cfg["top_min_count"]),
+                    }
+                    num_segments = max(1, math.ceil(int(s.days) / 180))
+                    active_offsets = [(i + 1) * 180 for i in range(num_segments)]
+                    env["TRAIN_OFFSETS_DAYS"] = ",".join(map(str, active_offsets))
+                    
+                    train_run_dir = _run_train_subprocess(env, model_dir / "train.log")
+                    log.write(f"[explore] {label_id}/{model_id} train done run_dir={train_run_dir}")
+                except Exception as e:
+                    train_status = "error"
+                    train_err = f"{type(e).__name__}: {e}"
+                    log.write(f"[explore] {label_id}/{model_id} train error {train_err}")
+                train_end = _utc_now_iso()
                 _append_csv(
                     results_csv,
                     {
@@ -665,10 +618,10 @@ def run(settings: ExploreSettings | None = None) -> None:
                         "backtest_id": "",
                         "train_id": f"{label_id}/{model_id}",
                         "stage": "train",
-                        "status": "error",
-                        "start_utc": train_end,
-                        "end_utc": _utc_now_iso(),
-                        "duration_sec": 0.0,
+                        "status": train_status,
+                        "start_utc": train_start,
+                        "end_utc": train_end,
+                        "duration_sec": max(0.0, (pd.to_datetime(train_end) - pd.to_datetime(train_start)).total_seconds()),
                         "seed": s.seed,
                         "train_run_dir": train_run_dir,
                         "error": train_err,
@@ -682,13 +635,57 @@ def run(settings: ExploreSettings | None = None) -> None:
                         "top_metric_min_count": train_cfg["top_min_count"],
                     },
                 )
+            if train_status != "ok":
                 continue
 
+            prepared_portfolio = None
             for bt_idx in range(1, int(s.backtests_per_retrain) + 1):
                 bt_id = f"bt_{bt_idx:03d}"
                 bt_dir = model_dir / bt_id
-                bt_dir.mkdir(parents=True, exist_ok=True)
                 bt_cfg = _sample_bt_cfg(rng, s)
+                if ("backtest", label_id, model_id, bt_id) in finished_set:
+                    continue
+                
+                if prepared_portfolio is None:
+                    try:
+                        prepare_cfg = _default_portfolio_cfg()
+                        prepare_cfg.corr_filter_enabled = True
+                        prepare_cfg.corr_open_filter_enabled = True
+                        contract_prepare = _build_contract(
+                            candle_sec=int(s.candle_sec),
+                            label_profit_thr=float(label_cfg["label_profit_thr"]),
+                            exit_span_min=int(label_cfg["exit_span_min"]),
+                            exit_offset=float(label_cfg["exit_offset"]),
+                        )
+                        prepare_settings = PortfolioDemoSettings(
+                            asset_class="crypto",
+                            run_dir=train_run_dir,
+                            days=int(s.days),
+                            max_symbols=int(s.max_symbols),
+                            total_days_cache=0,
+                            symbols=[],
+                            cfg=prepare_cfg,
+                            save_plot=False,
+                            plot_out=None,
+                            override_tau_entry=None,
+                            candle_sec=int(s.candle_sec),
+                            contract=contract_prepare,
+                            long_only=True,
+                            require_feature_cache=True,
+                            rebuild_on_score_error=False,
+                            align_global_window=True,
+                        )
+                        log.write(f"[explore] {label_id}/{model_id} prepare start")
+                        prepared_portfolio = prepare_portfolio_data(prepare_settings)
+                        log.write(
+                            f"[explore] {label_id}/{model_id} prepare done symbols={prepared_portfolio.symbols_total} "
+                            f"tau_default={prepared_portfolio.tau_entry_default:.2f}"
+                        )
+                    except Exception as e:
+                        log.write(f"[explore] {label_id}/{model_id} prepare error {e}")
+                        break # Skip this model's backtests if prepare fails
+                
+                bt_dir.mkdir(parents=True, exist_ok=True)
                 bt_start = _utc_now_iso()
                 bt_status = "ok"
                 bt_err = ""
