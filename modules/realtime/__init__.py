@@ -1,7 +1,3 @@
 """
-Sistema em tempo real (dashboard).
-
-Entry points:
-- python modules/realtime/run_dashboard.py --demo
-- python modules/realtime/realtime_dashboard_ngrok_monolith.py
+Realtime package used by `scripts/bot_live.py` and `scripts/bot_dashboard.py`.
 """

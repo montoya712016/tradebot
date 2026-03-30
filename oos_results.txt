@@ -1,4 +1,0 @@
-Return: +22.60%
-Max DD: 0.00%
-Trades: 92
-Plot: d:\astra\tradebot\data\generated\fair_wf_explore\manual_oos_step_1260d.html

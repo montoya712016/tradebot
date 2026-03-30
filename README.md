@@ -1,52 +1,84 @@
-Sniper Tradebot — Repository Map & Quickstart
-==============================================
+Sniper Tradebot
+===============
 
-Este repositório está organizado seguindo uma arquitetura modular e profissional, separando claramente a lógica de negócio dos pontos de entrada de execução. A estrutura é dividida em cinco pilares principais: `scripts/` contém todos os comandos unificados para operação do sistema (treino, backtest, bot live); `modules/` concentra a lógica compartilhada de domínio (limpeza de dados, engenharia de features, modelos); `core/` define os contratos base e classes fundamentais; `realtime/` gerencia o bot de execução em tempo real e o dashboard; e `data/` centraliza todos os artefatos de execução, logs e estados temporários, mantendo a raiz do projeto limpa e organizada.
+Repositório do pipeline completo de crypto walk-forward:
 
-This repository hosts a full walk-forward trading stack: data ingestion, feature prep, model training, backtesting, threshold tuning, and a real-time bot with a live dashboard. Models and large caches live outside the repo (e.g., `d:\astra\models_sniper\`).
+1. baixar OHLC e manter caches
+2. preparar features e labels
+3. treinar modelos walk-forward
+4. explorar parâmetros de edge por step histórico
+5. validar com OOS walk-forward
+6. operar no bot live/paper com dashboard
 
-Top-Level Folders
------------------
-- `scripts/` - Unified CLI entry points for all core operations (training, backtesting, live bot, exploration).
-- `modules/` - Shared business logic and domain code (backtest, config, data_providers, prepare_features, train, etc.).
-- `core/` - Foundational contracts and base executor classes.
-- `realtime/` - Real-time bot logic, market data ingestion, and dashboard UI.
-- `data/` - Runtime artifacts (equity history, live state, generated plots, run logs).
+Estrutura
+---------
+- `scripts/` - entrypoints oficiais.
+- `modules/` - lógica compartilhada de dados, treino, backtest e realtime.
+- `realtime/` - implementação do bot live/paper.
+- `core/` - contratos e executores base.
+- `data/` - artefatos gerados, relatórios, estado e logs locais.
 
-End-to-End Flow (Quick Map)
----------------------------
-All primary operations are executed via the `scripts/` directory.
+Fluxo principal
+---------------
+1. **Sincronizar dados / preencher caches**
+   - `python scripts/data_sync.py`
 
-1) Data Sync & Cache Building  
-   - `python scripts/data_sync.py` (Downloads OHLC data for top symbols to MySQL and builds parquet caches)
+2. **Refresh de labels**
+   - `python scripts/refresh_labels.py`
 
-2) Target Labels Generation
-   - `python scripts/refresh_labels.py` (Applies the trade contract to generate entry/exit labels for training)
+3. **Treino walk-forward**
+   - `python scripts/train.py`
 
-3) Train Walk-Forward Models  
-   - `python scripts/train.py` (Executes the full dataset assembly and walk-forward training pipeline)
+4. **Exploração fair por steps**
+   - `python scripts/run_independent_step_explores.py`
+   - dashboard automático: `python scripts/fair_dashboard.py`
 
-4) Walk-Forward Exploration (The "Fair Universe" Protocol)  
-   - `python scripts/run_independent_step_explores.py` (Runs the orchestrator to build selection pools for 8 historical milestones)
-   - `python scripts/verify_rolling_wf.py` (Stitches the best models into a final, bias-free robustness curve)
-   - *Note: Exploration features a granular, trial-level resume system safe against interruptions.*
+5. **Validação OOS walk-forward**
+   - `python scripts/run_oos_walkforward.py`
 
-5) Live Bot + Dashboard Execution
-   - `python scripts/bot_live.py` (Runs the production trading bot in paper/live mode)
-   - `python scripts/bot_dashboard.py` (Real-time web UI showing equity history, open positions, and latency)
+6. **Bot live/paper e dashboard**
+   - `python scripts/bot_live.py`
+   - `python scripts/bot_dashboard.py`
 
-Dashboards
-----------
-- **Real-time Live Bot**: Hosted via `scripts/bot_dashboard.py`.
-- **Fair Universe Explorer**: Launched automatically by the orchestrator. Hosted via `scripts/fair_dashboard.py`. Features an SPA with real-time trial tracking, sorting, and trade plots.
+Fair Explore v5
+---------------
+O explore atual foi simplificado para separar melhor edge de treino e risco.
 
-Conventions and Paths
+- Steps explorados: `1440, 1260, 1080, 900, 720, 540, 360`
+- Segmento-base de validação: `180` dias
+- Root padrão: `data/generated/fair_wf_explore_v5/`
+
+Parâmetros otimizados no explore:
+- `label_profit_thr`
+- `exit_ema_span_min`
+- `exit_ema_init_offset_pct`
+- `tau_entry`
+
+Parâmetros fixos de treino:
+- `entry_ratio_neg_per_pos = 6.0`
+- `calib_tail_blend = 0.70`
+- `calib_tail_boost = 2.25`
+
+Política fixa de risco no explore:
+- `max_positions = 10`
+- `total_exposure = 1.00`
+- `max_trade_exposure = 0.10`
+
+Busca atual:
+- `49` refreshes por step
+- `1` retrain por refresh
+- `26` backtests por refresh
+- `1` geração por step
+
+Os `49` refreshes não são mais uma busca puramente aleatória. O explorer usa uma cobertura determinística e bem distribuída do grid de contratos/labels, e para cada refresh varre `tau` de `0.70` a `0.95` em passo `0.01`.
+
+Convensões de storage
 ---------------------
-- **Logs & State**: All runtime states (`state.json`), intermediate cache configs, and logs are kept strictly in `data/`.
-- **Models**: Saved externally to `d:\astra\models_sniper\models\`.
-- **Feature Parquets**: Saved externally to `D:\astra\cache_sniper\`.
+- modelos: `D:\astra\models_sniper\crypto\`
+- caches de features / labels: `D:\astra\cache_sniper\`
+- artefatos gerados do repositório: `data/generated/`
 
-Pro-Tips
---------
-- Use `python scripts/contar_linhas.py` for a quick breakdown of repository size and code statistics.
-- Environment variables override default configurations. See module definitions for specific `SNIPER_*` keys.
+Observações
+-----------
+- `scripts/backtest.py`, `scripts/train.py` e `scripts/refresh_labels.py` são entrypoints úteis, mas hoje carregam presets opinativos; o workflow fair principal é dado por `run_independent_step_explores.py` + `run_oos_walkforward.py`.
+- Scripts legados e utilitários ad hoc antigos foram removidos do branch atual. Se algo precisar voltar, recupere via Git.

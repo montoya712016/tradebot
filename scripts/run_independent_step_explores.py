@@ -366,13 +366,14 @@ def main():
                 )
                 success_count += 1
             else:
-                print(f"[FATAL] Step {m}d ended without reaching the final 2500-backtest target.")
+                target_bt = TARGET_LABEL_TRIALS * TARGET_RETRAINS_PER_LABEL * TARGET_BACKTESTS_PER_RETRAIN
+                print(f"[FATAL] Step {m}d ended without reaching the final {target_bt}-backtest target.")
                 break
                 
         print(f"\n{'='*60}")
         print(f"FAIR EXPLORATION STATUS: {success_count}/{len(milestones)} steps successful.")
         if success_count == len(milestones):
-            print("You can now run 'verify_rolling_wf.py' to see the 100% fair robustness curve.")
+            print("You can now run 'run_oos_walkforward.py' to see the fair OOS walk-forward curve.")
         print(f"{'='*60}\n")
         
     finally:

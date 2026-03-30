@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Shim para compatibilidade: importa de realtime.bot.sniper.
+CLI wrapper para o bot live/paper.
 """
 from __future__ import annotations
 

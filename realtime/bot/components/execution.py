@@ -6,12 +6,11 @@ import time
 from typing import Dict, Any, Optional
 from realtime.bot.settings import LiveSettings
 
-# Executor imports
-from modules.realtime.realtime_dashboard_ngrok_monolith import (
+from realtime.bot.services.executors import (
     BaseExecutor,
-    PaperExecutor,
-    BinanceExecutor,
     BinanceFuturesExecutor,
+    BinanceSpotExecutor,
+    PaperTradingExecutor,
 )
 
 log = logging.getLogger("realtime.components.execution")
@@ -34,7 +33,7 @@ class ExecutionManager:
         mode = str(self.settings.trade_mode or "paper").lower()
         log.info("[exec] Iniciando executor modo=%s", mode)
         if mode == "binance_spot":
-            return BinanceExecutor(
+            return BinanceSpotExecutor(
                 api_key=self.settings.binance_api_key,
                 api_secret=self.settings.binance_api_secret,
                 dry_run=False,
@@ -47,7 +46,9 @@ class ExecutionManager:
                 leverage=int(self.settings.leverage or 1),
             )
         else:
-            return PaperExecutor(initial_cash=float(self.settings.paper_balance or 10_000.0))
+            return PaperTradingExecutor(
+                initial_cash=float(getattr(self.settings, "paper_balance", 10_000.0) or 10_000.0)
+            )
 
     def load_state(self, positions: Dict, trades: list):
         """Loads positions and trades from persistence."""
@@ -132,7 +133,7 @@ class ExecutionManager:
             
             # Paper trading constraint
             available_cash = float(getattr(self.executor, "cash", 0.0))
-            if isinstance(self.executor, PaperExecutor):
+            if isinstance(self.executor, PaperTradingExecutor):
                 notional = min(notional, available_cash)
 
             if notional <= 0:

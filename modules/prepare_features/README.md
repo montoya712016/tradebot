@@ -1,22 +1,17 @@
 # modules/prepare_features
 
-Feature engineering and labeling pipeline for the Sniper Trading System.
+Pipeline de preparação de dados para treino e backtest.
 
-## Main Scripts / Modules
-- `prepare_features.py` — computes price/volume features, EMAs, ATR, ranges.
-- `labels.py` — generates forward-return labels and meta info (hit windows).
-- `sniper_dataset.py` — writes training matrices to Parquet/Pickle for model fitting.
-- `refresh_sniper_labels_in_cache.py` — rapidly rewrites target labels for hyperparameter exploration without recalculating base OHLC features.
+## Peças principais
+- `data.py` - leitura de OHLC, caches e acesso a parquet/pickle.
+- `prepare_features.py` - cálculo de features.
+- `labels.py` - geração de labels e metadados forward-looking a partir do contrato.
+- `refresh_sniper_labels_in_cache.py` - refresh rápido de labels reaproveitando features já prontas.
+- `sniper_dataset.py` - montagem dos datasets supervisionados.
 
-## Usage Environment
-All interactions with this module should be done via the unified CLI in `scripts/`:
+## Como isso entra no workflow
+- `scripts/data_sync.py` preenche OHLC/caches.
+- `scripts/refresh_labels.py` regrava labels para um contrato específico.
+- `scripts/train.py` e `scripts/explore.py` usam esse pacote para montar datasets de treino.
 
-```bash
-# To build caches (downloads OHLC and generates parquets)
-python scripts/data_sync.py
-
-# To refresh labels rapidly during threshold tuning
-python scripts/refresh_labels.py
-```
-
-The outputs land in `d:\astra\cache_sniper\` for training and backtests.
+No fair explore `v5`, cada refresh muda apenas o contrato/labeling (`label_profit_thr`, `exit_ema_span_min`, `exit_ema_init_offset_pct`), e o sweep de `tau` fica para os backtests.

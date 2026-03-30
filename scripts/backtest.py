@@ -128,9 +128,8 @@ def main() -> None:
         exclude_symbols = sorted(set(exclude_symbols).union(DEFAULT_PORTFOLIO_BAD_SYMBOLS))
     contract = build_default_crypto_contract(candle_sec)
     cfg = _default_portfolio_cfg()
-    # Alinhamento exato com label_017 do Explore:
-    # Vencedores costumam ter seletividade via tau, mas filtros de corr desabilitados
-    # ou configurados manualmente de forma permissiva.
+    # Preset opinativo para inspecao rapida de portfolio.
+    # A validacao fair oficial deve ser feita por `scripts/run_oos_walkforward.py`.
     cfg.max_positions = 18
     cfg.total_exposure = 0.53
     cfg.max_trade_exposure = 0.15

@@ -1,19 +1,16 @@
-# realtime/
+# modules/realtime
 
-Helpers used by the live real-time bot (via `scripts/bot_live.py`) and its dashboards.
+Suporte ao bot live/paper e ao dashboard realtime.
 
-## Components
-- `bot/` — logical components of the Sniper trading bot (decision loop, settings loader, etc.).
-- `market_data/` — fetching active streaming data, rolling OHLC windows, REST backfill logic for gaps.
-- `dashboard_server.py` — Flask server exposing the React-lite UI and state APIs (`/api/ohlc_window`, `/api/state`, etc.).
-- `realtime_dashboard_ngrok_monolith.py` — orchestrates the Flask UI to be exposed securely over ngrok to the public internet.
+## Componentes
+- `dashboard_server.py` - servidor Flask com APIs e UI leve de monitoramento.
+- `dashboard_state.py` - estado compartilhado do dashboard.
+- `realtime_dashboard_ngrok_monolith.py` - helpers internos de ngrok e execução ainda usados por partes do runtime.
 
-## Execution
-Real-time processes should be launched via the central unified scripts:
+## Entry points públicos
 ```bash
-# To run the live (or paper) trading bot
 python scripts/bot_live.py
-
-# To host the dashboard monitoring it
 python scripts/bot_dashboard.py
 ```
+
+O fluxo suportado hoje passa pelos scripts em `scripts/`, não pela execução direta de módulos internos.

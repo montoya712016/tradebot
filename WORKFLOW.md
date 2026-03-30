@@ -1,30 +1,70 @@
-# Fair Universe Protocol: Exploration Workflow
+# Fair Explore Workflow
 
-This document outlines the professional, bias-free workflow for trading strategy exploration and validation.
+Este documento descreve o workflow atual de exploração e validação fair usado no repositório.
 
-## 1. Multi-Generation Exploration
-Run the orchestrator to explore multiple historical milestones independently. This ensures each period is treated as a contemporaneous "Fair Universe".
+## 1. Exploração por steps independentes
 
 ```powershell
 python scripts/run_independent_step_explores.py
 ```
 
-1.  **Orquestrador de Exploração** (`run_independent_step_explores.py`):
-    -   Executa **80.000 backtests** (10.000 por milestone).
-    -   **Resumo Granular**: O sistema salva o progresso a cada backtest individual. Se você interromper (`Ctrl+C`), ele retoma exatamente de onde parou, sem perder modelos já treinados ou refreshes concluídos.
-    -   **Monitoramento**: O Dashboard SPA (lançado automaticamente) permite acompanhar os scores em tempo real.
+O orquestrador roda cada step histórico de forma independente e gravável:
 
-## 2. Rolling Walk-Forward Verification
-Once all exploration steps (1440d down to 180d) are finished, run the verification script to generate the final robustness curve.
+- steps: `1440, 1260, 1080, 900, 720, 540, 360`
+- root padrão: `data/generated/fair_wf_explore_v5/`
+- resume granular por `refresh`, `train` e `backtest`
+- dashboard automático com acompanhamento em tempo real
+
+## 2. Como a v5 busca parâmetros
+
+Na `v5`, o explore não tenta mais otimizar treino e risco ao mesmo tempo.
+
+Parâmetros de edge otimizados:
+- `label_profit_thr`
+- `exit_ema_span_min`
+- `exit_ema_init_offset_pct`
+- `tau_entry`
+
+Parâmetros de treino fixos:
+- `entry_ratio_neg_per_pos = 6.0`
+- `calib_tail_blend = 0.70`
+- `calib_tail_boost = 2.25`
+
+Parâmetros de risco fixos:
+- `max_positions = 10`
+- `total_exposure = 1.00`
+- `max_trade_exposure = 0.10`
+
+Plano por step:
+- `49` refreshes
+- `1` retrain por refresh
+- `26` backtests por refresh
+
+Total por step:
+- `49` refreshes
+- `49` treinos
+- `1274` backtests
+
+A busca deixou de ser puramente aleatória. Os refreshes percorrem um subconjunto determinístico e espalhado do grid completo de labels/contrato, enquanto cada refresh varre todo o grid de `tau` (`0.70..0.95`, passo `0.01`).
+
+## 3. Validação OOS walk-forward
+
+Depois de concluir os steps desejados:
 
 ```powershell
-python scripts/verify_rolling_wf.py
+python scripts/run_oos_walkforward.py
 ```
 
-- **Logic**: For each 180-day OOS period, it selects the best model from the corresponding exploration pool *without hindsight bias*.
-- **Output**: A combined equity curve representing the true historical expectation of the strategy.
+Esse script:
+- lê os pools já explorados
+- seleciona representantes por step
+- costura os segmentos OOS em uma curva única
 
-## 3. Maintenance
-- **scripts/explore.py**: The core worker script used by the orchestrator.
-- **scripts/fair_dashboard.py**: The real-time monitor.
-- **data/generated/fair_wf_explore/**: Target directory for all results.
+Saída padrão:
+- `data/generated/fair_wf_explore_v5/robustness_report/`
+
+## 4. Observações importantes
+
+- O step `180d` foi removido do explore atual porque ele não tem mais uma perna OOS comparável dentro dessa grade.
+- O script de OOS ainda suporta usar `180d` se existir um step concluído manualmente, mas isso não faz parte do workflow padrão da `v5`.
+- Se for preciso reiniciar o processo, o orquestrador continua de onde parou pelo `explore_runs.csv`.

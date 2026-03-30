@@ -26,14 +26,18 @@ import xgboost as xgb
 from core.contracts import DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
 from core.executors import LiveExecutor, PaperExecutor
 from core.models.bundle import ModelBundle
-from core.utils.notify import send_pushover
-
 from modules.backtest.sniper_walkforward import PeriodModel, load_period_models
 from modules.backtest.sniper_simulator import _apply_calibration
 from modules.config.symbols import load_top_market_cap_symbols, default_top_market_cap_path
 from modules.prepare_features.data import load_ohlc_1m_series
 from modules.prepare_features.prepare_features import run as pf_run
 
+from realtime.bot.services import (
+    launch_dashboard_server,
+    load_trade_pushover_config,
+    send_trade_notification,
+    start_ngrok_tunnel,
+)
 from realtime.bot.settings import LiveSettings
 from realtime.bot.utils import (
     feature_window_minutes,
@@ -47,7 +51,7 @@ from realtime.market_data.rest import RestBackfillQueue, _last_closed_minute_ms
 from realtime.market_data.rolling_window import RollingWindow
 from realtime.market_data.websocket import WsKlineIngestor
 
-# Imports opcionais (downloader, dashboard state, ngrok)
+# Imports opcionais (downloader e dashboard state)
 try:
     from data_providers.binance.download_to_mysql import (
         DownloadSettings as DLSettings,
@@ -67,15 +71,6 @@ except ImportError:
     except ImportError:
         DashboardState = None
         AccountSummary = None
-
-try:
-    from realtime.realtime_dashboard_ngrok_monolith import NgrokConfig as NgrokCfg, NgrokManager as NgrokMgr
-except ImportError:
-    try:
-        from modules.realtime.realtime_dashboard_ngrok_monolith import NgrokConfig as NgrokCfg, NgrokManager as NgrokMgr
-    except ImportError:
-        NgrokCfg = None
-        NgrokMgr = None
 
 try:
     from modules.config import secrets as _secrets
@@ -908,20 +903,9 @@ class LiveDecisionBot:
         
         # Tenta carregar pushover utils se não carregado globalmente
         # (Assumindo que imports globais já cuidaram disso ou falharam silenciosamente)
-        # Vamos usar send_pushover importado de core.utils.notify
+        # Notificação centralizada no serviço de Pushover do bot.
         
-        cfg = None
-        try:
-             from core.utils.notify import load_default
-             cfg = load_default(
-                user_env="PUSHOVER_USER_KEY",
-                token_env="PUSHOVER_TOKEN_TRADE",
-                token_name_fallback="PUSHOVER_TOKEN_TRADE",
-                title="Tradebot",
-                priority=0,
-            )
-        except ImportError:
-            pass
+        cfg = load_trade_pushover_config()
 
         if cfg is None:
             if not self._pushover_warned:
@@ -929,13 +913,15 @@ class LiveDecisionBot:
                 self._pushover_warned = True
             return
 
-        msg = f"{side.upper()} {symbol} notional={notional:.2f} price={price:.4f}"
-        if pnl is not None:
-            msg += f" pnl={pnl:.2f}"
-        try:
-            send_pushover(msg, cfg=cfg, url=url if url else None, url_title="Dashboard")
-        except Exception:
-            log.warning("[pushover] envio falhou", exc_info=True)
+        send_trade_notification(
+            symbol=symbol,
+            side=side,
+            price=price,
+            notional=notional,
+            pnl=pnl,
+            dashboard_url=url if url else None,
+            cfg=cfg,
+        )
 
     def _record_trade(
         self,
@@ -1072,7 +1058,14 @@ class LiveDecisionBot:
         try:
             if not getattr(self, "dashboard_proc", None) or not getattr(self.dashboard_proc, "is_alive", lambda: False)():
                 self.dashboard_proc = threading.Thread(
-                    target=_launch_dashboard, args=(int(self.settings.dashboard_port),), name="dash", daemon=True
+                    target=launch_dashboard_server,
+                    kwargs={
+                        "port": int(self.settings.dashboard_port),
+                        "dashboard_state_cls": DashboardState,
+                        "account_summary_cls": AccountSummary,
+                    },
+                    name="dash",
+                    daemon=True,
                 )
                 self.dashboard_proc.start()
         except Exception:
@@ -1552,11 +1545,23 @@ class LiveDecisionBot:
 
         if bool(self.settings.start_dashboard):
             self.dashboard_proc = threading.Thread(
-                target=_launch_dashboard, args=(int(self.settings.dashboard_port),), name="dash", daemon=True
+                target=launch_dashboard_server,
+                kwargs={
+                    "port": int(self.settings.dashboard_port),
+                    "dashboard_state_cls": DashboardState,
+                    "account_summary_cls": AccountSummary,
+                },
+                name="dash",
+                daemon=True,
             )
             self.dashboard_proc.start()
             if bool(self.settings.start_ngrok):
-                self.dash_url = _start_ngrok(int(self.settings.dashboard_port), token_env=self.settings.ngrok_authtoken_env)
+                self.dash_url = start_ngrok_tunnel(
+                    int(self.settings.dashboard_port),
+                    token_env=self.settings.ngrok_authtoken_env,
+                    secrets_module=_secrets,
+                    domain=str(self.settings.ngrok_domain or "").strip(),
+                )
                 if self.dash_url:
                     print(f"[ngrok] dashboard: {self.dash_url}", flush=True)
 

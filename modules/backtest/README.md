@@ -1,18 +1,15 @@
 # modules/backtest
 
-Backtesting utilities for portfolio simulation and single-symbol debugging.
+Motores de backtest e simulação usados pelo repositório.
 
-## Key Pieces
-- `sniper_portfolio.py` — multi-symbol, capital-aware executor; supports fees, slippage, position sizing, concurrency limits, and walk-forward evaluations directly from disk models.
-- `single_symbol.py` — fast single-symbol simulation for deep-dive debugging of labels/thresholds. Generates rich Plotly HTML reports.
-- `sniper_walkforward.py` — loads walk-forward models and predicts probability scores dynamically across time boundaries.
+## Peças principais
+- `sniper_portfolio.py` - executor multi-ativo com sizing, fees, slippage e limites de exposição.
+- `portfolio.py` - helpers para preparar dados, rodar backtests de portfolio e gerar curva/equity.
+- `single_symbol.py` - debug detalhado por ativo.
+- `sniper_walkforward.py` - carrega bundles walk-forward e aplica score por período.
 
-## Typical Use
-Use the `scripts/` interface to interact with this module:
+## Fluxo atual
+- backtest rápido/manual: `python scripts/backtest.py`
+- OOS walk-forward oficial: `python scripts/run_oos_walkforward.py`
 
-```bash
-# Run a portfolio backtest across all loaded assets
-python scripts/backtest.py
-```
-
-Outputs (CSV metrics) and dashboard plots are written to `data/generated/`.
+O script `run_oos_walkforward.py` é o entrypoint principal para validar os pools do fair explore.

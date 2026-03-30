@@ -1,6 +1,5 @@
 import os
 import sys
-import csv
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -62,11 +61,19 @@ app = Flask(__name__)
 # Paths
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EQUITY_METRIC_CACHE: dict[str, dict] = {}
+SHARED_DASHBOARD_CSS = (REPO_ROOT / "modules" / "realtime" / "static" / "astra_shared.css")
 
 
 def _fair_root() -> Path:
-    raw = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v4") or "fair_wf_explore_v4").strip()
+    raw = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v5") or "fair_wf_explore_v5").strip()
     return REPO_ROOT / "data" / "generated" / raw
+
+
+def _shared_dashboard_css_text() -> str:
+    try:
+        return SHARED_DASHBOARD_CSS.read_text(encoding="utf-8")
+    except Exception:
+        return ""
 
 REFRESH_PARAM_FIELDS = [
     "label_profit_thr",
@@ -168,38 +175,6 @@ def _equity_metrics_from_bt_dir(bt_out_dir: str) -> dict[str, float]:
         pass
     EQUITY_METRIC_CACHE[cache_key] = dict(metrics)
     return metrics
-
-
-def _read_results_csv_compat(csv_path: Path) -> pd.DataFrame:
-    with csv_path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.reader(f)
-        try:
-            header = next(reader)
-        except StopIteration:
-            return pd.DataFrame()
-        header = [str(x).strip() for x in header]
-        compat_header = list(header)
-        if "exposure_multiplier" not in compat_header:
-            try:
-                insert_at = compat_header.index("month_mean")
-            except ValueError:
-                insert_at = len(compat_header)
-            compat_header.insert(insert_at, "exposure_multiplier")
-        rows = []
-        for row in reader:
-            if not row:
-                continue
-            if len(row) == len(compat_header):
-                rows.append(dict(zip(compat_header, row)))
-            elif len(row) == len(header):
-                rows.append(dict(zip(header, row)))
-            elif len(row) < len(header):
-                padded = row + [""] * (len(header) - len(row))
-                rows.append(dict(zip(header, padded)))
-            else:
-                trimmed = row[: len(compat_header)]
-                rows.append(dict(zip(compat_header, trimmed)))
-    return pd.DataFrame(rows)
 
 
 def _collect_params(row_dict: dict, fields: list[str]) -> list[dict]:
@@ -304,7 +279,7 @@ def get_step_data(step):
             tmp_path = Path(tmp.name)
             shutil.copy2(csv_path, tmp_path)
         
-        df = _read_results_csv_compat(tmp_path)
+        df = pd.read_csv(tmp_path)
         try: os.remove(tmp_path)
         except: pass
         df_all = df.copy()
@@ -397,60 +372,103 @@ def index():
     finished_steps = [s for s, d in all_data.items() if d["status"] == "Finished"]
     avg_score = round(np.mean([all_data[s]["summary"]["best_score"] for s in finished_steps]), 2) if finished_steps else 0
     
+    shared_css = _shared_dashboard_css_text()
+
     html = """
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="pt-br" data-bs-theme="dark">
     <head>
-        <title>Fair Universe Dashboard v3.0</title>
+        <title>Fair Explore Dashboard</title>
         <meta charset="UTF-8">
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link
+            href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+            rel="stylesheet"
+            integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+            crossorigin="anonymous"
+        />
+        <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+        />
         <style>
+            {{ shared_css|safe }}
             :root {
-                --bg: #0b0f19;
-                --surface: #161c2d;
-                --surface-light: #232d45;
-                --accent: #38bdf8;
-                --accent-glow: rgba(56, 189, 248, 0.2);
-                --text-main: #f1f5f9;
-                --text-muted: #94a3b8;
-                --green: #4ade80;
-                --orange: #fbbf24;
-                --red: #f87171;
+                --surface: rgba(16, 19, 26, 0.68);
+                --surface-light: rgba(255, 255, 255, 0.08);
+                --accent: #7c5cff;
+                --accent-2: #00ffb3;
+                --accent-glow: rgba(124, 92, 255, 0.18);
+                --text-main: #f8fafc;
+                --text-muted: rgba(255, 255, 255, 0.60);
+                --green: #00ffb3;
+                --orange: #ffc85c;
+                --red: #ff5c7a;
             }
-            body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text-main); margin: 0; padding: 20px; line-height: 1.5; overflow-y: scroll; }
-            .container { max-width: 1400px; margin: 0 auto; }
-            header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-            h1 { font-size: 1.8rem; font-weight: 700; margin: 0; color: var(--accent); }
+            body {
+                color: var(--text-main);
+                line-height: 1.5;
+                overflow-y: scroll;
+                font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            }
+            .page-shell { max-width: 1440px; margin: 0 auto; }
+            .hero-card { margin-bottom: 1rem; }
+            .hero-meta { color: var(--text-muted); font-size: 0.95rem; }
+            .hero-pill {
+                border: 1px solid rgba(255, 255, 255, 0.10);
+                background: rgba(255, 255, 255, 0.04);
+                border-radius: 999px;
+                padding: 0.35rem 0.75rem;
+                color: var(--text-muted);
+                font-size: 0.78rem;
+                display: inline-flex;
+                align-items: center;
+                gap: 0.45rem;
+            }
+            .hero-pill strong { color: var(--text-main); font-weight: 600; }
+            .brand-line { color: var(--text-muted); font-size: 0.82rem; letter-spacing: 0.04em; text-transform: uppercase; }
+            .hero-title { font-size: clamp(1.8rem, 3vw, 2.5rem); font-weight: 700; margin: 0; }
+            .hero-title .accent { color: var(--accent-2); }
+            .status-pill {
+                border: 1px solid rgba(255, 255, 255, 0.10);
+                background: rgba(255, 255, 255, 0.04);
+                border-radius: 999px;
+                padding: 0.45rem 0.8rem;
+            }
+            .navbar-brand {
+                text-decoration: none;
+                color: var(--text-main);
+            }
+            .navbar-brand:hover { color: var(--text-main); }
             
             .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }
-            .kpi-card { background: var(--surface); padding: 15px; border-radius: 10px; border: 1px solid var(--surface-light); }
-            .kpi-label { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 700; }
+            .kpi-card { padding: 15px; border-radius: 14px; }
+            .kpi-label { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 700; letter-spacing: 0.04em; }
             .kpi-value { font-size: 1.4rem; font-weight: 700; color: var(--text-main); font-family: 'JetBrains Mono', monospace; }
 
-            .tabs { display: flex; gap: 10px; margin-bottom: 20px; background: var(--surface); padding: 14px 16px 10px; border-radius: 12px; border: 1px solid var(--surface-light); overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: rgba(148, 163, 184, 0.55) rgba(255,255,255,0.05); }
+            .tabs-shell { margin-bottom: 1rem; }
+            .tabs { display: flex; gap: 10px; justify-content: center; margin-bottom: 0; padding: 14px 16px 10px; border-radius: 12px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: rgba(148, 163, 184, 0.55) rgba(255,255,255,0.05); }
             .tabs::-webkit-scrollbar { height: 10px; }
             .tabs::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 999px; }
-            .tabs::-webkit-scrollbar-thumb { background: linear-gradient(90deg, rgba(148, 163, 184, 0.55), rgba(56, 189, 248, 0.45)); border-radius: 999px; border: 2px solid rgba(22, 28, 45, 0.95); }
-            .tabs::-webkit-scrollbar-thumb:hover { background: linear-gradient(90deg, rgba(148, 163, 184, 0.7), rgba(56, 189, 248, 0.6)); }
+            .tabs::-webkit-scrollbar-thumb { background: linear-gradient(90deg, rgba(148, 163, 184, 0.55), rgba(124, 92, 255, 0.45)); border-radius: 999px; border: 2px solid rgba(22, 28, 45, 0.95); }
+            .tabs::-webkit-scrollbar-thumb:hover { background: linear-gradient(90deg, rgba(148, 163, 184, 0.7), rgba(124, 92, 255, 0.6)); }
             .tab { padding: 10px 16px; border-radius: 10px; cursor: pointer; color: var(--text-muted); font-weight: 600; font-size: 0.9rem; transition: all 0.2s; white-space: nowrap; display: flex; align-items: center; border: 1px solid transparent; }
-            .tab:hover { background: var(--surface-light); color: var(--text-main); }
-            .tab.active { background: var(--accent); color: var(--bg); box-shadow: 0 10px 24px rgba(56, 189, 248, 0.18); }
+            .tab:hover { background: rgba(255,255,255,0.05); color: var(--text-main); }
+            .tab.active { background: linear-gradient(135deg, var(--accent), #5a8cff); color: #f8fafc; box-shadow: 0 10px 24px rgba(124, 92, 255, 0.28); }
             .tab-status { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
             .tab-count { margin-left: 10px; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.08); color: var(--text-main); font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; }
-            .tab.active .tab-count { background: rgba(11, 15, 25, 0.16); color: var(--bg); }
+            .tab.active .tab-count { background: rgba(255,255,255,0.18); color: #fff; }
 
             .step-panel { display: none; }
             .step-panel.active { display: block; }
 
-            table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface); border-radius: 12px; border: 1px solid var(--surface-light); margin-bottom: 50px; }
-            th { background: var(--surface-light); padding: 12px 15px; text-align: left; color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 700; cursor: pointer; user-select: none; transition: color 0.2s; }
+            table { width: 100%; border-collapse: separate; border-spacing: 0; background: transparent; border-radius: 12px; border: 1px solid var(--surface-light); margin-bottom: 50px; overflow: hidden; }
+            th { background: rgba(255,255,255,0.05); padding: 12px 15px; text-align: left; color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 700; cursor: pointer; user-select: none; transition: color 0.2s; }
             th:hover { color: var(--accent); }
             th.sorted-asc::after { content: ' ↑'; color: var(--accent); }
             th.sorted-desc::after { content: ' ↓'; color: var(--accent); }
             
-            td { padding: 12px 15px; border-bottom: 1px solid var(--surface-light); font-size: 0.9rem; }
+            td { padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 0.9rem; background: rgba(16, 19, 26, 0.54); }
             tr.row-clickable { cursor: pointer; transition: background 0.1s; }
             tr.row-clickable:hover td { background: rgba(255,255,255,0.03); }
             tr.row-active td { background: var(--accent-glow) !important; border-left: 2px solid var(--accent); }
@@ -458,10 +476,10 @@ def index():
             .metric { font-family: 'JetBrains Mono', monospace; }
             .score-pill { background: var(--accent-glow); color: var(--accent); padding: 2px 8px; border-radius: 4px; font-weight: 700; }
             
-            .iframe-row { display: none; background: #000; }
+            .iframe-row { display: none; background: transparent; }
             .detail-shell { padding: 18px; background: linear-gradient(180deg, rgba(7, 11, 19, 0.96), rgba(3, 6, 11, 0.98)); }
             .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
-            .detail-card { background: rgba(22, 28, 45, 0.96); border: 1px solid rgba(56, 189, 248, 0.15); border-radius: 12px; padding: 14px; min-width: 0; overflow: hidden; }
+            .detail-card { background: rgba(22, 28, 45, 0.96); border: 1px solid rgba(124, 92, 255, 0.15); border-radius: 12px; padding: 14px; min-width: 0; overflow: hidden; }
             .detail-title { color: var(--accent); font-size: 0.78rem; text-transform: uppercase; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.04em; }
             .detail-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
             .detail-chip { padding: 4px 10px; border-radius: 999px; background: rgba(148, 163, 184, 0.12); color: var(--text-muted); font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; max-width: 100%; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
@@ -472,7 +490,7 @@ def index():
             .param-empty { color: var(--text-muted); font-size: 0.8rem; font-style: italic; }
             .iframe-container { width: 100%; height: 700px; border: none; }
             
-            .empty-state { padding: 100px; text-align: center; color: var(--text-muted); background: var(--surface); border-radius: 12px; border: 1px solid var(--surface-light); }
+            .empty-state { padding: 100px; text-align: center; color: var(--text-muted); background: rgba(16, 19, 26, 0.58); border-radius: 12px; border: 1px solid var(--surface-light); }
 
             @media (max-width: 1100px) {
                 .kpi-row { grid-template-columns: repeat(2, 1fr); }
@@ -481,6 +499,7 @@ def index():
 
             @media (max-width: 700px) {
                 .kpi-row { grid-template-columns: 1fr; }
+                .tabs { justify-content: flex-start; }
                 .tabs { padding: 12px 12px 8px; }
                 .tab { padding: 9px 14px; }
                 .param-row { grid-template-columns: 1fr; }
@@ -488,46 +507,91 @@ def index():
             }
         </style>
     </head>
-    <body>
-        <div class="container">
-            <header>
-                <div>
-                    <h1>Fair Universe Dashboard</h1>
-                    <div style="color: var(--text-muted); font-size: 0.9rem;">Multi-Generation Robustness Monitor</div>
-                </div>
-                <div style="text-align: right">
-                    <div id="status-dot" style="color: var(--green); font-weight: 700; font-size: 0.8rem;">● LIVE DATA</div>
-                    <div id="countdown" style="color: var(--text-muted); font-size: 0.75rem;">Next update in ...</div>
-                </div>
-            </header>
-
-            <div class="kpi-row">
-                <div class="kpi-card">
-                    <div class="kpi-label">Milestones Finished</div>
-                    <div id="kpi-finished" class="kpi-value">--</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Avg Historical Score</div>
-                    <div id="kpi-avg-score" class="kpi-value" style="color: var(--accent)">--</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">Total Fair Trials</div>
-                    <div id="kpi-trials" class="kpi-value">--</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label">System Mode</div>
-                    <div class="kpi-value" style="color: var(--green)">AUTONOMOUS</div>
+    <body class="astra-body">
+        <header class="navbar navbar-expand-lg navbar-glass sticky-top">
+            <div class="container-fluid px-3">
+                <a class="navbar-brand d-flex align-items-center gap-2" href="/">
+                    <span class="brand-dot"></span>
+                    <span class="fw-semibold">Astra Tradebot</span>
+                    <span class="badge text-bg-secondary ms-1">Fair Explore</span>
+                </a>
+                <div class="d-flex align-items-center gap-3">
+                    <div class="d-none d-md-flex align-items-center gap-2 status-pill">
+                        <span class="status-dot status-online"></span>
+                        <small class="text-secondary">
+                            <span id="status-dot" class="text-secondary-emphasis fw-semibold">dados ao vivo</span>
+                            <span class="mx-1">•</span>
+                            <span id="countdown">próxima atualização...</span>
+                        </small>
+                    </div>
                 </div>
             </div>
+        </header>
 
-            <div class="tabs" id="step-tabs"></div>
-            <div id="main-content"></div>
+        <main class="container-fluid px-3 py-3">
+            <div class="page-shell">
+                <section class="card card-glass hero-card">
+                    <div class="card-body p-4">
+                        <div class="d-flex flex-column flex-lg-row justify-content-between align-items-start gap-3">
+                            <div>
+                                <div class="brand-line mb-2">Milestone search • walk-forward fair protocol</div>
+                                <h1 class="hero-title">Fair Explore <span class="accent">Command Center</span></h1>
+                                <div class="hero-meta mt-2">Acompanhamento de milestones independentes, trials por step e artefatos de robustez em tempo real.</div>
+                            </div>
+                            <div class="d-flex flex-wrap gap-2 justify-content-lg-end">
+                                <span class="hero-pill"><i class="bi bi-diagram-3"></i><strong>4</strong> parâmetros de edge</span>
+                                <span class="hero-pill"><i class="bi bi-shield-check"></i>treino e risco fixos</span>
+                                <span class="hero-pill"><i class="bi bi-arrow-repeat"></i>49 refreshes por step</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
 
-            <footer style="margin-top: 30px; border-top: 1px solid var(--surface-light); padding: 20px 0; display: flex; justify-content: space-between; color: var(--text-muted); font-size: 0.8rem;">
-                <div>Fair Universe Protocol &bull; Independent Milestone Optimization</div>
-                <div>Ngrok: https://astra-assistent.ngrok.app</div>
-            </footer>
-        </div>
+                <div class="kpi-row">
+                    <div class="kpi-card card card-glass">
+                        <div class="card-body p-3">
+                            <div class="kpi-label">Milestones finalizados</div>
+                            <div id="kpi-finished" class="kpi-value">--</div>
+                        </div>
+                    </div>
+                    <div class="kpi-card card card-glass">
+                        <div class="card-body p-3">
+                            <div class="kpi-label">Score histórico médio</div>
+                            <div id="kpi-avg-score" class="kpi-value" style="color: var(--accent-2)">--</div>
+                        </div>
+                    </div>
+                    <div class="kpi-card card card-glass">
+                        <div class="card-body p-3">
+                            <div class="kpi-label">Trials totais</div>
+                            <div id="kpi-trials" class="kpi-value">--</div>
+                        </div>
+                    </div>
+                    <div class="kpi-card card card-glass">
+                        <div class="card-body p-3">
+                            <div class="kpi-label">Modo do sistema</div>
+                            <div class="kpi-value" style="color: var(--green)">AUTÔNOMO</div>
+                        </div>
+                    </div>
+                </div>
+
+                <section class="card card-glass tabs-shell">
+                    <div class="tabs" id="step-tabs"></div>
+                </section>
+                <div id="main-content"></div>
+            </div>
+        </main>
+
+        <footer class="container-fluid px-3 pb-3">
+            <div class="page-shell text-center text-secondary small">
+                Astra Tradebot • fair explore dashboard • identidade compartilhada com o bot live
+            </div>
+        </footer>
+
+        <script
+            src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+            integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+            crossorigin="anonymous"
+        ></script>
 
         <script>
             let state = {
@@ -546,11 +610,12 @@ def index():
                     const res = await fetch('/api/data');
                     state.data = await res.json();
                     state.lastUpdate = Date.now();
+                    document.getElementById('status-dot').textContent = 'dados ao vivo';
                     render();
                 } catch(e) {
                     console.error("Dashboard Fetch Error:", e);
                     document.getElementById('status-dot').style.color = 'var(--red)';
-                    document.getElementById('status-dot').textContent = '● ERROR (Offline)';
+                    document.getElementById('status-dot').textContent = 'erro offline';
                 }
             }
 
@@ -770,7 +835,7 @@ def index():
             // Sync countdown
             setInterval(() => {
                 const diff = 10 - Math.floor((Date.now() - state.lastUpdate) / 1000);
-                document.getElementById('countdown').textContent = (diff > 0) ? `Next update in ${diff}s` : 'Updating...';
+                document.getElementById('countdown').textContent = (diff > 0) ? `próxima atualização em ${diff}s` : 'atualizando...';
                 if (diff <= 0) fetchData();
             }, 1000);
 
@@ -780,7 +845,7 @@ def index():
     </body>
     </html>
     """
-    return render_template_string(html)
+    return render_template_string(html, shared_css=shared_css)
 
 @app.route("/artifact/<path:relpath>")
 def artifact(relpath):

@@ -57,7 +57,7 @@ CLUSTER_PARAM_COLS = [
 
 
 def _fair_root() -> Path:
-    raw = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v4") or "fair_wf_explore_v4").strip()
+    raw = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v5") or "fair_wf_explore_v5").strip()
     return repo_root / "data" / "generated" / raw
 
 

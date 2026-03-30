@@ -1,10 +1,10 @@
 # modules/config
 
-Centralized configuration handlers and typed definitions.
+Configurações estruturais compartilhadas entre treino, backtest e bot live.
 
-## Contents
-- `trade_contract.py` — definitions and validation for trading parameters (SL/TP ratios, spans, offsets).
-- `symbols.py` — logic to load active universes of symbols.
+## Conteúdo
+- `trade_contract.py` - contrato de trade, janelas, spans e helpers de timeframe.
+- `symbols.py` - carregamento e seleção do universo de símbolos.
+- `secrets.py` - segredos locais opcionais, quando presentes.
 
-## Pattern
-Configurations are shared by training, backtests, and the realtime bot for absolute consistency. The modules here provide programmatic defaults that scripts can override via environment variables.
+Esses módulos definem defaults coerentes; os scripts podem sobrescrever detalhes via ambiente quando necessário.
