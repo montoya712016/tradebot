@@ -1500,6 +1500,7 @@ def apply_trade_contract_labels(
     pf_entry_only = str(os.getenv("PF_ENTRY_ONLY", "")).strip().lower() in {"1", "true", "yes", "on"}
     train_exit_model = str(os.getenv("SNIPER_TRAIN_EXIT_MODEL", "1")).strip().lower() in {"1", "true", "yes", "on"}
     entry_only_mode = bool(pf_entry_only or (not train_exit_model))
+    refresh_contract_only = bool(_env_int("PF_REFRESH_CONTRACT_LABELS_ONLY", 0))
 
     # Config do target de exit dinÃ¢mico (regressÃ£o de span EMA em barras via grid-search).
     exit_span_grid_min = _env_int_list(
@@ -1735,6 +1736,48 @@ def apply_trade_contract_labels(
             df[f"sniper_exit_span_entropy_{suffix}"] = pd.Series(exit_entropy.astype(np.float32), index=df.index)
             df[f"sniper_exit_span_target_{suffix}"] = pd.Series(exit_q50.astype(np.float32), index=df.index)
             df[f"sniper_exit_span_weight_{suffix}"] = pd.Series(exit_w.astype(np.float32), index=df.index)
+
+    if refresh_contract_only:
+        for c in list(df.columns):
+            if (
+                c.startswith("sniper_price_")
+                or c.startswith("sniper_entry_weight_hybrid_")
+                or c.startswith("sniper_mae_pct_")
+                or c.startswith("sniper_exit_code_")
+                or c.startswith("sniper_exit_wait_bars_")
+            ):
+                try:
+                    del df[c]
+                except Exception:
+                    pass
+            if entry_only_mode and c.startswith("sniper_exit_span_"):
+                try:
+                    del df[c]
+                except Exception:
+                    pass
+
+        first_suffix = f"{int(windows[0])}m"
+        for c in (
+            "sniper_entry_label_any",
+            "sniper_entry_weight_any",
+            "sniper_entry_label",
+            "sniper_entry_weight",
+            "sniper_exit_span_target",
+            "sniper_exit_span_weight",
+            "sniper_exit_span_q25",
+            "sniper_exit_span_q50",
+            "sniper_exit_span_q75",
+            "sniper_exit_span_entropy",
+            "sniper_entry_weight_hybrid",
+        ):
+            if c in df.columns:
+                try:
+                    del df[c]
+                except Exception:
+                    pass
+        df["sniper_entry_label"] = pd.to_numeric(df[f"sniper_entry_label_{first_suffix}"], errors="coerce").astype(np.float32)
+        df["sniper_entry_weight"] = df[f"sniper_entry_weight_{first_suffix}"].astype(np.float32)
+        return df
 
     # Future evaluation windows (minutes):
     # - avg_early: [future_avg_start_min .. future_avg_split_min]

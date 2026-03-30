@@ -18,7 +18,7 @@ params = [
     "label_id", "model_id", "backtest_id", "train_id", "score", "ret_pct", "max_dd",
     "label_profit_thr", "exit_ema_span_min", "exit_ema_init_offset_pct",
     "entry_ratio_neg_per_pos", "calib_tail_blend", "calib_tail_boost",
-    "top_metric_qs", "top_metric_min_count", "tau_entry", "corr_enabled",
+    "top_metric_qs", "top_metric_min_count", "tau_entry",
     "max_positions", "total_exposure", "train_run_dir"
 ]
 

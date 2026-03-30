@@ -6,16 +6,16 @@ import sys
 from datetime import timedelta
 
 def calc_score(ret, dd, win, pf, trades, month_pos, sem_pos):
-    """Refined score logic matching analyze_explore.py"""
-    if ret <= 0: return ret
-    
-    dd_penalty = np.exp(-25.0 * (dd ** 2))
-    smoothed_ret = np.sqrt(ret) * 10
-    consistency_mult = 0.2 + month_pos + sem_pos
-    trade_mult = min(1.0, trades / 100.0)
-    pf_mult = min(3.0, pf)
-    
-    return smoothed_ret * dd_penalty * consistency_mult * trade_mult * pf_mult
+    if ret <= 0:
+        return 0.0
+
+    month_focus = np.clip(month_pos, 0.0, 1.0) ** 6
+    sem_focus = 0.35 + 0.65 * (np.clip(sem_pos, 0.0, 1.0) ** 2)
+    dd_penalty = np.exp(-40.0 * (dd ** 2))
+    smoothed_ret = np.sqrt(ret) * 6.0
+    trade_mult = min(1.0, trades / 120.0)
+    pf_mult = min(1.5, max(0.75, pf))
+    return smoothed_ret * dd_penalty * trade_mult * pf_mult * month_focus * sem_focus
 
 def main():
     repo_root = Path(__file__).resolve().parent.parent
@@ -31,7 +31,13 @@ def main():
     
     if is_fair_mode:
         print(f"[INFO] Entering FAIR MODE (using independent step pools)")
-        steps = sorted([int(p.name.split('_')[1].replace('d','')) for p in fair_root.glob("step_*d")])
+        steps = sorted(
+            [
+                int(p.name.split('_')[1].replace('d', ''))
+                for p in fair_root.glob("step_*d")
+                if (p / ".finished").exists() and int(p.name.split('_')[1].replace('d', '')) >= 360
+            ]
+        )
         for s in steps:
             step_dir = fair_root / f"step_{s}d"
             csv_path = step_dir / "explore_runs.csv"
@@ -159,16 +165,18 @@ def main():
             pf = pos_sum / neg_sum if neg_sum > 0 else 2.0
             pf = min(5.0, pf) # Cap PF impact
             
-            # 4. Consistency (Monthly positive pct)
+            # 4. Consistency from past intervals only
             monthly = is_curve["equity"].resample("ME").last().pct_change().dropna()
             month_pos = (monthly > 0).mean() if not monthly.empty else 0.5
+            semester = is_curve["equity"].resample("2QE").last().pct_change().dropna()
+            sem_pos = (semester > 0).mean() if not semester.empty else month_pos
             
             # 5. Volatility (Critical for filtering glitches)
             daily_std = daily_rets.std()
             
             # Calculate final score with realistic numbers
             # (trades hardcoded to 100 as proxy for 'sufficient' sample size)
-            score = calc_score(ret_pct, max_dd, win_rate, pf, 100, month_pos, 0.5)
+            score = calc_score(ret_pct, max_dd, win_rate, pf, 100, month_pos, sem_pos)
             
             # PENALTY: Huge Daily StdDev = Data Glitch or Over-leverage
             # In crypto, Daily Std of 0.05 (5%) is high but normal. 0.20 is a glitch.
@@ -242,7 +250,11 @@ def main():
         dd = (curve["equity"] - peaks) / peaks
         max_dd = abs(dd.min())
         if ret <= 0: continue
-        score = np.sqrt(ret * 100) * np.exp(-25.0 * (max_dd**2))
+        monthly = curve["equity"].resample("ME").last().pct_change().dropna()
+        month_pos = (monthly > 0).mean() if not monthly.empty else 0.5
+        semester = curve["equity"].resample("2QE").last().pct_change().dropna()
+        sem_pos = (semester > 0).mean() if not semester.empty else month_pos
+        score = calc_score(ret * 100.0, max_dd, 0.0, 1.0, 100, month_pos, sem_pos)
         hindsight_scores[tid] = score
         
     if hindsight_scores:

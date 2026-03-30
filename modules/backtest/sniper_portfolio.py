@@ -46,7 +46,7 @@ class PortfolioConfig:
     rank_mode: str = "p_entry"
     exit_min_hold_bars: int = 0
     exit_confirm_bars: int = 1
-    # Filtro de diversificacao por correlacao entre candidatos do mesmo timestamp.
+    # Legacy fields kept only for config compatibility. Correlation filters are disabled permanently.
     corr_filter_enabled: bool = False
     corr_window_bars: int = 144
     corr_min_obs: int = 96
@@ -55,7 +55,6 @@ class PortfolioConfig:
     corr_keep_top_n: int = 0
     corr_abs: bool = True
     corr_debug: bool = False
-    # Diversificacao contra o livro JA aberto.
     corr_open_filter_enabled: bool = False
     corr_open_window_bars: int = 144
     corr_open_min_obs: int = 96
@@ -176,50 +175,7 @@ def _corr_stats_against_open(
     open_weights: dict[str, float],
     cfg: PortfolioConfig,
 ) -> dict[str, float]:
-    if (not bool(cfg.corr_open_filter_enabled)) or (not open_weights):
-        return {}
-    sd = symbols.get(sym)
-    if sd is None:
-        return {}
-    bars = int(max(4, int(cfg.corr_open_window_bars)))
-    min_obs = int(max(3, int(cfg.corr_open_min_obs)))
-    corr_abs = bool(cfg.corr_abs)
-    idx_w, ret_w = _window_returns_at_ts(sd, ts, bars=bars)
-    if ret_w.size == 0:
-        return {}
-    vals: list[tuple[str, float, float]] = []
-    for osym, ow in open_weights.items():
-        if not np.isfinite(float(ow)) or float(ow) <= 0.0 or osym == sym:
-            continue
-        osd = symbols.get(osym)
-        if osd is None:
-            continue
-        oidx, oret = _window_returns_at_ts(osd, ts, bars=bars)
-        if oret.size == 0:
-            continue
-        if len(idx_w) == len(oidx) and len(idx_w) > 0 and bool(np.array_equal(idx_w.values, oidx.values)):
-            rc = _safe_corr(ret_w, oret, min_obs=min_obs)
-        else:
-            s1 = pd.Series(ret_w, index=idx_w)
-            s2 = pd.Series(oret, index=oidx)
-            j = s1.to_frame("a").join(s2.to_frame("b"), how="inner")
-            rc = _safe_corr(j["a"].to_numpy(np.float64, copy=False), j["b"].to_numpy(np.float64, copy=False), min_obs=min_obs)
-        if np.isfinite(rc):
-            vals.append((osym, abs(float(rc)) if corr_abs else float(rc), float(ow)))
-    if not vals:
-        return {}
-    corr_vals = np.asarray([v[1] for v in vals], dtype=np.float64)
-    w_vals = np.asarray([max(0.0, v[2]) for v in vals], dtype=np.float64)
-    w_sum = float(np.sum(w_vals))
-    weighted_mean = float(np.sum(corr_vals * w_vals) / w_sum) if w_sum > 0.0 else float(np.mean(corr_vals))
-    correlated_exposure = float(np.sum(w_vals[corr_vals >= float(max(0.0, cfg.corr_open_reduce_start))]))
-    return {
-        "open_corr_count": float(len(vals)),
-        "open_max_corr": float(np.max(corr_vals)),
-        "open_mean_corr": float(np.mean(corr_vals)),
-        "open_weighted_mean_corr": float(weighted_mean),
-        "open_correlated_exposure": float(correlated_exposure),
-    }
+    return {}
 
 
 def _filter_batch_by_correlation(
@@ -229,142 +185,7 @@ def _filter_batch_by_correlation(
     market_ret: pd.Series | None,
     cfg: PortfolioConfig,
 ) -> tuple[list[tuple[pd.Timestamp, float, str, int, float, float, int]], dict[str, float | int]]:
-    if (not bool(cfg.corr_filter_enabled)) or len(batch) <= 1:
-        return batch, {}
-
-    win = int(max(4, int(cfg.corr_window_bars)))
-    min_obs = int(max(3, int(cfg.corr_min_obs)))
-    corr_abs = bool(cfg.corr_abs)
-    max_mkt = float(cfg.corr_max_with_market)
-    max_pair = float(cfg.corr_max_pair)
-    keep_n = int(max(0, int(cfg.corr_keep_top_n)))
-
-    # batch ja chega ordenado por score (melhor -> pior)
-    out: list[tuple[pd.Timestamp, float, str, int, float, float, int]] = []
-    wr_by_sym: dict[str, tuple[pd.DatetimeIndex, np.ndarray]] = {}
-    mkt_corr_cache: dict[str, float] = {}
-
-    def _corr_with_market(sym: str) -> float:
-        if sym in mkt_corr_cache:
-            return mkt_corr_cache[sym]
-        if market_ret is None:
-            mkt_corr_cache[sym] = float("nan")
-            return mkt_corr_cache[sym]
-        idx_w, ret_w = wr_by_sym[sym]
-        if ret_w.size == 0:
-            mkt_corr_cache[sym] = float("nan")
-            return mkt_corr_cache[sym]
-        mkt_w = market_ret.reindex(idx_w).to_numpy(dtype=np.float64, copy=False)
-        r = _safe_corr(ret_w, mkt_w, min_obs=min_obs)
-        mkt_corr_cache[sym] = float(r)
-        return mkt_corr_cache[sym]
-
-    for cand in batch:
-        _ts, _neg_sc, sym, i, _pe0, _te0, _ema = cand
-        sd = symbols.get(sym)
-        if sd is None:
-            continue
-        wr_by_sym[sym] = _window_returns(sd, int(i), bars=win)
-
-    for cand in batch:
-        _ts, _neg_sc, sym, i, _pe0, _te0, _ema = cand
-        idx_w, ret_w = wr_by_sym.get(sym, (pd.DatetimeIndex([]), np.empty((0,), dtype=np.float64)))
-        if ret_w.size == 0:
-            continue
-
-        # Forca manter o topo de score, depois aplica filtro.
-        if keep_n > 0 and len(out) < keep_n:
-            out.append(cand)
-            continue
-
-        rm = _corr_with_market(sym)
-        if np.isfinite(rm):
-            rm_cmp = abs(rm) if corr_abs else rm
-            if rm_cmp > max_mkt:
-                continue
-
-        ok = True
-        for kept in out:
-            ks = kept[2]
-            k_idx, k_ret = wr_by_sym.get(ks, (pd.DatetimeIndex([]), np.empty((0,), dtype=np.float64)))
-            if k_ret.size == 0:
-                continue
-            # Alinha por timestamp para pares de simbolos.
-            if len(idx_w) == len(k_idx) and len(idx_w) > 0 and bool(np.array_equal(idx_w.values, k_idx.values)):
-                rp = _safe_corr(ret_w, k_ret, min_obs=min_obs)
-            else:
-                s1 = pd.Series(ret_w, index=idx_w)
-                s2 = pd.Series(k_ret, index=k_idx)
-                j = s1.to_frame("a").join(s2.to_frame("b"), how="inner")
-                rp = _safe_corr(j["a"].to_numpy(np.float64, copy=False), j["b"].to_numpy(np.float64, copy=False), min_obs=min_obs)
-            if np.isfinite(rp):
-                rp_cmp = abs(rp) if corr_abs else rp
-                if rp_cmp > max_pair:
-                    ok = False
-                    break
-        if ok:
-            out.append(cand)
-
-    kept = out if out else batch[:1]
-
-    def _pair_mean_abs(symbols_list: list[str]) -> float:
-        if len(symbols_list) < 2:
-            return float("nan")
-        vals: list[float] = []
-        for i in range(len(symbols_list)):
-            s1 = symbols_list[i]
-            i1, r1 = wr_by_sym.get(s1, (pd.DatetimeIndex([]), np.empty((0,), dtype=np.float64)))
-            if r1.size == 0:
-                continue
-            for j in range(i + 1, len(symbols_list)):
-                s2 = symbols_list[j]
-                i2, r2 = wr_by_sym.get(s2, (pd.DatetimeIndex([]), np.empty((0,), dtype=np.float64)))
-                if r2.size == 0:
-                    continue
-                if len(i1) == len(i2) and len(i1) > 0 and bool(np.array_equal(i1.values, i2.values)):
-                    rp = _safe_corr(r1, r2, min_obs=min_obs)
-                else:
-                    s1s = pd.Series(r1, index=i1)
-                    s2s = pd.Series(r2, index=i2)
-                    jn = s1s.to_frame("a").join(s2s.to_frame("b"), how="inner")
-                    rp = _safe_corr(jn["a"].to_numpy(np.float64, copy=False), jn["b"].to_numpy(np.float64, copy=False), min_obs=min_obs)
-                if np.isfinite(rp):
-                    vals.append(abs(float(rp)) if corr_abs else float(rp))
-        return float(np.mean(vals)) if vals else float("nan")
-
-    batch_syms = [c[2] for c in batch if c[2] in wr_by_sym]
-    kept_syms = [c[2] for c in kept if c[2] in wr_by_sym]
-    batch_mkt: list[float] = []
-    for s in batch_syms:
-        rm = _corr_with_market(s)
-        if np.isfinite(rm):
-            batch_mkt.append(abs(float(rm)) if corr_abs else float(rm))
-    kept_mkt: list[float] = []
-    for s in kept_syms:
-        rm = _corr_with_market(s)
-        if np.isfinite(rm):
-            kept_mkt.append(abs(float(rm)) if corr_abs else float(rm))
-
-    stats: dict[str, float | int] = {
-        "batch_size": int(len(batch)),
-        "kept_size": int(len(kept)),
-        "rejected_size": int(max(0, len(batch) - len(kept))),
-        "accept_ratio": float(float(len(kept)) / float(max(1, len(batch)))),
-        "batch_avg_pair_corr": float(_pair_mean_abs(batch_syms)),
-        "kept_avg_pair_corr": float(_pair_mean_abs(kept_syms)),
-        "batch_avg_market_corr": float(np.mean(batch_mkt)) if batch_mkt else float("nan"),
-        "kept_avg_market_corr": float(np.mean(kept_mkt)) if kept_mkt else float("nan"),
-    }
-
-    if bool(cfg.corr_debug):
-        print(
-            f"[portfolio][corr] batch={int(stats['batch_size'])} kept={int(stats['kept_size'])} "
-            f"acc={float(stats['accept_ratio']):.2f} "
-            f"pair={float(stats['kept_avg_pair_corr']) if np.isfinite(float(stats['kept_avg_pair_corr'])) else float('nan'):.3f} "
-            f"mkt={float(stats['kept_avg_market_corr']) if np.isfinite(float(stats['kept_avg_market_corr'])) else float('nan'):.3f}",
-            flush=True,
-        )
-    return kept, stats
+    return batch, {}
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -547,6 +368,8 @@ def simulate_portfolio(
     progress_every: int = 200,
 ) -> PortfolioBacktestResult:
     cfg = cfg or PortfolioConfig()
+    cfg.corr_filter_enabled = False
+    cfg.corr_open_filter_enabled = False
     contract = contract or DEFAULT_TRADE_CONTRACT
     default_exit_span = int(max(1, exit_ema_span_from_window(contract, int(candle_sec))))
 
@@ -568,23 +391,6 @@ def simulate_portfolio(
             sd.low = sd.df.get("low", sd.df["close"]).to_numpy(np.float64, copy=False)
 
     market_ret: pd.Series | None = None
-    if bool(cfg.corr_filter_enabled):
-        # Mercado "geral" = media cross-sectional de retornos log por timestamp.
-        # Alinha automaticamente por timestamp entre simbolos.
-        ret_cols: list[pd.Series] = []
-        for sym, sd in symbols.items():
-            if sd.idx is None or sd.close is None:
-                continue
-            px = np.asarray(sd.close, dtype=np.float64)
-            if px.size < 2:
-                continue
-            with np.errstate(divide="ignore", invalid="ignore"):
-                r = np.diff(np.log(px))
-            if r.size < 2:
-                continue
-            ret_cols.append(pd.Series(r, index=sd.idx[1:], name=str(sym)))
-        if ret_cols:
-            market_ret = pd.concat(ret_cols, axis=1).mean(axis=1, skipna=True)
 
     def _next_entry(sym: str) -> tuple[pd.Timestamp, float, int, str, float, float, int] | None:
         sd = symbols[sym]
@@ -874,15 +680,6 @@ def simulate_portfolio(
             pass
 
     diagnostics: dict[str, Any] | None = None
-    if bool(cfg.corr_filter_enabled):
-        diagnostics = {
-            "corr_filter_enabled": True,
-            "corr_batches": int(corr_batches),
-            "corr_total_candidates": int(corr_total_candidates),
-            "corr_total_kept": int(corr_total_kept),
-            "corr_total_rejected": int(corr_rejected),
-            "corr_accept_ratio": float(float(corr_total_kept) / float(max(1, corr_total_candidates))),
-        }
 
     return PortfolioBacktestResult(
         trades=out_trades,

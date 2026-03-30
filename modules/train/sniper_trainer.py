@@ -1762,6 +1762,25 @@ def _save_full_pool_cache(path: Path, pack: SniperDataPack) -> None:
     tmp.replace(path)
 
 
+def _prune_full_pool_cache(cache_root: Path, asset_class: str) -> None:
+    keep = str(os.getenv("SNIPER_FULL_POOL_KEEP_LAST", "3") or "3").strip()
+    try:
+        keep_n = max(0, int(keep))
+    except Exception:
+        keep_n = 3
+    if keep_n <= 0:
+        return
+    d = cache_root / str(asset_class or "crypto").lower()
+    if not d.exists():
+        return
+    files = sorted(d.glob("pool_*.pkl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in files[keep_n:]:
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _load_latest_full_pool_cache(cache_root: Path, asset_class: str) -> tuple[SniperDataPack | None, Path | None]:
     d = cache_root / str(asset_class or "crypto").lower()
     if not d.exists():
@@ -2107,6 +2126,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 # Materializa tambem no hash atual para nao depender sempre de fallback.
                 try:
                     _save_full_pool_cache(pool_cache_file, full_pool_pack)
+                    _prune_full_pool_cache(_full_pool_cache_root(), asset_class)
                     print(f"[sniper-train] pool-full: vinculado ao hash atual ({pool_cache_file})", flush=True)
                 except Exception:
                     pass
@@ -2142,6 +2162,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             if reuse_pool and full_pool_pack is not None:
                 try:
                     _save_full_pool_cache(pool_cache_file, full_pool_pack)
+                    _prune_full_pool_cache(_full_pool_cache_root(), asset_class)
                     print(f"[sniper-train] pool-full: cache salvo ({pool_cache_file})", flush=True)
                 except Exception as e:
                     print(f"[sniper-train] pool-full: falha ao salvar cache ({type(e).__name__}: {e})", flush=True)

@@ -77,20 +77,6 @@ def _default_portfolio_cfg() -> PortfolioConfig:
         min_trade_exposure=0.03,  # ignora trades muito pequenos (<3%)
         exit_min_hold_bars=3,
         exit_confirm_bars=2,      # exige confirmaÃ§Ã£o extra para sair (menos churn)
-        corr_filter_enabled=True,
-        corr_window_bars=144,
-        corr_min_obs=96,
-        corr_max_with_market=0.80,
-        corr_max_pair=0.85,
-        corr_keep_top_n=1,
-        corr_abs=True,
-        corr_debug=False,
-        corr_open_filter_enabled=True,
-        corr_open_window_bars=144,
-        corr_open_min_obs=96,
-        corr_open_reduce_start=0.60,
-        corr_open_hard_reject=0.92,
-        corr_open_min_weight_mult=0.25,
     )
 
 
@@ -115,10 +101,14 @@ class PortfolioDemoSettings:
     long_only: bool = True
     require_feature_cache: bool = False
     rebuild_on_score_error: bool = True
+    force_period_days: tuple[int, ...] = ()
+    explicit_window_start: str | None = None
+    explicit_window_end: str | None = None
     # Importante para portfÃ³lio realista/determinÃ­stico:
     # se True, usa a MESMA janela [end_global - days, end_global] para todos os sÃ­mbolos.
     # Se False, recorta "Ãºltimos days" por sÃ­mbolo (pode misturar perÃ­odos e variar muito).
     align_global_window: bool = True
+    align_global_window_use_max_end: bool = False
 
 
 @dataclass
@@ -132,6 +122,7 @@ class PreparedPortfolioData:
     end_global: pd.Timestamp | None = None
     start_global: pd.Timestamp | None = None
     symbols_total: int = 0
+    symbols_skipped_window: int = 0
 
 
 def _best_run_contract() -> TradeContract:
@@ -172,6 +163,40 @@ def _default_contract_for_asset(asset_class: str) -> TradeContract:
         except Exception:
             return DEFAULT_TRADE_CONTRACT
     return _best_run_contract()
+
+
+def _read_cached_frame(path: Path) -> pd.DataFrame:
+    return pd.read_parquet(path) if str(path).lower().endswith(".parquet") else pd.read_pickle(path)
+
+
+def _load_cached_symbol_frame(
+    sym: str,
+    cache_path: Path,
+    *,
+    settings: PortfolioDemoSettings,
+    contract: TradeContract,
+    flags: dict,
+    asset: str,
+) -> tuple[Path, pd.DataFrame]:
+    try:
+        return cache_path, _read_cached_frame(cache_path)
+    except Exception as e:
+        if not bool(getattr(settings, "rebuild_on_score_error", True)):
+            raise
+        print(f"[cache] WARN {sym}: {type(e).__name__}: {e} -> tentando rebuild do cache", flush=True)
+        cache_map2 = ensure_feature_cache(
+            [sym],
+            total_days=int(settings.total_days_cache),
+            contract=contract,
+            flags=flags,
+            asset_class=asset,
+            parallel=False,
+            refresh=True,
+        )
+        p2 = cache_map2.get(sym)
+        if not p2:
+            raise RuntimeError(f"rebuild do cache nao retornou arquivo para {sym}")
+        return Path(p2), _read_cached_frame(Path(p2))
 
 
 def _find_latest_wf_dir(run_dir: str | None, asset_class: str | None = None) -> Path:
@@ -223,6 +248,18 @@ def prepare_portfolio_data(settings: PortfolioDemoSettings | None = None) -> Pre
 
     run_dir = _find_latest_wf_dir(settings.run_dir, asset_class=asset)
     periods = load_period_models(run_dir)
+    force_period_days = tuple(
+        int(x) for x in (getattr(settings, "force_period_days", ()) or ()) if int(x) >= 0
+    )
+    if force_period_days:
+        force_set = {int(x) for x in force_period_days}
+        periods = [pm for pm in periods if int(pm.period_days) in force_set]
+        if not periods:
+            raise RuntimeError(f"Nenhum period_* correspondente a force_period_days={sorted(force_set)}")
+        print(
+            f"[backtest-portfolio] forced periods={','.join(str(int(pm.period_days)) for pm in periods)}",
+            flush=True,
+        )
     periods = apply_threshold_overrides(periods, tau_entry=settings.override_tau_entry)
     if bool(getattr(settings, "long_only", False)):
         filtered_periods = []
@@ -297,7 +334,14 @@ def prepare_portfolio_data(settings: PortfolioDemoSettings | None = None) -> Pre
                 continue
             except Exception:
                 pass
-        df0 = pd.read_parquet(p) if str(p).lower().endswith(".parquet") else pd.read_pickle(p)
+        p, df0 = _load_cached_symbol_frame(
+            sym,
+            p,
+            settings=settings,
+            contract=contract,
+            flags=flags,
+            asset=asset,
+        )
         if df0 is None or df0.empty:
             continue
         end_by_sym[sym] = pd.to_datetime(df0.index.max())
@@ -306,24 +350,52 @@ def prepare_portfolio_data(settings: PortfolioDemoSettings | None = None) -> Pre
     if not end_by_sym:
         raise RuntimeError("Nenhum sÃ­mbolo com dados no cache para backtest")
 
-    if settings.align_global_window:
-        # usa o menor end_ts para garantir que TODOS tÃªm dados atÃ© o mesmo fim
-        end_global = min(end_by_sym.values())
+    explicit_window_start = getattr(settings, "explicit_window_start", None)
+    explicit_window_end = getattr(settings, "explicit_window_end", None)
+    if explicit_window_start is not None:
+        explicit_window_start = str(explicit_window_start).strip() or None
+    if explicit_window_end is not None:
+        explicit_window_end = str(explicit_window_end).strip() or None
+
+    if explicit_window_start is not None and explicit_window_end is not None:
+        start_global = pd.to_datetime(explicit_window_start)
+        end_global = pd.to_datetime(explicit_window_end)
+        if start_global >= end_global:
+            raise RuntimeError(f"Janela explicita invalida: start={start_global} end={end_global}")
+    elif settings.align_global_window:
+        if bool(getattr(settings, "align_global_window_use_max_end", False)):
+            end_global = max(end_by_sym.values())
+        else:
+            end_global = min(end_by_sym.values())
         start_global = end_global - pd.Timedelta(days=int(settings.days))
     else:
         end_global = None
         start_global = None
 
     sym_data: dict[str, SymbolData] = {}
+    skipped_window = 0
     use_symbols = [s for s in symbols if s in end_by_sym]
     n_syms_total = len(use_symbols)
     for k, sym in enumerate(sorted(use_symbols), start=1):
         p = cache_map[sym]
-        df0 = pd.read_parquet(p) if str(p).lower().endswith(".parquet") else pd.read_pickle(p)
+        p, df0 = _load_cached_symbol_frame(
+            sym,
+            p,
+            settings=settings,
+            contract=contract,
+            flags=flags,
+            asset=asset,
+        )
         if df0 is None or df0.empty:
             continue
         idx = pd.to_datetime(df0.index)
         if settings.align_global_window and (end_global is not None) and (start_global is not None):
+            if bool(getattr(settings, "align_global_window_use_max_end", False)):
+                sym_start = pd.to_datetime(idx.min())
+                sym_end = pd.to_datetime(idx.max())
+                if sym_start > start_global or sym_end < end_global:
+                    skipped_window += 1
+                    continue
             m = (idx >= start_global) & (idx <= end_global)
             df = df0.loc[m].copy()
         else:
@@ -354,9 +426,22 @@ def prepare_portfolio_data(settings: PortfolioDemoSettings | None = None) -> Pre
                 )
                 p2 = cache_map2.get(sym)
                 if p2:
-                    df_retry = pd.read_parquet(p2) if str(p2).lower().endswith(".parquet") else pd.read_pickle(p2)
+                    _, df_retry = _load_cached_symbol_frame(
+                        sym,
+                        Path(p2),
+                        settings=settings,
+                        contract=contract,
+                        flags=flags,
+                        asset=asset,
+                    )
                     idx2 = pd.to_datetime(df_retry.index)
                     if settings.align_global_window and (end_global is not None) and (start_global is not None):
+                        if bool(getattr(settings, "align_global_window_use_max_end", False)):
+                            sym_start2 = pd.to_datetime(idx2.min())
+                            sym_end2 = pd.to_datetime(idx2.max())
+                            if sym_start2 > start_global or sym_end2 < end_global:
+                                skipped_window += 1
+                                continue
                         m2 = (idx2 >= start_global) & (idx2 <= end_global)
                         df = df_retry.loc[m2].copy()
                     else:
@@ -401,8 +486,15 @@ def prepare_portfolio_data(settings: PortfolioDemoSettings | None = None) -> Pre
     if not sym_data:
         raise RuntimeError("Nenhum sÃ­mbolo com dados suficientes para backtest")
 
-    if settings.align_global_window and (end_global is not None) and (start_global is not None):
-        win_info = f"window={start_global.date()}..{end_global.date()}"
+    if (end_global is not None) and (start_global is not None):
+        suffix = ""
+        if explicit_window_start is not None and explicit_window_end is not None:
+            suffix += " fixed=1 explicit=1"
+        elif bool(getattr(settings, "align_global_window_use_max_end", False)):
+            suffix += " fixed=1"
+        if skipped_window > 0:
+            suffix += f" skipped_window={int(skipped_window)}"
+        win_info = f"window={start_global.date()}..{end_global.date()}{suffix}"
     else:
         # sÃ³ para indicar que nÃ£o estÃ¡ alinhado (pode misturar perÃ­odos)
         min_end = min(end_by_sym.values()) if end_by_sym else None
@@ -419,6 +511,7 @@ def prepare_portfolio_data(settings: PortfolioDemoSettings | None = None) -> Pre
         end_global=end_global,
         start_global=start_global,
         symbols_total=len(sym_data),
+        symbols_skipped_window=int(skipped_window),
     )
 
 

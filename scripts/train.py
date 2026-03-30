@@ -83,6 +83,33 @@ def _env_int_tuple(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(out) if out else tuple(int(x) for x in default)
 
 
+def _env_symbols(name: str = "TRAIN_SYMBOLS") -> tuple[str, ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return tuple()
+    out: list[str] = []
+    for part in raw.replace(";", ",").split(","):
+        sym = str(part or "").strip().upper()
+        if sym and sym not in out:
+            out.append(sym)
+    return tuple(out)
+
+
+def _load_symbols_from_file(path_str: str) -> tuple[str, ...]:
+    path = Path(path_str).expanduser()
+    if not path.exists():
+        return tuple()
+    out: list[str] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            sym = str(line or "").strip().upper()
+            if sym and (not sym.startswith("#")) and sym not in out:
+                out.append(sym)
+    except Exception:
+        return tuple()
+    return tuple(out)
+
+
 def _apply_train_overrides(prefix: str = "TRAIN_OVR_") -> None:
     applied: list[str] = []
     for name, value in list(os.environ.items()):
@@ -125,12 +152,12 @@ def main() -> None:
     
     # --- 1.2 RESOURCE OPTIMIZATION ---
     # Configuração agressiva para o PC de 64GB: maximiza velocidade de cache e dataset
-    os.environ["SNIPER_CACHE_WORKERS"] = "12"
-    os.environ["SNIPER_DATASET_WORKERS"] = "12"
-    os.environ["SNIPER_CACHE_PER_WORKER_MB"] = "2048"
-    os.environ["SNIPER_DATASET_PER_WORKER_MB"] = "2048"
-    os.environ["SNIPER_CACHE_RAM_PCT"] = "90.0"
-    os.environ["SNIPER_DATASET_RAM_PCT"] = "90.0"
+    os.environ.setdefault("SNIPER_CACHE_WORKERS", "12")
+    os.environ.setdefault("SNIPER_DATASET_WORKERS", "12")
+    os.environ.setdefault("SNIPER_CACHE_PER_WORKER_MB", "2048")
+    os.environ.setdefault("SNIPER_DATASET_PER_WORKER_MB", "2048")
+    os.environ.setdefault("SNIPER_CACHE_RAM_PCT", "90.0")
+    os.environ.setdefault("SNIPER_DATASET_RAM_PCT", "90.0")
     
     # Safe mode (opcional): se o PC começar a travar, mude force_safe para True
     force_safe = False
@@ -158,7 +185,11 @@ def main() -> None:
     entry_ratio_neg_per_pos = _env_float("TRAIN_ENTRY_RATIO_NEG_PER_POS", 4.0)
     max_rows_entry = _env_int("TRAIN_MAX_ROWS_ENTRY", 2_000_000)
     full_pool_max_rows_entry = _env_int("TRAIN_FULL_POOL_MAX_ROWS_ENTRY", max_rows_entry)
+    min_symbols_used_per_period = _env_int("TRAIN_MIN_SYMBOLS_USED_PER_PERIOD", 30)
     offsets_days = _env_int_tuple("TRAIN_OFFSETS_DAYS", (0, 180, 360, 540, 720, 900, 1080, 1260, 1440))
+    explicit_symbols = _env_symbols("TRAIN_SYMBOLS")
+    if not explicit_symbols:
+        explicit_symbols = _load_symbols_from_file(_env_str("TRAIN_SYMBOLS_FILE", ""))
     # Alinhamento com Explorer: usa fixed contract exit, sem treinar modelo de exit
     os.environ["SNIPER_TRAIN_EXIT_MODEL"] = "0"
 
@@ -232,13 +263,16 @@ def main() -> None:
     # Pool-full persistido/reusado automaticamente entre execuções.
     os.environ["SNIPER_FULL_POOL_REUSE"] = "1"
     os.environ["SNIPER_FULL_POOL_REBUILD"] = "0"
-    # Usa mtime no fingerprint para invalidar pool quando labels forem regravados.
     os.environ["SNIPER_FULL_POOL_FINGERPRINT_MODE"] = "mtime"
-    # Evita fallback para pool antigo incompativel quando o hash atual mudar.
     os.environ["SNIPER_FULL_POOL_USE_LAST"] = "0"
+    os.environ["SNIPER_FULL_POOL_KEEP_LAST"] = "3"
     os.environ["SNIPER_FULL_POOL_CACHE_DIR"] = "D:/astra/cache_sniper/full_pool"
     _apply_train_overrides()
-    print(f"[train-wf-crypto] full_pool_cache_dir={os.environ['SNIPER_FULL_POOL_CACHE_DIR']}", flush=True)
+    print(
+        f"[train-wf-crypto] full_pool_cache_dir={os.environ['SNIPER_FULL_POOL_CACHE_DIR']} "
+        f"keep_last={os.environ['SNIPER_FULL_POOL_KEEP_LAST']}",
+        flush=True,
+    )
     print(
         f"[train-wf-crypto] feature_cache_dir={feature_cache_dir} timeframe={timeframe_tag(int(candle_sec))} "
         f"bootstrap_cache={int(bool(bootstrap_cache))} files={int(feature_cache_files)}",
@@ -249,7 +283,12 @@ def main() -> None:
         f"max_rows_entry={int(max_rows_entry)} full_pool_rows={int(full_pool_max_rows_entry)}",
         flush=True,
     )
-    print(f"[train-wf-crypto] offsets_days={offsets_days} max_symbols={int(max_symbols)}", flush=True)
+    print(
+        f"[train-wf-crypto] offsets_days={offsets_days} max_symbols={int(max_symbols)} "
+        f"min_symbols_used_per_period={int(min_symbols_used_per_period)} "
+        f"explicit_symbols={len(explicit_symbols)}",
+        flush=True,
+    )
     print(
         f"[train-wf-crypto] contract_cfg label_thr={contract.entry_label_min_profit_pcts} "
         f"exit_span={int(contract.exit_ema_span)} offset={float(contract.exit_ema_init_offset_pct):.4f}",
@@ -305,6 +344,7 @@ def main() -> None:
 
     settings = TrainSniperWFSettings(
         asset_class="crypto",
+        symbols=tuple(explicit_symbols),
         entry_metric_mode=metric_mode,
         # Menos capacidade para reduzir gap train->val (overfit).
         entry_params={
@@ -333,7 +373,7 @@ def main() -> None:
         use_full_entry_pool=bool(use_full_entry_pool),
         # Pool full para slicing por periodo (evita rebuild completo por step).
         full_pool_max_rows_entry=int(full_pool_max_rows_entry),
-        min_symbols_used_per_period=30,
+        min_symbols_used_per_period=int(min_symbols_used_per_period),
     )
     run_dir = run(settings)
     print(f"[train-wf-crypto] run_dir: {run_dir}", flush=True)
