@@ -17,7 +17,7 @@
       href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
     />
 
-    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260330a" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260330b" />
     <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}?v=20260126a" />
 
     <script>
@@ -49,6 +49,21 @@
               <span id="last-update">—</span>
             </small>
           </div>
+
+          {% if auth_enabled and auth_is_admin %}
+          <a href="{{ url_for('admin_users') }}" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-people"></i>
+            <span class="d-none d-sm-inline ms-1">Usuários</span>
+          </a>
+          {% endif %}
+          {% if auth_enabled %}
+          <form method="post" action="{{ url_for('logout') }}" class="m-0">
+            <button class="btn btn-sm btn-outline-secondary" type="submit">
+              <i class="bi bi-box-arrow-right"></i>
+              <span class="d-none d-sm-inline ms-1">Sair</span>
+            </button>
+          </form>
+          {% endif %}
 
           <button id="theme-toggle" class="btn btn-sm btn-outline-secondary">
             <i class="bi bi-moon-stars"></i>

@@ -2,7 +2,6 @@ import os
 import sys
 import subprocess
 import time
-import shutil
 from pathlib import Path
 from datetime import datetime
 import pandas as pd

@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or "Astra Tradebot" }}</title>
+
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+      integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+      crossorigin="anonymous"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260330b" />
+
+    <style>
+      :root {
+        --text-main: #f8fafc;
+        --text-muted: rgba(255, 255, 255, 0.68);
+        --surface: rgba(16, 19, 26, 0.66);
+        --surface-light: rgba(255, 255, 255, 0.08);
+        --accent: #7c5cff;
+        --accent-2: #00ffb3;
+      }
+
+      body {
+        color: var(--text-main);
+        font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+
+      .site-shell {
+        max-width: 1680px;
+        margin: 0 auto;
+      }
+
+      .site-nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+      }
+
+      .site-nav-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .hero-wrap {
+        padding: 88px 0 32px;
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.25fr) minmax(380px, 0.75fr);
+        gap: 26px;
+        align-items: stretch;
+      }
+
+      .hero-card,
+      .summary-card,
+      .section-card,
+      .info-card,
+      .contact-card {
+        background: rgba(16, 19, 26, 0.62);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(12px);
+        border-radius: 24px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+      }
+
+      .eyebrow {
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 0.78rem;
+        font-weight: 700;
+      }
+
+      .hero-title {
+        font-size: clamp(3.2rem, 6vw, 5.9rem);
+        line-height: 0.94;
+        letter-spacing: -0.05em;
+        font-weight: 850;
+        margin: 0;
+        max-width: 980px;
+      }
+
+      .hero-title .accent {
+        color: var(--accent-2);
+      }
+
+      .hero-copy {
+        color: var(--text-muted);
+        font-size: 1.12rem;
+        line-height: 1.82;
+        max-width: 920px;
+      }
+
+      .hero-actions {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .btn-accent {
+        background: linear-gradient(135deg, rgba(124, 92, 255, 0.18), rgba(76, 58, 140, 0.34));
+        color: #fff;
+        border: 1px solid rgba(124, 92, 255, 0.34);
+        backdrop-filter: blur(10px);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.08),
+          0 10px 24px rgba(0, 0, 0, 0.22);
+        letter-spacing: 0.01em;
+      }
+
+      .btn-accent:hover,
+      .btn-accent:focus {
+        color: #fff;
+        background: linear-gradient(135deg, rgba(124, 92, 255, 0.24), rgba(88, 66, 164, 0.42));
+        border-color: rgba(124, 92, 255, 0.46);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.10),
+          0 12px 26px rgba(0, 0, 0, 0.26);
+      }
+
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .stat-label {
+        color: var(--text-muted);
+        font-size: 0.74rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 700;
+      }
+
+      .stat-value {
+        font-size: 1.52rem;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+      }
+
+      .divider-line {
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.12), transparent);
+        margin: 14px 0 20px;
+      }
+
+      .chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .chip {
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 999px;
+        padding: 0.42rem 0.82rem;
+        color: var(--text-muted);
+        font-size: 0.79rem;
+      }
+
+      .section-stack {
+        display: grid;
+        gap: 22px;
+        padding-bottom: 36px;
+      }
+
+      .section-title {
+        font-size: 1.65rem;
+        font-weight: 750;
+        letter-spacing: -0.03em;
+        margin: 0;
+      }
+
+      .section-copy {
+        color: var(--text-muted);
+        line-height: 1.8;
+        margin: 0;
+      }
+
+      .info-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+      }
+
+      .info-card h3 {
+        font-size: 1rem;
+        font-weight: 700;
+        margin-bottom: 10px;
+      }
+
+      .info-card p {
+        color: var(--text-muted);
+        margin: 0;
+        line-height: 1.7;
+      }
+
+      .pipeline-list {
+        display: grid;
+        gap: 14px;
+      }
+
+      .pipeline-item {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr);
+        gap: 14px;
+        align-items: start;
+      }
+
+      .pipeline-step {
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--accent-2);
+      }
+
+      .contact-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+        gap: 18px;
+        align-items: stretch;
+      }
+
+      .contact-card .label {
+        color: var(--text-muted);
+        font-size: 0.76rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-weight: 700;
+      }
+
+      .contact-card .value {
+        font-size: 1.02rem;
+        font-weight: 650;
+        word-break: break-word;
+      }
+
+      @media (max-width: 1180px) {
+        .hero-grid,
+        .info-grid,
+        .contact-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 840px) {
+        .site-nav {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .site-nav-actions {
+          width: 100%;
+          justify-content: flex-start;
+        }
+
+        .stat-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .pipeline-item {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .hero-wrap {
+          padding-top: 64px;
+        }
+
+        .stat-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body class="astra-body">
+    <header class="navbar navbar-expand-lg navbar-glass sticky-top">
+      <div class="container-fluid px-3">
+        <div class="site-shell w-100">
+          <div class="site-nav">
+            <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
+              <span class="brand-dot"></span>
+              <span class="fw-semibold">Astra Tradebot</span>
+              <span class="badge text-bg-secondary ms-1">{{ runtime_badge or "Astra" }}</span>
+            </a>
+            <div class="site-nav-actions">
+              <a href="#contact" class="btn btn-sm btn-outline-secondary">
+                <i class="bi bi-envelope me-1"></i>Entrar em contato
+              </a>
+              {% if auth_enabled and session_has_access %}
+              <a href="{{ dashboard_url }}" class="btn btn-sm btn-outline-secondary">
+                <i class="bi bi-grid-1x2 me-1"></i>Dashboard
+              </a>
+              {% else %}
+              <a href="{{ register_url }}" class="btn btn-sm btn-outline-secondary">Criar conta</a>
+              <a href="{{ login_url }}" class="btn btn-sm btn-accent">Entrar</a>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="container-fluid px-3">
+      <div class="site-shell">
+        <section class="hero-wrap">
+          <div class="hero-grid">
+            <section class="hero-card p-4 p-lg-5">
+              <div class="eyebrow mb-3">{{ hero_eyebrow }}</div>
+              <h1 class="hero-title mb-4">{{ hero_prefix }} <span class="accent">{{ hero_accent }}</span>{{ hero_suffix }}</h1>
+              <p class="hero-copy mb-4">{{ hero_copy }}</p>
+              <div class="hero-actions">
+                <a href="#contact" class="btn btn-accent btn-lg">
+                  <i class="bi bi-chat-left-text me-2"></i>Request Conversation
+                </a>
+                <a href="#methodology" class="btn btn-outline-secondary btn-lg">
+                  <i class="bi bi-diagram-3 me-2"></i>System Overview
+                </a>
+              </div>
+            </section>
+
+            <aside class="summary-card p-4 p-lg-4">
+              <div class="eyebrow mb-3">Current stack</div>
+              <div class="stat-grid mb-3">
+                {% for item in stats %}
+                <div>
+                  <div class="stat-label">{{ item["label"] }}</div>
+                  <div class="stat-value">{{ item["value"] }}</div>
+                </div>
+                {% endfor %}
+              </div>
+              <div class="divider-line"></div>
+              <p class="section-copy mb-3">{{ summary_copy }}</p>
+              <div class="chip-row">
+                {% for chip in chips %}
+                <span class="chip">{{ chip }}</span>
+                {% endfor %}
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <div class="section-stack">
+          <section id="methodology" class="section-card p-4 p-lg-5">
+            <div class="eyebrow mb-2">System overview</div>
+            <h2 class="section-title mb-3">{{ system_title }}</h2>
+            <p class="section-copy mb-0">{{ system_copy }}</p>
+          </section>
+
+          <section class="info-grid">
+            {% for card in info_cards %}
+            <article class="info-card p-4">
+              <div class="eyebrow mb-2">{{ card["eyebrow"] }}</div>
+              <h3>{{ card["title"] }}</h3>
+              <p>{{ card["copy"] }}</p>
+            </article>
+            {% endfor %}
+          </section>
+
+          <section class="section-card p-4 p-lg-5">
+            <div class="eyebrow mb-2">Research and infrastructure pipeline</div>
+            <h2 class="section-title mb-4">Built as a complete stack, not a single isolated model.</h2>
+            <div class="pipeline-list">
+              {% for item in pipeline %}
+              <div class="pipeline-item">
+                <div class="pipeline-step">{{ item["step"] }}</div>
+                <div>
+                  <div class="fw-semibold mb-1">{{ item["title"] }}</div>
+                  <p class="section-copy">{{ item["copy"] }}</p>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+          </section>
+
+          <section id="contact" class="contact-grid">
+            <section class="section-card p-4 p-lg-5">
+              <div class="eyebrow mb-2">Partnership model</div>
+              <h2 class="section-title mb-3">Selective collaboration for aligned capital and engineering-focused partnerships.</h2>
+              <p class="section-copy mb-0">
+                Astra is not presented as a public fund. The positioning here is systematic research, proprietary infrastructure,
+                and quant/engineering capability for private conversations with family offices, smaller funds, and serious partners.
+              </p>
+            </section>
+            <aside class="contact-card p-4">
+              <div class="eyebrow mb-3">Contact</div>
+              <div class="label mb-1">Email</div>
+              <div class="value mb-3">{{ contact_email }}</div>
+              <div class="label mb-1">Focus</div>
+              <div class="value mb-3">{{ contact_focus }}</div>
+              <a href="{{ contact_href }}" class="btn btn-accent w-100">
+                <i class="bi bi-envelope-paper me-2"></i>Entrar em contato
+              </a>
+            </aside>
+          </section>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

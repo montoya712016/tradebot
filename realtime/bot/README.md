@@ -14,4 +14,8 @@ Núcleo do bot live/paper.
 - `binance.py` - operações encapsuladas via `BinanceTrader`.
 - `executors.py` - adaptadores de execução paper/Binance usados pelo bot.
 
+## Dashboard
+Para a documentação consolidada do dashboard, login, cadastro, papéis e base local de usuários:
+- [../../modules/realtime/DASHBOARD.md](../../modules/realtime/DASHBOARD.md)
+
 O objetivo dessa pasta é reduzir o acoplamento do loop principal com detalhes de infraestrutura.

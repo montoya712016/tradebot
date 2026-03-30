@@ -3,7 +3,7 @@ import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from flask import Flask, render_template_string, jsonify, abort, send_file
+from flask import Flask, render_template, render_template_string, jsonify, abort, send_file, session, request, redirect, url_for
 import threading
 import time
 import subprocess
@@ -15,14 +15,34 @@ import tempfile
 from dataclasses import dataclass, field
 from collections import deque
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_IMPORT_ROOT = SCRIPT_DIR.parent
+if str(REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_IMPORT_ROOT))
+
+from modules.realtime.auth import (
+    delete_user,
+    ensure_user_store,
+    get_user,
+    list_users,
+    load_dashboard_auth_config,
+    normalize_next_url,
+    register_user,
+    session_has_access,
+    session_is_admin,
+    session_is_owner,
+    set_user_owner,
+    set_user_admin,
+    set_user_enabled,
+    verify_user_login,
+)
+
 # Reuse existing ngrok logic
 @dataclass
 class NgrokConfig:
     downloads_dir: Path = Path(r"C:\Users\NovoLucas\Downloads")
     domain: str = "astra-assistent.ngrok.app"
     port: int = 5060
-    username: str = "astra"
-    password: str = "Peixe_2017."
     authtoken: str = os.getenv("WF_NGROK_AUTHTOKEN", "")
 
     def build_command(self) -> list[str]:
@@ -30,7 +50,6 @@ class NgrokConfig:
         cmd = [
             str(exe), "http",
             "--domain", self.domain,
-            "--basic-auth", f"{self.username}:{self.password}",
         ]
         if self.authtoken:
             cmd += ["--authtoken", self.authtoken]
@@ -56,12 +75,24 @@ class NgrokManager:
         if self._proc:
             self._proc.terminate()
 
-app = Flask(__name__)
-
 # Paths
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EQUITY_METRIC_CACHE: dict[str, dict] = {}
 SHARED_DASHBOARD_CSS = (REPO_ROOT / "modules" / "realtime" / "static" / "astra_shared.css")
+app = Flask(
+    __name__,
+    template_folder=str(REPO_ROOT / "modules" / "realtime" / "templates"),
+    static_folder=str(REPO_ROOT / "modules" / "realtime" / "static"),
+    static_url_path="/static",
+)
+app.secret_key = os.getenv("ASTRA_DASHBOARD_SECRET_KEY", "astra-dashboard-dev")
+AUTH_CFG = load_dashboard_auth_config(
+    user_envs=("WF_DASHBOARD_USER", "ASTRA_DASHBOARD_USER", "DASHBOARD_USER", "NGROK_BASIC_USER"),
+    pass_envs=("WF_DASHBOARD_PASS", "ASTRA_DASHBOARD_PASS", "DASHBOARD_PASS", "NGROK_BASIC_PASS"),
+    session_key="astra_fair_dashboard_auth",
+    default_db_relpath=str(REPO_ROOT / "local" / "dashboard_users.json"),
+)
+ensure_user_store(AUTH_CFG)
 
 
 def _fair_root() -> Path:
@@ -74,6 +105,203 @@ def _shared_dashboard_css_text() -> str:
         return SHARED_DASHBOARD_CSS.read_text(encoding="utf-8")
     except Exception:
         return ""
+
+
+@app.context_processor
+def inject_auth_context() -> dict:
+    current_user = session.get(AUTH_CFG.session_key)
+    return {
+        "auth_enabled": AUTH_CFG.enabled,
+        "auth_is_admin": session_is_admin(AUTH_CFG, current_user),
+        "auth_is_owner": session_is_owner(AUTH_CFG, current_user),
+    }
+
+
+@app.before_request
+def require_dashboard_login():
+    if not AUTH_CFG.enabled:
+        return None
+    endpoint = (request.endpoint or "").strip()
+    if endpoint in {"index", "login", "register", "logout", "static"}:
+        return None
+    if session_has_access(AUTH_CFG, session.get(AUTH_CFG.session_key)):
+        return None
+    session.pop(AUTH_CFG.session_key, None)
+    next_url = normalize_next_url(request.full_path if request.query_string else request.path)
+    return redirect(url_for("login", next=next_url))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not AUTH_CFG.enabled:
+        return redirect(url_for("dashboard"))
+    next_url = normalize_next_url(request.values.get("next"), fallback=url_for("dashboard"))
+    error = ""
+    username = ""
+    if request.method == "POST":
+        username = str(request.form.get("username", "") or "").strip()
+        password = str(request.form.get("password", "") or "")
+        ok, error = verify_user_login(AUTH_CFG, username, password)
+        if ok:
+            session.clear()
+            session[AUTH_CFG.session_key] = str(get_user(AUTH_CFG, username).get("username"))
+            return redirect(next_url)
+    return render_template(
+        "login.html",
+        title="Astra — Fair Explore Login",
+        badge="Fair Explore",
+        eyebrow="Acesso protegido",
+        heading="Entrar no Fair Explore",
+        subtitle="Use suas credenciais para acompanhar milestones, trials e artefatos do explore.",
+        error=error,
+        next_url=next_url,
+        username=username,
+    )
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if not AUTH_CFG.enabled:
+        return redirect(url_for("dashboard"))
+    next_url = normalize_next_url(request.values.get("next"), fallback=url_for("dashboard"))
+    error = ""
+    success = ""
+    full_name = ""
+    cpf = ""
+    phone = ""
+    email = ""
+    username = ""
+    if request.method == "POST":
+        full_name = str(request.form.get("full_name", "") or "").strip()
+        cpf = str(request.form.get("cpf", "") or "").strip()
+        phone = str(request.form.get("phone", "") or "").strip()
+        email = str(request.form.get("email", "") or "").strip()
+        username = str(request.form.get("username", "") or "").strip()
+        password = str(request.form.get("password", "") or "")
+        ok, message = register_user(
+            AUTH_CFG,
+            full_name=full_name,
+            cpf=cpf,
+            phone=phone,
+            email=email,
+            username=username,
+            password=password,
+        )
+        if ok:
+            success = message
+            full_name = ""
+            cpf = ""
+            phone = ""
+            email = ""
+            username = ""
+        else:
+            error = message
+    return render_template(
+        "register.html",
+        title="Astra — Criar conta Fair Explore",
+        badge="Fair Explore",
+        eyebrow="Cadastro",
+        heading="Criar conta para o Fair Explore",
+        subtitle="Seu cadastro ficará pendente até você liberar manualmente o acesso na base local de usuários.",
+        error=error,
+        success=success,
+        next_url=next_url,
+        full_name=full_name,
+        cpf=cpf,
+        phone=phone,
+        email=email,
+        username=username,
+    )
+
+
+@app.post("/logout")
+def logout():
+    session.pop(AUTH_CFG.session_key, None)
+    return redirect(url_for("index"))
+
+
+@app.get("/admin/users")
+def admin_users():
+    if not session_is_admin(AUTH_CFG, session.get(AUTH_CFG.session_key)):
+        return redirect(url_for("dashboard"))
+    users = list_users(AUTH_CFG)
+    flash_success = session.pop("admin_flash_success", "")
+    flash_error = session.pop("admin_flash_error", "")
+    return render_template(
+        "admin_users.html",
+        title="Astra — Usuários Fair Explore",
+        badge="Fair Explore Admin",
+        eyebrow="Administração",
+        heading="Usuários do Fair Explore",
+        subtitle="Gerencie aprovações e bloqueios de acesso ao dashboard do explore.",
+        total_users=len(users),
+        pending_users=sum(1 for item in users if not item.get("enabled")),
+        enabled_users=sum(1 for item in users if item.get("enabled")),
+        admin_users=sum(1 for item in users if item.get("is_admin")),
+        owner_users=sum(1 for item in users if item.get("is_owner")),
+        users=users,
+        action_url=url_for("admin_users_action"),
+        home_url=url_for("dashboard"),
+        flash_success=flash_success,
+        flash_error=flash_error,
+    )
+
+
+@app.post("/admin/users/action")
+def admin_users_action():
+    current_user = str(session.get(AUTH_CFG.session_key, "") or "")
+    is_admin = session_is_admin(AUTH_CFG, current_user)
+    is_owner = session_is_owner(AUTH_CFG, current_user)
+    if not is_admin:
+        return redirect(url_for("dashboard"))
+    username = str(request.form.get("username", "") or "").strip()
+    action = str(request.form.get("action", "") or "").strip().lower()
+    target = get_user(AUTH_CFG, username)
+    if target and target.get("is_owner") and not is_owner:
+        ok, msg = False, "A conta owner só pode ser alterada pelo próprio owner."
+        session["admin_flash_error"] = msg
+        return redirect(url_for("admin_users"))
+    if action == "enable":
+        ok, msg = set_user_enabled(AUTH_CFG, username, True)
+    elif action == "disable":
+        if username == current_user and is_owner:
+            ok, msg = False, "O owner não pode desabilitar a própria conta."
+        else:
+            ok, msg = set_user_enabled(AUTH_CFG, username, False)
+    elif action == "make_admin":
+        ok, msg = set_user_admin(AUTH_CFG, username, True)
+    elif action == "remove_admin":
+        admins = [u for u in list_users(AUTH_CFG) if u.get("is_admin")]
+        if username == current_user:
+            ok, msg = False, "Você não pode remover seu próprio papel de admin."
+        elif len(admins) <= 1:
+            ok, msg = False, "Não é possível remover o último admin."
+        else:
+            ok, msg = set_user_admin(AUTH_CFG, username, False)
+    elif action == "make_owner":
+        if not is_owner:
+            ok, msg = False, "Só o owner pode promover outro owner."
+        else:
+            ok, msg = set_user_owner(AUTH_CFG, username, True)
+    elif action == "remove_owner":
+        owners = [u for u in list_users(AUTH_CFG) if u.get("is_owner")]
+        if not is_owner:
+            ok, msg = False, "Só o owner pode remover outro owner."
+        elif username == current_user:
+            ok, msg = False, "Você não pode remover o próprio papel de owner."
+        elif len(owners) <= 1:
+            ok, msg = False, "Não é possível remover o último owner."
+        else:
+            ok, msg = set_user_owner(AUTH_CFG, username, False)
+    elif action == "delete":
+        if username == current_user:
+            ok, msg = False, "Você não pode remover a própria conta em uso."
+        else:
+            ok, msg = delete_user(AUTH_CFG, username)
+    else:
+        ok, msg = False, "Ação inválida."
+    session["admin_flash_success" if ok else "admin_flash_error"] = msg
+    return redirect(url_for("admin_users"))
 
 REFRESH_PARAM_FIELDS = [
     "label_profit_thr",
@@ -354,6 +582,370 @@ def api_data():
 
 @app.route("/")
 def index():
+    contact_email = os.getenv("ASTRA_CONTACT_EMAIL", "astraquantlab@gmail.com").strip() or "astraquantlab@gmail.com"
+    return render_template(
+        "landing.html",
+        title="Astra Tradebot",
+        runtime_badge="Fair Explore",
+        dashboard_url=url_for("dashboard"),
+        login_url=url_for("login", next=url_for("dashboard")),
+        register_url=url_for("register", next=url_for("dashboard")),
+        contact_email=contact_email,
+        contact_focus="Quant research, systematic engineering, and private partnerships",
+        contact_href=f"mailto:{contact_email}?subject=Astra%20Tradebot%20Conversation",
+        session_has_access=session_has_access(AUTH_CFG, session.get(AUTH_CFG.session_key)),
+        hero_eyebrow="Astra • quantitative research • systematic execution",
+        hero_prefix="Systematic crypto research and",
+        hero_accent="proprietary trading infrastructure",
+        hero_suffix=".",
+        hero_copy=(
+            "Astra develops Tradebot, a proprietary stack built around walk-forward research, "
+            "controlled deployment, and production-grade engineering for digital asset markets."
+        ),
+        stats=[
+            {"label": "Research steps", "value": "7"},
+            {"label": "Edge params", "value": "4"},
+            {"label": "Refreshes / step", "value": "49"},
+            {"label": "Backtests / step", "value": "1274"},
+        ],
+        summary_copy=(
+            "The current production candidate is being refined through independent step exploration, "
+            "out-of-sample validation, and dashboard-based operational review."
+        ),
+        chips=[
+            "Walk-forward design",
+            "OOS validation",
+            "Risk-aware deployment",
+            "Quant + engineering",
+            "Distributed parameter search",
+        ],
+        system_title="Tradebot is Astra’s internal research and execution stack.",
+        system_copy=(
+            "It combines market data ingestion, feature engineering, labeling workflows, walk-forward "
+            "training, portfolio backtesting, out-of-sample evaluation, and live-ready monitoring in a "
+            "single controlled environment."
+        ),
+        info_cards=[
+            {
+                "eyebrow": "Research",
+                "title": "Methodological discipline",
+                "copy": "Walk-forward model design, parameter exploration, and out-of-sample validation aimed at reducing narrative bias and backtest illusion.",
+            },
+            {
+                "eyebrow": "Infrastructure",
+                "title": "Engineering-first stack",
+                "copy": "Data pipeline, training flow, portfolio backtests, dashboards, auth, and operational tooling built for serious iteration and deployment.",
+            },
+            {
+                "eyebrow": "Partnership",
+                "title": "Selective collaboration",
+                "copy": "Structured for private conversations with family offices, small funds, and aligned partners seeking quant and systematic engineering capability.",
+            },
+        ],
+        pipeline=[
+            {
+                "step": "01",
+                "title": "Market data and local storage",
+                "copy": "Historical OHLC ingestion, cache maintenance, and local persistence for reproducible research.",
+            },
+            {
+                "step": "02",
+                "title": "Features and labels",
+                "copy": "Feature generation, contract refresh, and labeling workflows built for systematic iteration rather than one-off backtests.",
+            },
+            {
+                "step": "03",
+                "title": "Walk-forward training",
+                "copy": "Model training with controlled calibration, fixed training policy, and step-aware historical splits.",
+            },
+            {
+                "step": "04",
+                "title": "Distributed parameter search",
+                "copy": "Fair Explore v5 searches only the edge layer with deterministic coverage instead of broad random optimization.",
+            },
+            {
+                "step": "05",
+                "title": "Portfolio and OOS validation",
+                "copy": "Single-symbol and multi-asset backtests followed by stitched out-of-sample walk-forward evaluation.",
+            },
+            {
+                "step": "06",
+                "title": "Operational surface",
+                "copy": "Protected dashboards, local access control, runtime monitoring, and deployment-oriented review loops.",
+            },
+        ],
+    )
+    shared_css = _shared_dashboard_css_text()
+    html = """
+    <!DOCTYPE html>
+    <html lang="en" data-bs-theme="dark">
+    <head>
+        <title>Astra Tradebot</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link
+            href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+            rel="stylesheet"
+            integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+            crossorigin="anonymous"
+        />
+        <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+        />
+        <style>
+            {{ shared_css|safe }}
+            :root {
+                --text-main: #f8fafc;
+                --text-muted: rgba(255, 255, 255, 0.68);
+                --surface: rgba(16, 19, 26, 0.66);
+                --surface-light: rgba(255, 255, 255, 0.08);
+                --accent: #7c5cff;
+                --accent-2: #00ffb3;
+            }
+            body {
+                color: var(--text-main);
+                font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            }
+            .site-shell { max-width: 1340px; margin: 0 auto; }
+            .hero-wrap { padding: 72px 0 28px; }
+            .hero-grid {
+                display: grid;
+                grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+                gap: 24px;
+                align-items: stretch;
+            }
+            .hero-card,
+            .summary-card,
+            .section-card,
+            .offer-card {
+                background: rgba(16, 19, 26, 0.62);
+                border: 1px solid rgba(255,255,255,0.08);
+                backdrop-filter: blur(12px);
+                border-radius: 20px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.22);
+            }
+            .eyebrow {
+                color: var(--text-muted);
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                font-size: 0.78rem;
+                font-weight: 700;
+            }
+            .hero-title {
+                font-size: clamp(2.4rem, 5vw, 4.4rem);
+                line-height: 0.98;
+                letter-spacing: -0.04em;
+                font-weight: 800;
+                margin: 0;
+            }
+            .hero-title .accent { color: var(--accent-2); }
+            .hero-copy {
+                color: var(--text-muted);
+                font-size: 1.05rem;
+                line-height: 1.7;
+                max-width: 760px;
+            }
+            .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+            .btn-accent {
+                background: linear-gradient(135deg, #7c5cff, #5a8cff);
+                color: #fff;
+                border: none;
+                box-shadow: 0 14px 28px rgba(124, 92, 255, 0.26);
+            }
+            .btn-accent:hover, .btn-accent:focus { color: #fff; background: linear-gradient(135deg, #6f51ff, #4e7bff); }
+            .stat-grid {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 14px;
+            }
+            .stat-label {
+                color: var(--text-muted);
+                font-size: 0.74rem;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                font-weight: 700;
+            }
+            .stat-value {
+                font-size: 1.45rem;
+                font-weight: 800;
+                letter-spacing: -0.03em;
+            }
+            .section-title {
+                font-size: 1.55rem;
+                font-weight: 700;
+                letter-spacing: -0.03em;
+                margin: 0;
+            }
+            .section-copy {
+                color: var(--text-muted);
+                line-height: 1.75;
+                margin: 0;
+            }
+            .offer-grid {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 18px;
+            }
+            .offer-card h3 {
+                font-size: 1rem;
+                font-weight: 700;
+                margin-bottom: 10px;
+            }
+            .offer-card p {
+                color: var(--text-muted);
+                margin: 0;
+                line-height: 1.65;
+            }
+            .chip-row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            .chip {
+                border: 1px solid rgba(255,255,255,0.10);
+                background: rgba(255,255,255,0.04);
+                border-radius: 999px;
+                padding: 0.4rem 0.8rem;
+                color: var(--text-muted);
+                font-size: 0.78rem;
+            }
+            .divider-line {
+                height: 1px;
+                background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
+                margin: 10px 0 18px;
+            }
+            @media (max-width: 1080px) {
+                .hero-grid,
+                .offer-grid,
+                .stat-grid { grid-template-columns: 1fr; }
+            }
+        </style>
+    </head>
+    <body class="astra-body">
+        <header class="navbar navbar-expand-lg navbar-glass sticky-top">
+            <div class="container-fluid px-3">
+                <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
+                    <span class="brand-dot"></span>
+                    <span class="fw-semibold">Astra Tradebot</span>
+                    <span class="badge text-bg-secondary ms-1">Astra</span>
+                </a>
+                <div class="d-flex align-items-center gap-2">
+                    {% if auth_enabled and session_has_access %}
+                    <a href="{{ url_for('dashboard') }}" class="btn btn-sm btn-outline-secondary">
+                        <i class="bi bi-grid-1x2"></i>
+                        <span class="d-none d-sm-inline ms-1">Dashboard</span>
+                    </a>
+                    {% endif %}
+                    {% if auth_enabled and session_has_access %}
+                    <a href="{{ url_for('dashboard') }}" class="btn btn-sm btn-outline-secondary">
+                        <i class="bi bi-grid-1x2"></i>
+                        <span class="d-none d-sm-inline ms-1">Open Dashboard</span>
+                    </a>
+                    {% else %}
+                    <a href="{{ url_for('login', next=url_for('dashboard')) }}" class="btn btn-sm btn-outline-secondary">
+                        <i class="bi bi-box-arrow-in-right"></i>
+                        <span class="d-none d-sm-inline ms-1">Login</span>
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+        </header>
+
+        <main class="container-fluid px-3">
+            <div class="site-shell">
+                <section class="hero-wrap">
+                    <div class="hero-grid">
+                        <section class="hero-card p-4 p-lg-5">
+                            <div class="eyebrow mb-3">Astra • Quantitative research • Systematic execution</div>
+                            <h1 class="hero-title mb-4">Systematic crypto research and <span class="accent">proprietary trading infrastructure</span>.</h1>
+                            <p class="hero-copy mb-4">
+                                Astra develops Tradebot, a proprietary stack built around walk-forward research,
+                                controlled deployment, and production-grade engineering for digital asset markets.
+                            </p>
+                            <div class="hero-actions">
+                                {% if auth_enabled and session_has_access %}
+                                <a href="{{ url_for('dashboard') }}" class="btn btn-accent btn-lg">
+                                    <i class="bi bi-grid-1x2 me-2"></i>Open Dashboard
+                                </a>
+                                {% else %}
+                                <a href="{{ url_for('login', next=url_for('dashboard')) }}" class="btn btn-accent btn-lg">
+                                    <i class="bi bi-box-arrow-in-right me-2"></i>Login to Dashboard
+                                </a>
+                                {% endif %}
+                                <a href="#system-overview" class="btn btn-outline-secondary btn-lg">
+                                    <i class="bi bi-diagram-3 me-2"></i>System Overview
+                                </a>
+                            </div>
+                        </section>
+
+                        <aside class="summary-card p-4 p-lg-4">
+                            <div class="eyebrow mb-3">Current stack</div>
+                            <div class="stat-grid mb-3">
+                                <div>
+                                    <div class="stat-label">Research steps</div>
+                                    <div class="stat-value">7</div>
+                                </div>
+                                <div>
+                                    <div class="stat-label">Edge params</div>
+                                    <div class="stat-value">4</div>
+                                </div>
+                                <div>
+                                    <div class="stat-label">Refreshes / step</div>
+                                    <div class="stat-value">49</div>
+                                </div>
+                            </div>
+                            <div class="divider-line"></div>
+                            <p class="section-copy mb-3">
+                                The current production candidate is being refined through independent step exploration,
+                                out-of-sample validation, and dashboard-based operational review.
+                            </p>
+                            <div class="chip-row">
+                                <span class="chip">Walk-forward design</span>
+                                <span class="chip">OOS validation</span>
+                                <span class="chip">Risk-aware deployment</span>
+                                <span class="chip">Quant + engineering</span>
+                            </div>
+                        </aside>
+                    </div>
+                </section>
+
+                <section id="system-overview" class="section-card p-4 p-lg-5 mb-4">
+                    <div class="eyebrow mb-2">System overview</div>
+                    <h2 class="section-title mb-3">Tradebot is Astra’s internal research and execution stack.</h2>
+                    <p class="section-copy mb-0">
+                        It combines market data ingestion, feature engineering, labeling workflows, walk-forward training,
+                        portfolio backtesting, out-of-sample evaluation, and live-ready monitoring in a single controlled environment.
+                    </p>
+                </section>
+
+                <section class="offer-grid pb-4">
+                    <article class="offer-card p-4">
+                        <div class="eyebrow mb-2">Research</div>
+                        <h3>Methodological discipline</h3>
+                        <p>Walk-forward model design, parameter exploration, and out-of-sample validation aimed at reducing narrative bias and backtest illusion.</p>
+                    </article>
+                    <article class="offer-card p-4">
+                        <div class="eyebrow mb-2">Infrastructure</div>
+                        <h3>Engineering-first stack</h3>
+                        <p>Data pipeline, training flow, portfolio backtests, dashboards, auth, and operational tooling built for serious iteration and deployment.</p>
+                    </article>
+                    <article class="offer-card p-4">
+                        <div class="eyebrow mb-2">Partnership</div>
+                        <h3>Selective collaboration</h3>
+                        <p>Structured for private conversations with family offices, small funds, and aligned partners seeking quant and systematic engineering capability.</p>
+                    </article>
+                </section>
+            </div>
+        </main>
+    </body>
+    </html>
+    """
+    return render_template_string(html, shared_css=shared_css, session_has_access=session_has_access(AUTH_CFG, session.get(AUTH_CFG.session_key)))
+
+
+@app.route("/dashboard")
+def dashboard():
     # Show milestones from oldest to newest (to match orchestrator start)
     steps = [1440, 1260, 1080, 900, 720, 540, 360, 180]
     all_data = {step: get_step_data(step) for step in steps}
@@ -510,7 +1102,7 @@ def index():
     <body class="astra-body">
         <header class="navbar navbar-expand-lg navbar-glass sticky-top">
             <div class="container-fluid px-3">
-                <a class="navbar-brand d-flex align-items-center gap-2" href="/">
+                <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
                     <span class="brand-dot"></span>
                     <span class="fw-semibold">Astra Tradebot</span>
                     <span class="badge text-bg-secondary ms-1">Fair Explore</span>
@@ -524,6 +1116,20 @@ def index():
                             <span id="countdown">próxima atualização...</span>
                         </small>
                     </div>
+                    {% if auth_enabled and auth_is_admin %}
+                    <a href="{{ url_for('admin_users') }}" class="btn btn-sm btn-outline-secondary">
+                        <i class="bi bi-people"></i>
+                        <span class="d-none d-sm-inline ms-1">Usuários</span>
+                    </a>
+                    {% endif %}
+                    {% if auth_enabled %}
+                    <form method="post" action="{{ url_for('logout') }}" class="m-0">
+                        <button class="btn btn-sm btn-outline-secondary" type="submit">
+                            <i class="bi bi-box-arrow-right"></i>
+                            <span class="d-none d-sm-inline ms-1">Sair</span>
+                        </button>
+                    </form>
+                    {% endif %}
                 </div>
             </div>
         </header>
@@ -594,6 +1200,7 @@ def index():
         ></script>
 
         <script>
+            const artifactBase = "{{ url_for('artifact', relpath='__REL__') }}";
             let state = {
                 data: {},
                 activeStep: localStorage.getItem('fair_activeStep') || '1440',
@@ -607,7 +1214,7 @@ def index():
 
             async function fetchData() {
                 try {
-                    const res = await fetch('/api/data');
+                    const res = await fetch('{{ url_for("api_data") }}');
                     state.data = await res.json();
                     state.lastUpdate = Date.now();
                     document.getElementById('status-dot').textContent = 'dados ao vivo';
@@ -819,7 +1426,7 @@ def index():
                                                         ${renderParamCard(r.params?.train)}
                                                         ${renderParamCard(r.params?.trial)}
                                                     </div>
-                                                    ${r.rel_html ? `<iframe class="iframe-container" src="/artifact/${r.rel_html}"></iframe>` : '<div class="empty-state" style="padding: 40px;">No plot artifact found for this trial.</div>'}
+                                                    ${r.rel_html ? `<iframe class="iframe-container" src="${artifactBase.replace('__REL__', r.rel_html)}"></iframe>` : '<div class="empty-state" style="padding: 40px;">No plot artifact found for this trial.</div>'}
                                                 </div>
                                             ` : ''}
                                         </td>

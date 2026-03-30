@@ -30,4 +30,5 @@ modules/data/generated/
 # Secrets (local only)
 modules/config/secrets.py
 .env
+local/
 
