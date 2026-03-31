@@ -1,0 +1,31 @@
+<svg width="320" height="320" viewBox="0 0 320 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g transform="rotate(-27 160 150)">
+    <ellipse
+      cx="160"
+      cy="150"
+      rx="128"
+      ry="74"
+      stroke="#EEE8DF"
+      stroke-width="9"
+      stroke-linecap="round"
+      opacity="0.94"
+    />
+    <circle
+      cx="286"
+      cy="150"
+      r="7.2"
+      fill="#121A2B"
+      stroke="#EEE8DF"
+      stroke-width="4.2"
+    />
+  </g>
+
+  <path
+    d="M160 78L170.5 139.5L232 150L170.5 160.5L160 222L149.5 160.5L88 150L149.5 139.5L160 78Z"
+    fill="#121A2B"
+    stroke="#EEE8DF"
+    stroke-width="2.2"
+    stroke-linejoin="round"
+  />
+  <circle cx="160" cy="150" r="5.5" fill="#EEE8DF"/>
+</svg>

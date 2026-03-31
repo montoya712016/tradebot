@@ -52,6 +52,15 @@ Parâmetros de risco fixos:
 
 `max_positions` saiu do explore novo. O cap simultâneo agora é implícito: a carteira para de abrir novas posições quando o orçamento de exposição já foi consumido.
 
+Score atual do explore:
+- o ranking dos backtests usa uma fórmula curta baseada em 4 peças:
+  - retorno (`ret_pct`)
+  - drawdown absoluto (`max_dd`)
+  - regularidade operacional por `clusters`
+  - cauda por `worst_rolling_90d` e `worst_trade`
+- `trades` bruto não entra mais como multiplicador direto do score
+- o `explore_runs.csv` agora grava `worst_trade` e `worst_trade_raw`
+
 Plano por step:
 - `56` refreshes
 - `2` retrains por refresh
@@ -69,10 +78,15 @@ Ordem operacional padrão do script:
 2. build global do cache OHLC `5m` para o universo inteiro
 3. build global do cache de features do preset ativo (`features_pf_5m_core80`)
 4. prewarm integrado do cache de features dos steps (`tail_1260d..tail_180d`)
+   - a elegibilidade OHLC do step é inferida primeiro via metadados do cache `5m`, com fallback só para casos duvidosos
 5. opcionalmente, pass separado de OHLC por step se `WF_EXPLORE_PREWARM_SEPARATE_OHLC=1`
 6. refreshes de labels
 7. retrains
 8. backtests
+
+O treino do explore também reaproveita melhor o dataset:
+- o `full_pool` agora é construído com o maior `entry_ratio_neg_per_pos` do grid do step
+- os retrains do mesmo label só fazem re-slice desse pool, em vez de reconstruir o pool completo para cada modelo
 
 Concorrência:
 - os entrypoints não assumem mais `4/8/16` como padrão fixo

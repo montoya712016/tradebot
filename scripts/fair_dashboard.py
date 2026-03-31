@@ -36,6 +36,7 @@ from modules.realtime.auth import (
     set_user_enabled,
     verify_user_login,
 )
+from modules.realtime.site_oos_assets import build_v5_site_snapshot
 
 # Reuse existing ngrok logic
 @dataclass
@@ -202,7 +203,7 @@ def register():
         badge="Fair Explore",
         eyebrow="Cadastro",
         heading="Criar conta para o Fair Explore",
-        subtitle="Seu cadastro ficará pendente até você liberar manualmente o acesso na base local de usuários.",
+        subtitle="Seu cadastro ficará pendente até a liberação manual do acesso pela administração.",
         error=error,
         success=success,
         next_url=next_url,
@@ -340,8 +341,13 @@ PARAM_LABELS = {
 }
 
 def _to_float(v, default=0.0):
-    try: return float(v)
-    except: return default
+    try:
+        out = float(v)
+        if not np.isfinite(out):
+            return default
+        return out
+    except:
+        return default
 
 
 def _clean_value(value):
@@ -475,24 +481,18 @@ def _build_param_layers(df_all: pd.DataFrame, backtest_row: dict) -> dict:
     }
 
 def calc_score(row):
-    ret = _to_float(row.get("ret_pct", 0.0)) * 100.0
+    ret = max(0.0, _to_float(row.get("ret_pct", 0.0)))
     dd = _to_float(row.get("max_dd", 0.0))
-    pf = _to_float(row.get("profit_factor", 1.0))
-    trades = _to_float(row.get("trades", 100.0))
-    month_pos = _to_float(row.get("month_pos_frac", 0.0))
-    streak = _to_float(row.get("max_neg_month_streak", 0.0))
-    underwater = _to_float(row.get("underwater_frac", 1.0))
+    clusters = max(0.0, _to_float(row.get("clusters", 0.0)))
     worst_90d = _to_float(row.get("worst_rolling_90d", 0.0))
-    if ret <= 0 or dd > 0.30: return 0.0
-    dd_penalty = np.exp(-8.0 * dd) * np.exp(-18.0 * max(0.0, dd - 0.12))
-    smoothed_ret = np.sqrt(ret) * 9.0
-    trade_mult = min(1.0, trades / 120.0)
-    pf_mult = min(1.25, max(0.85, pf))
-    month_support = 0.80 + 0.20 * np.clip(month_pos, 0.0, 1.0)
-    streak_penalty = np.exp(-0.55 * max(0.0, streak))
-    underwater_penalty = np.exp(-2.25 * np.clip(underwater, 0.0, 1.0))
-    regime_penalty = np.exp(-7.5 * max(0.0, -worst_90d))
-    return smoothed_ret * dd_penalty * trade_mult * pf_mult * month_support * streak_penalty * underwater_penalty * regime_penalty
+    worst_trade = _to_float(row.get("worst_trade", 0.0))
+    if ret <= 0:
+        return 0.0
+    quality = np.log1p(ret * 40.0) / np.power(dd + 0.04, 1.15)
+    activity = np.clip(clusters / (clusters + 20.0), 0.15, 0.95)
+    tail_90d = 1.0 / (1.0 + 12.0 * max(0.0, -worst_90d))
+    tail_trade = 1.0 / (1.0 + 18.0 * max(0.0, -worst_trade))
+    return float(quality * activity * tail_90d * tail_trade)
 
 def get_step_data(step):
     step_dir = _fair_root() / f"step_{step}d"
@@ -524,6 +524,8 @@ def get_step_data(step):
             df["underwater_frac"] = np.nan
         if "worst_rolling_90d" not in df.columns:
             df["worst_rolling_90d"] = np.nan
+        if "worst_trade" not in df.columns:
+            df["worst_trade"] = np.nan
         missing_mask = (
             df["max_neg_month_streak"].isna()
             | df["underwater_frac"].isna()
@@ -582,95 +584,108 @@ def api_data():
 @app.route("/")
 def index():
     contact_email = os.getenv("ASTRA_CONTACT_EMAIL", "astraquantlab@gmail.com").strip() or "astraquantlab@gmail.com"
+    try:
+        oos_snapshot = build_v5_site_snapshot(REPO_ROOT)
+    except Exception:
+        oos_snapshot = None
     return render_template(
         "landing.html",
         title="Astra Tradebot",
         runtime_badge="Fair Explore",
+        brand_logo=url_for("static", filename="branding/astra-tradebot-symbol-premium.svg"),
         dashboard_url=url_for("dashboard"),
         login_url=url_for("login", next=url_for("dashboard")),
         register_url=url_for("register", next=url_for("dashboard")),
         contact_email=contact_email,
-        contact_focus="Quant research, systematic engineering, and private partnerships",
+        contact_focus="Systematic strategy, controlled deployment, and private partnerships",
         contact_href=f"mailto:{contact_email}?subject=Astra%20Tradebot%20Conversation",
         session_has_access=session_has_access(AUTH_CFG, session.get(AUTH_CFG.session_key)),
-        hero_eyebrow="Astra • quantitative research • systematic execution",
-        hero_prefix="Systematic crypto research and",
-        hero_accent="proprietary trading infrastructure",
+        hero_eyebrow="Astra • private capital • systematic execution",
+        hero_brand_line="Production profile • controlled crypto strategy",
+        hero_brand_copy=(
+            "Built for capital that values discipline, controlled drawdown, and a process that can be defended under scrutiny."
+        ),
+        hero_prefix="Systematic crypto returns with",
+        hero_accent="institutional-style risk control",
         hero_suffix=".",
         hero_copy=(
-            "Astra develops Tradebot, a proprietary stack built around walk-forward research, "
-            "controlled deployment, and production-grade engineering for digital asset markets."
+            "Astra presents a systematic crypto sleeve shaped through walk-forward validation, controlled deployment, "
+            "and an explicit bias toward steadier out-of-sample behavior."
         ),
-        stats=[
-            {"label": "Research steps", "value": "7"},
-            {"label": "Edge params", "value": "4"},
-            {"label": "Refreshes / step", "value": "49"},
-            {"label": "Backtests / step", "value": "1274"},
-        ],
+        performance_title=(oos_snapshot.performance_title if oos_snapshot else "Walk-forward OOS performance"),
+        performance_metrics=(
+            oos_snapshot.performance_metrics if oos_snapshot else [
+                {"label": "Net Return", "value": "—", "sub": "Unavailable."},
+                {"label": "Max Drawdown", "value": "—", "sub": "Unavailable."},
+                {"label": "Profit Factor", "value": "—", "sub": "Unavailable."},
+                {"label": "Hit Rate", "value": "—", "sub": "Unavailable."},
+            ]
+        ),
+        performance_visual_html=(oos_snapshot.visual_html if oos_snapshot else None),
+        performance_visual_title=(oos_snapshot.visual_title if oos_snapshot else "Stitched OOS equity"),
+        performance_visual_caption=(oos_snapshot.visual_caption if oos_snapshot else ""),
+        performance_note=(
+            oos_snapshot.performance_note if oos_snapshot else
+            "The strategy combines controlled upside participation, contained drawdown, and a production process designed "
+            "to remain resilient across adverse digital-asset regimes."
+        ),
+        stats=(
+            oos_snapshot.stats if oos_snapshot else [
+                {"label": "Research steps", "value": "7"},
+                {"label": "Feature preset", "value": "Core80"},
+                {"label": "Refreshes / step", "value": "56"},
+                {"label": "Backtests / retrain", "value": "21"},
+            ]
+        ),
         summary_copy=(
-            "The current production candidate is being refined through independent step exploration, "
-            "out-of-sample validation, and dashboard-based operational review."
+            oos_snapshot.summary_copy if oos_snapshot else
+            "The current production candidate is designed around one objective: preserve upside while keeping the path "
+            "to that return commercially defensible."
         ),
         chips=[
-            "Walk-forward design",
-            "OOS validation",
-            "Risk-aware deployment",
-            "Quant + engineering",
-            "Distributed parameter search",
+            "Walk-forward validated",
+            "Out-of-sample tested",
+            "Controlled drawdown",
+            "Private-capital profile",
+            "Execution discipline",
         ],
-        system_title="Tradebot is Astra’s internal research and execution stack.",
+        system_title="Astra is built around robustness first, not narrative-first performance.",
         system_copy=(
-            "It combines market data ingestion, feature engineering, labeling workflows, walk-forward "
-            "training, portfolio backtesting, out-of-sample evaluation, and live-ready monitoring in a "
-            "single controlled environment."
+            "The public message is simple: returns matter, but only when they come from a repeatable process with "
+            "visible risk control, disciplined model review, and serious operating standards."
         ),
         info_cards=[
             {
-                "eyebrow": "Research",
-                "title": "Methodological discipline",
-                "copy": "Walk-forward model design, parameter exploration, and out-of-sample validation aimed at reducing narrative bias and backtest illusion.",
+                "eyebrow": "Return profile",
+                "title": "Upside with control",
+                "copy": "The strategy aims for meaningful participation in crypto upside without relying on violent drawdowns or unstable behavior.",
             },
             {
-                "eyebrow": "Infrastructure",
-                "title": "Engineering-first stack",
-                "copy": "Data pipeline, training flow, portfolio backtests, dashboards, auth, and operational tooling built for serious iteration and deployment.",
+                "eyebrow": "Risk discipline",
+                "title": "Commercially defensible",
+                "copy": "What matters is not just headline return, but whether the path, drawdown, and operating profile are investable for serious capital.",
             },
             {
                 "eyebrow": "Partnership",
                 "title": "Selective collaboration",
-                "copy": "Structured for private conversations with family offices, small funds, and aligned partners seeking quant and systematic engineering capability.",
+                "copy": "Positioned for private conversations where systematic performance, process quality, and operating discipline all matter.",
             },
         ],
         pipeline=[
             {
                 "step": "01",
-                "title": "Market data and local storage",
-                "copy": "Historical OHLC ingestion, cache maintenance, and local persistence for reproducible research.",
+                "title": "Every candidate is tested out of sample",
+                "copy": "The strategy is reviewed across sequential historical windows rather than sold on a single optimized period.",
             },
             {
                 "step": "02",
-                "title": "Features and labels",
-                "copy": "Feature generation, contract refresh, and labeling workflows built for systematic iteration rather than one-off backtests.",
+                "title": "Risk is treated as part of the product",
+                "copy": "Drawdown control, portfolio construction, and deployment behavior are treated as core design constraints, not afterthoughts.",
             },
             {
                 "step": "03",
-                "title": "Walk-forward training",
-                "copy": "Model training with controlled calibration, fixed training policy, and step-aware historical splits.",
-            },
-            {
-                "step": "04",
-                "title": "Distributed parameter search",
-                "copy": "Fair Explore v5 searches only the edge layer with deterministic coverage instead of broad random optimization.",
-            },
-            {
-                "step": "05",
-                "title": "Portfolio and OOS validation",
-                "copy": "Single-symbol and multi-asset backtests followed by stitched out-of-sample walk-forward evaluation.",
-            },
-            {
-                "step": "06",
-                "title": "Operational surface",
-                "copy": "Protected dashboards, local access control, runtime monitoring, and deployment-oriented review loops.",
+                "title": "The process is engineered to be auditable",
+                "copy": "Selection, review, and monitoring sit inside one controlled environment so the research story stays tied to the operating reality.",
             },
         ],
     )
@@ -747,12 +762,19 @@ def index():
             }
             .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
             .btn-accent {
-                background: linear-gradient(135deg, #7c5cff, #5a8cff);
+                background: linear-gradient(135deg, rgba(124, 92, 255, 0.18), rgba(76, 58, 140, 0.34));
                 color: #fff;
-                border: none;
-                box-shadow: 0 14px 28px rgba(124, 92, 255, 0.26);
+                border: 1px solid rgba(124, 92, 255, 0.34);
+                backdrop-filter: blur(10px);
+                box-shadow:
+                    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+                    0 10px 24px rgba(0, 0, 0, 0.22);
             }
-            .btn-accent:hover, .btn-accent:focus { color: #fff; background: linear-gradient(135deg, #6f51ff, #4e7bff); }
+            .btn-accent:hover, .btn-accent:focus {
+                color: #fff;
+                background: linear-gradient(135deg, rgba(124, 92, 255, 0.24), rgba(88, 66, 164, 0.42));
+                border-color: rgba(124, 92, 255, 0.46);
+            }
             .stat-grid {
                 display: grid;
                 grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -825,8 +847,13 @@ def index():
         <header class="navbar navbar-expand-lg navbar-glass sticky-top">
             <div class="container-fluid px-3">
                 <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
-                    <span class="brand-dot"></span>
-                    <span class="fw-semibold">Astra Tradebot</span>
+                    <span class="brand-lockup">
+                        <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+                        <span class="brand-copy">
+                            <span class="brand-kicker">Astra Tradebot</span>
+                            <span class="brand-title">Astra</span>
+                        </span>
+                    </span>
                     <span class="badge text-bg-secondary ms-1">Astra</span>
                 </a>
                 <div class="d-flex align-items-center gap-2">
@@ -1045,10 +1072,21 @@ def dashboard():
             .tabs::-webkit-scrollbar-thumb:hover { background: linear-gradient(90deg, rgba(148, 163, 184, 0.7), rgba(124, 92, 255, 0.6)); }
             .tab { padding: 10px 16px; border-radius: 10px; cursor: pointer; color: var(--text-muted); font-weight: 600; font-size: 0.9rem; transition: all 0.2s; white-space: nowrap; display: flex; align-items: center; border: 1px solid transparent; }
             .tab:hover { background: rgba(255,255,255,0.05); color: var(--text-main); }
-            .tab.active { background: linear-gradient(135deg, var(--accent), #5a8cff); color: #f8fafc; box-shadow: 0 10px 24px rgba(124, 92, 255, 0.28); }
+            .tab.active {
+                background: linear-gradient(135deg, rgba(124, 92, 255, 0.18), rgba(76, 58, 140, 0.34));
+                color: #f8fafc;
+                border-color: rgba(124, 92, 255, 0.34);
+                box-shadow:
+                    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+                    0 10px 24px rgba(0, 0, 0, 0.22);
+            }
             .tab-status { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
             .tab-count { margin-left: 10px; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.08); color: var(--text-main); font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; }
-            .tab.active .tab-count { background: rgba(255,255,255,0.18); color: #fff; }
+            .tab.active .tab-count {
+                background: rgba(124, 92, 255, 0.18);
+                color: #fff;
+                border: 1px solid rgba(124, 92, 255, 0.24);
+            }
 
             .step-panel { display: none; }
             .step-panel.active { display: block; }
@@ -1102,8 +1140,13 @@ def dashboard():
         <header class="navbar navbar-expand-lg navbar-glass sticky-top">
             <div class="container-fluid px-3">
                 <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
-                    <span class="brand-dot"></span>
-                    <span class="fw-semibold">Astra Tradebot</span>
+                    <span class="brand-lockup">
+                        <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+                        <span class="brand-copy">
+                            <span class="brand-kicker">Astra Tradebot</span>
+                            <span class="brand-title">Fair Explore</span>
+                        </span>
+                    </span>
                     <span class="badge text-bg-secondary ms-1">Fair Explore</span>
                 </a>
                 <div class="d-flex align-items-center gap-3">

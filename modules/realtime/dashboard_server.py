@@ -28,6 +28,7 @@ from .auth import (
 )
 
 from .dashboard_state import DemoStateGenerator, StateStore, create_demo_state
+from .site_oos_assets import build_v5_site_snapshot
 # trade contract (para EMA de saída)
 try:  # pragma: no cover
     from trade_contract import DEFAULT_TRADE_CONTRACT, exit_ema_span_from_window
@@ -190,7 +191,7 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
             badge="Realtime",
             eyebrow="Cadastro",
             heading="Criar conta para o dashboard do bot",
-            subtitle="Seu cadastro ficará pendente até você liberar manualmente o acesso na base local de usuários.",
+            subtitle="Seu cadastro ficará pendente até a liberação manual do acesso pela administração.",
             error=error,
             success=success,
             next_url=next_url,
@@ -291,94 +292,108 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
     @app.get("/")
     def index() -> Any:
         contact_email = os.getenv("ASTRA_CONTACT_EMAIL", "astraquantlab@gmail.com").strip() or "astraquantlab@gmail.com"
+        try:
+            oos_snapshot = build_v5_site_snapshot(repo_root)
+        except Exception:
+            oos_snapshot = None
         return render_template(
             "landing.html",
             title="Astra Tradebot",
             runtime_badge="Realtime",
+            brand_logo=url_for("static", filename="branding/astra-tradebot-symbol-premium.svg"),
             dashboard_url=url_for("dashboard"),
             login_url=url_for("login", next=url_for("dashboard")),
             register_url=url_for("register", next=url_for("dashboard")),
             contact_email=contact_email,
-            contact_focus="Systematic operations, runtime supervision, and private partnerships",
+            contact_focus="Systematic strategy, controlled deployment, and private partnerships",
             contact_href=f"mailto:{contact_email}?subject=Astra%20Tradebot%20Conversation",
             session_has_access=session_has_access(auth_cfg, session.get(auth_cfg.session_key)),
-            hero_eyebrow="Astra • quantitative research • realtime operations",
-            hero_prefix="Production-facing monitoring and",
-            hero_accent="systematic execution infrastructure",
+            hero_eyebrow="Astra • private capital • systematic execution",
+            hero_brand_line="Production profile • controlled crypto strategy",
+            hero_brand_copy=(
+                "Built for capital that values discipline, controlled drawdown, and a process that can be defended under scrutiny."
+            ),
+            hero_prefix="Systematic crypto returns with",
+            hero_accent="institutional-style risk control",
             hero_suffix=".",
             hero_copy=(
-                "Astra develops Tradebot, a proprietary stack for research, deployment control, "
-                "live monitoring, and systematic execution in digital asset markets."
+                "Astra presents a systematic crypto sleeve shaped through walk-forward validation, controlled deployment, "
+                "and an explicit bias toward steadier out-of-sample behavior."
             ),
-            stats=[
-                {"label": "Runtime modes", "value": "Live / Paper"},
-                {"label": "Primary surface", "value": "Realtime"},
-                {"label": "Auth model", "value": "Local"},
-                {"label": "Ops focus", "value": "Monitoring"},
-            ],
+            performance_title=(oos_snapshot.performance_title if oos_snapshot else "Walk-forward OOS performance"),
+            performance_metrics=(
+                oos_snapshot.performance_metrics if oos_snapshot else [
+                    {"label": "Net Return", "value": "—", "sub": "Unavailable."},
+                    {"label": "Max Drawdown", "value": "—", "sub": "Unavailable."},
+                    {"label": "Profit Factor", "value": "—", "sub": "Unavailable."},
+                    {"label": "Hit Rate", "value": "—", "sub": "Unavailable."},
+                ]
+            ),
+            performance_visual_html=(oos_snapshot.visual_html if oos_snapshot else None),
+            performance_visual_title=(oos_snapshot.visual_title if oos_snapshot else "Stitched OOS equity"),
+            performance_visual_caption=(oos_snapshot.visual_caption if oos_snapshot else ""),
+            performance_note=(
+                oos_snapshot.performance_note if oos_snapshot else
+                "The strategy is presented as a controlled return profile for private capital: meaningful upside, "
+                "disciplined drawdown, and consistent execution standards across changing market conditions."
+            ),
+            stats=(
+                oos_snapshot.stats if oos_snapshot else [
+                    {"label": "Research cadence", "value": "Walk-forward"},
+                    {"label": "Deployment modes", "value": "Live / Paper"},
+                    {"label": "Execution surface", "value": "Realtime"},
+                    {"label": "Access model", "value": "Private"},
+                ]
+            ),
             summary_copy=(
-                "This environment is designed for operational supervision, position visibility, "
-                "trade inspection, and controlled runtime observation."
+                oos_snapshot.summary_copy if oos_snapshot else
+                "The current production candidate is designed around one objective: preserve upside while keeping the path "
+                "to that return commercially defensible."
             ),
             chips=[
-                "Live monitoring",
-                "Execution controls",
-                "Position visibility",
-                "Protected access",
-                "Quant + engineering",
+                "Walk-forward validated",
+                "Out-of-sample tested",
+                "Controlled drawdown",
+                "Private-capital profile",
+                "Execution discipline",
             ],
-            system_title="The realtime dashboard is the production-facing surface of Tradebot.",
+            system_title="Astra is built around robustness first, not narrative-first performance.",
             system_copy=(
-                "It centralizes positions, equity, allocation, signals, trades, system health, "
-                "and supporting diagnostics for controlled live or paper operation."
+                "The public message is simple: returns matter, but only when they come from a repeatable process with "
+                "visible risk control, disciplined model review, and serious operating standards."
             ),
             info_cards=[
                 {
-                    "eyebrow": "Visibility",
-                    "title": "Portfolio state",
-                    "copy": "Open positions, allocation, equity history, PnL, and execution footprint in a single view.",
+                    "eyebrow": "Return profile",
+                    "title": "Upside with control",
+                    "copy": "The strategy aims for meaningful participation in crypto upside without relying on violent drawdowns or unstable behavior.",
                 },
                 {
-                    "eyebrow": "Monitoring",
-                    "title": "Runtime supervision",
-                    "copy": "Feed delay, process health, system telemetry, and realtime diagnostics for operational confidence.",
+                    "eyebrow": "Risk discipline",
+                    "title": "Commercially defensible",
+                    "copy": "What matters is not just headline return, but whether the path, drawdown, and operating profile are investable for serious capital.",
                 },
                 {
-                    "eyebrow": "Discipline",
-                    "title": "Controlled access",
-                    "copy": "In-app login, local user base, admin controls, and owner-level authority for restricted collaboration.",
+                    "eyebrow": "Partnership",
+                    "title": "Selective collaboration",
+                    "copy": "Positioned for private conversations where systematic performance, process quality, and operating discipline all matter.",
                 },
             ],
             pipeline=[
                 {
                     "step": "01",
-                    "title": "Live state ingestion",
-                    "copy": "The runtime consumes execution state and makes it available to the dashboard through a controlled internal API.",
+                    "title": "Every candidate is tested out of sample",
+                    "copy": "The strategy is reviewed across sequential historical windows rather than sold on a single optimized period.",
                 },
                 {
                     "step": "02",
-                    "title": "Positions and equity",
-                    "copy": "Open positions, allocation, PnL, and equity evolution are rendered as the core operating surface.",
+                    "title": "Risk is treated as part of the product",
+                    "copy": "Drawdown control, portfolio construction, and deployment behavior are treated as core design constraints, not afterthoughts.",
                 },
                 {
                     "step": "03",
-                    "title": "Signals and trade inspection",
-                    "copy": "Recent trades and model signals can be reviewed with supporting detail and context.",
-                },
-                {
-                    "step": "04",
-                    "title": "System telemetry",
-                    "copy": "Feed delay, process status, and hardware observations support practical supervision.",
-                },
-                {
-                    "step": "05",
-                    "title": "Protected collaboration",
-                    "copy": "Local access control and role separation keep the runtime visible without turning it into an open public surface.",
-                },
-                {
-                    "step": "06",
-                    "title": "Deployment review loop",
-                    "copy": "The dashboard is designed as a real operating layer, not just a static report page.",
+                    "title": "The process is engineered to be auditable",
+                    "copy": "Selection, review, and monitoring sit inside one controlled environment so the research story stays tied to the operating reality.",
                 },
             ],
         )
@@ -457,12 +472,19 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                   }
                   .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
                   .btn-accent {
-                    background: linear-gradient(135deg, #7c5cff, #5a8cff);
+                    background: linear-gradient(135deg, rgba(124, 92, 255, 0.18), rgba(76, 58, 140, 0.34));
                     color: #fff;
-                    border: none;
-                    box-shadow: 0 14px 28px rgba(124, 92, 255, 0.26);
+                    border: 1px solid rgba(124, 92, 255, 0.34);
+                    backdrop-filter: blur(10px);
+                    box-shadow:
+                      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+                      0 10px 24px rgba(0, 0, 0, 0.22);
                   }
-                  .btn-accent:hover, .btn-accent:focus { color: #fff; background: linear-gradient(135deg, #6f51ff, #4e7bff); }
+                  .btn-accent:hover, .btn-accent:focus {
+                    color: #fff;
+                    background: linear-gradient(135deg, rgba(124, 92, 255, 0.24), rgba(88, 66, 164, 0.42));
+                    border-color: rgba(124, 92, 255, 0.46);
+                  }
                   .stat-grid {
                     display: grid;
                     grid-template-columns: repeat(3, minmax(0, 1fr));

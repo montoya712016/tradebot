@@ -107,6 +107,15 @@ No workflow padrão noturno do `run_independent_step_explores.py`, a ordem agora
 4. prewarm de feature cache para todos os steps (`1440..360`)
 5. só então começam os explores
 
+O score atual do explorer também mudou:
+- saiu o score antigo com várias penalizações heurísticas
+- entrou um score mais curto, baseado em:
+  - retorno
+  - drawdown absoluto
+  - regularidade por `clusters`
+  - cauda por `worst_rolling_90d` e `worst_trade`
+- `trades` bruto deixou de ser usado como multiplicador direto
+
 Convensões de storage
 ---------------------
 - modelos: `D:\astra\models_sniper\crypto\`

@@ -54,7 +54,7 @@ from backtest.portfolio import (  # noqa: E402
 from config.trade_contract import TradeContract, bars_from_minutes, apply_crypto_pipeline_env  # noqa: E402
 from config.symbols import default_top_market_cap_path, load_market_caps  # noqa: E402
 from prepare_features.refresh_sniper_labels_in_cache import RefreshLabelsSettings, run as refresh_labels  # noqa: E402
-from prepare_features.data import load_ohlc_series  # noqa: E402
+from prepare_features.data import load_ohlc_series, _ohlc_cache_paths  # noqa: E402
 from train.feature_presets import feature_flags_for_preset  # noqa: E402
 from train.sniper_dataflow import _cache_dir, _cache_format, ensure_feature_cache  # noqa: E402
 from utils.resource_sizing import apply_env_worker_default  # noqa: E402
@@ -117,6 +117,8 @@ RESULTS_HEADER = [
     "max_neg_month_streak",
     "underwater_frac",
     "worst_rolling_90d",
+    "worst_trade",
+    "worst_trade_raw",
     "semester_mean",
     "semester_p50",
     "semester_pos_frac",
@@ -487,11 +489,64 @@ def _filter_symbols_with_usable_ohlc(
     candle_sec: int,
     log: _Tee | None = None,
 ) -> list[str]:
+    min_rows_required = 500
+    strong_rows_margin = 900
     usable: list[str] = []
     skipped: list[str] = []
+    uncertain: list[str] = []
     checked = 0
+
+    now_ms = int(time.time() * 1000)
+    start_ms = 0 if int(total_days) <= 0 else int(now_ms - int(total_days) * 86400 * 1000)
+    end_ms = None
+    if int(remove_tail_days) > 0:
+        end_ms = int(now_ms - int(remove_tail_days) * 86400 * 1000)
+
+    def _estimate_rows_from_meta(sym: str) -> tuple[str, float]:
+        try:
+            _, meta_path = _ohlc_cache_paths(sym, int(candle_sec))
+            if not meta_path.exists():
+                return ("unknown", 0.0)
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            cache_start = int(meta.get("start_ms") or 0)
+            cache_end = int(meta.get("end_ms") or 0)
+            rows = int(meta.get("rows") or 0)
+            sec = int(meta.get("candle_sec") or candle_sec or 300)
+            if rows <= 0 or cache_end <= cache_start or sec <= 0:
+                return ("skip", 0.0)
+            win_start = max(int(start_ms), int(cache_start))
+            win_end = int(cache_end) if end_ms is None else min(int(end_ms), int(cache_end))
+            if win_end <= win_start:
+                return ("skip", 0.0)
+            total_slots = max(1.0, float(cache_end - cache_start) / float(sec * 1000))
+            overlap_slots = max(0.0, float(win_end - win_start) / float(sec * 1000))
+            density = min(1.0, max(0.0, float(rows) / total_slots))
+            est_rows = float(overlap_slots) * float(density)
+            if est_rows >= float(strong_rows_margin):
+                return ("use", est_rows)
+            if est_rows < float(min_rows_required):
+                return ("skip", est_rows)
+            return ("unknown", est_rows)
+        except Exception:
+            return ("unknown", 0.0)
+
     for sym in symbols:
         checked += 1
+        decision, est_rows = _estimate_rows_from_meta(sym)
+        if decision == "use":
+            usable.append(sym)
+        elif decision == "skip":
+            skipped.append(sym)
+        else:
+            uncertain.append(sym)
+        if log is not None and (checked % 25 == 0 or checked == len(symbols)):
+            log.write(
+                f"[prewarm] ohlc usability checked={checked}/{len(symbols)} "
+                f"usable={len(usable)} skipped={len(skipped)} uncertain={len(uncertain)}"
+            )
+
+    resolved_uncertain = 0
+    for sym in uncertain:
         try:
             df_ohlc = load_ohlc_series(
                 sym,
@@ -499,20 +554,22 @@ def _filter_symbols_with_usable_ohlc(
                 candle_sec=int(candle_sec),
                 remove_tail_days=int(remove_tail_days),
             )
-            if df_ohlc is None or len(df_ohlc) <= 0:
+            if df_ohlc is None or len(df_ohlc) < int(min_rows_required):
                 skipped.append(sym)
-                continue
-            usable.append(sym)
+            else:
+                usable.append(sym)
         except Exception:
             skipped.append(sym)
-        if log is not None and (checked % 25 == 0 or checked == len(symbols)):
+        resolved_uncertain += 1
+        if log is not None and (resolved_uncertain % 10 == 0 or resolved_uncertain == len(uncertain)):
             log.write(
-                f"[prewarm] ohlc usability checked={checked}/{len(symbols)} "
+                f"[prewarm] ohlc usability fallback={resolved_uncertain}/{len(uncertain)} "
                 f"usable={len(usable)} skipped={len(skipped)}"
             )
     if log is not None:
         log.write(
-            f"[prewarm] ohlc usability final usable={len(usable)}/{len(symbols)} skipped={len(skipped)}"
+            f"[prewarm] ohlc usability final usable={len(usable)}/{len(symbols)} "
+            f"skipped={len(skipped)} fallback={len(uncertain)}"
         )
         if skipped:
             log.write(f"[prewarm] sample unusable: {', '.join(skipped[:12])}")
@@ -739,6 +796,10 @@ def _metrics_from_portfolio_output(res_obj: object) -> dict[str, float]:
         "win_rate": float(np.mean(raw > 0.0)) if raw.size else 0.0,
         "profit_factor": float(np.sum(wins) / max(1e-12, -float(np.sum(losses)))) if losses.size else (float("inf") if wins.size else 0.0),
         "trade_p50_raw": float(np.nanmedian(raw)) if raw.size else 0.0,
+        # worst_trade is the actual weighted portfolio impact of the worst trade.
+        "worst_trade": float(np.min(weighted)) if weighted.size else 0.0,
+        # worst_trade_raw preserves the unweighted single-trade return for analysis.
+        "worst_trade_raw": float(np.min(raw)) if raw.size else 0.0,
     }
     if pos_weighted.size:
         pos_sorted = np.sort(pos_weighted)[::-1]
@@ -802,29 +863,18 @@ def _metrics_from_portfolio_output(res_obj: object) -> dict[str, float]:
 
 
 def _score_from_metrics(m: dict[str, float]) -> float:
-    ret_pct = max(0.0, float(m.get("ret_pct", 0.0)) * 100.0)
+    ret_pct = max(0.0, float(m.get("ret_pct", 0.0)))
     max_dd = max(0.0, float(m.get("max_dd", 0.0)))
-    month_pos = float(m.get("month_pos_frac", 0.0))
-    streak = max(0.0, float(m.get("max_neg_month_streak", 0.0)))
-    underwater = min(1.0, max(0.0, float(m.get("underwater_frac", 1.0))))
+    clusters = max(0.0, float(m.get("clusters", 0.0)))
     worst_90d = float(m.get("worst_rolling_90d", 0.0))
-    pf = max(0.0, float(m.get("profit_factor", 1.0)))
-    trades = max(0.0, float(m.get("trades", 0.0)))
+    worst_trade = float(m.get("worst_trade", 0.0))
     if ret_pct <= 0.0:
         return 0.0
-    if max_dd > 0.30:
-        return 0.0
-    return float(
-        (math.sqrt(ret_pct) * 9.0)
-        * math.exp(-8.0 * max_dd)
-        * math.exp(-18.0 * max(0.0, max_dd - 0.12))
-        * (0.80 + 0.20 * min(1.0, max(0.0, month_pos)))
-        * math.exp(-0.55 * streak)
-        * math.exp(-2.25 * underwater)
-        * math.exp(-7.5 * max(0.0, -worst_90d))
-        * min(1.25, max(0.85, pf))
-        * min(1.0, trades / 120.0)
-    )
+    quality = math.log1p(ret_pct * 40.0) / ((max_dd + 0.04) ** 1.15)
+    activity = min(0.95, max(0.15, clusters / (clusters + 20.0)))
+    tail_90d = 1.0 / (1.0 + 12.0 * max(0.0, -worst_90d))
+    tail_trade = 1.0 / (1.0 + 18.0 * max(0.0, -worst_trade))
+    return float(quality * activity * tail_90d * tail_trade)
 
 
 def _vdc(index: int, base: int) -> float:
@@ -1373,6 +1423,7 @@ def run(settings: ExploreSettings | None = None) -> None:
                         "CRYPTO_EXIT_EMA_SPAN_MINUTES": str(label_cfg["exit_span_min"]),
                         "CRYPTO_EXIT_EMA_INIT_OFFSET_PCT": str(label_cfg["exit_offset"]),
                         "TRAIN_ENTRY_RATIO_NEG_PER_POS": str(train_cfg["neg_per_pos"]),
+                        "TRAIN_FULL_POOL_BASE_NEG_PER_POS": str(max(float(x) for x in s.neg_pos_choices)),
                         "TRAIN_REFRESH_LABELS": "0",
                         "TRAIN_MAX_SYMBOLS": "0" if int(s.max_symbols) <= 0 else str(int(s.max_symbols)),
                         "TRAIN_TOTAL_DAYS": str(int(forced_step_days or s.days)),
@@ -1684,6 +1735,8 @@ def run(settings: ExploreSettings | None = None) -> None:
                         "max_neg_month_streak": metrics.get("max_neg_month_streak", ""),
                         "underwater_frac": metrics.get("underwater_frac", ""),
                         "worst_rolling_90d": metrics.get("worst_rolling_90d", ""),
+                        "worst_trade": metrics.get("worst_trade", ""),
+                        "worst_trade_raw": metrics.get("worst_trade_raw", ""),
                         "semester_mean": metrics.get("semester_mean", ""),
                         "semester_p50": metrics.get("semester_p50", ""),
                         "semester_pos_frac": metrics.get("semester_pos_frac", ""),

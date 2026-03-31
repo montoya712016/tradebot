@@ -24,8 +24,15 @@ O `wf_portfolio_explorer.py` da `v6` trabalha assim:
 - faz prewarm por step antes do primeiro refresh:
   - por padrão, o bootstrap de features já popula o cache OHLC base
   - o pass separado de OHLC é opcional
+  - a triagem de elegibilidade do step usa primeiro os metadados do cache `ohlc_5m` e só faz fallback para load real nos casos limítrofes
+- o score dos backtests do explore ficou mais simples e mais causal:
+  - base = `log1p(retorno)` penalizado por `max_dd` absoluto
+  - atividade medida por `clusters` de entrada, não por contagem bruta de trades
+  - cauda medida por `worst_rolling_90d` e pelo `worst_trade` efetivo no portfólio
+  - o CSV do explore agora grava `worst_trade` e `worst_trade_raw`
 - no workflow padrão do orquestrador, os caches OHLC globais (`1m` e `5m`) são construídos antes de qualquer prewarm de step
 - os refreshes/treinos usam o cache recortado do step, mas o prepare/backtest usa o cache global do preset para conseguir enxergar a janela OOS seguinte
+- dentro de cada label, o trainer agora monta um `full_pool` base com o maior `neg_per_pos` do explore e reutiliza esse pool entre os retrains do mesmo label, reduzindo rebuild redundante do dataset
 - otimiza `7` parâmetros entre edge e treino leve:
   - `label_profit_thr`
   - `exit_ema_span_min`

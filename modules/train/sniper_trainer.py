@@ -1606,12 +1606,13 @@ def _full_pool_cache_key(
     feature_flags: dict,
     cache_fp: str,
     pool_rows: int,
+    full_pool_ratio_neg_per_pos: float,
 ) -> str:
     payload = {
         "asset_class": str(asset_class),
         "symbols": [str(s) for s in symbols],
         "total_days": int(getattr(cfg, "total_days", 0) or 0),
-        "entry_ratio_neg_per_pos": float(getattr(cfg, "entry_ratio_neg_per_pos", 0.0) or 0.0),
+        "full_pool_ratio_neg_per_pos": float(full_pool_ratio_neg_per_pos),
         "max_rows_exit": int(getattr(cfg, "max_rows_exit", 0) or 0),
         "pool_rows_entry": int(pool_rows),
         "contract": asdict(contract),
@@ -2100,6 +2101,11 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
         base_rows = int(getattr(cfg, "max_rows_entry", 2_000_000) or 2_000_000)
         if pool_rows <= base_rows:
             pool_rows = max(base_rows * 2, base_rows)
+        try:
+            pool_ratio_base = float(os.getenv("SNIPER_FULL_POOL_BASE_RATIO_NEG_PER_POS", "") or 0.0)
+        except Exception:
+            pool_ratio_base = 0.0
+        pool_ratio_base = max(float(getattr(cfg, "entry_ratio_neg_per_pos", 0.0) or 0.0), float(pool_ratio_base))
         reuse_pool = str(os.getenv("SNIPER_FULL_POOL_REUSE", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
         force_rebuild = str(os.getenv("SNIPER_FULL_POOL_REBUILD", "0") or "0").strip().lower() in {"1", "true", "yes", "y", "on"}
         cache_fp = _cache_map_fingerprint(cache_map)
@@ -2111,6 +2117,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
             feature_flags=feature_flags,
             cache_fp=cache_fp,
             pool_rows=int(pool_rows),
+            full_pool_ratio_neg_per_pos=float(pool_ratio_base),
         )
         pool_cache_file = _full_pool_cache_root() / asset_class / f"pool_{cache_key}.pkl"
         if reuse_pool and (not force_rebuild) and pool_cache_file.exists():
@@ -2133,7 +2140,10 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 except Exception:
                     pass
         if full_pool_pack is None:
-            print(f"[sniper-train] pool-full: construindo 1x (rows_target={pool_rows})", flush=True)
+            print(
+                f"[sniper-train] pool-full: construindo 1x (rows_target={pool_rows} neg_per_pos_base={pool_ratio_base:.2f})",
+                flush=True,
+            )
             if bool(getattr(cfg, "use_feature_cache", True)):
                 full_pool_pack = prepare_sniper_dataset_from_cache(
                     symbols,
@@ -2141,7 +2151,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                     remove_tail_days=0,
                     contract=contract,
                     cache_map=cache_map,
-                    entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
+                    entry_ratio_neg_per_pos=float(pool_ratio_base),
                     max_rows_entry=int(pool_rows),
                     max_rows_exit=int(getattr(cfg, "max_rows_exit", 2_000_000)),
                     seed=7331,
@@ -2154,7 +2164,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                     total_days=int(cfg.total_days),
                     remove_tail_days=0,
                     contract=contract,
-                    entry_ratio_neg_per_pos=float(getattr(cfg, "entry_ratio_neg_per_pos", 6.0)),
+                    entry_ratio_neg_per_pos=float(pool_ratio_base),
                     max_rows_entry=int(pool_rows),
                     max_rows_exit=int(getattr(cfg, "max_rows_exit", 2_000_000)),
                     seed=7331,

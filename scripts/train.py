@@ -273,10 +273,13 @@ def main() -> None:
     os.environ["SNIPER_FULL_POOL_USE_LAST"] = "0"
     os.environ["SNIPER_FULL_POOL_KEEP_LAST"] = "3"
     os.environ["SNIPER_FULL_POOL_CACHE_DIR"] = "D:/astra/cache_sniper/full_pool"
+    full_pool_base_neg_per_pos = _env_float("TRAIN_FULL_POOL_BASE_NEG_PER_POS", float(entry_ratio_neg_per_pos))
+    os.environ["SNIPER_FULL_POOL_BASE_RATIO_NEG_PER_POS"] = str(max(float(entry_ratio_neg_per_pos), float(full_pool_base_neg_per_pos)))
     _apply_train_overrides()
     print(
         f"[train-wf-crypto] full_pool_cache_dir={os.environ['SNIPER_FULL_POOL_CACHE_DIR']} "
-        f"keep_last={os.environ['SNIPER_FULL_POOL_KEEP_LAST']}",
+        f"keep_last={os.environ['SNIPER_FULL_POOL_KEEP_LAST']} "
+        f"base_neg_per_pos={os.environ['SNIPER_FULL_POOL_BASE_RATIO_NEG_PER_POS']}",
         flush=True,
     )
     print(

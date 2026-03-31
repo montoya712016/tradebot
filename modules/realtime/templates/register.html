@@ -55,16 +55,7 @@
       }
 
       .btn-primary-soft {
-        background: linear-gradient(135deg, #7c5cff, #5a8cff);
-        border: none;
         color: #fff;
-        box-shadow: 0 10px 24px rgba(124, 92, 255, 0.28);
-      }
-
-      .btn-primary-soft:hover,
-      .btn-primary-soft:focus {
-        color: #fff;
-        background: linear-gradient(135deg, #6f51ff, #4e7bff);
       }
     </style>
   </head>
@@ -73,8 +64,13 @@
       <section class="card card-glass login-card">
         <div class="card-body p-4 p-md-5">
           <div class="d-flex align-items-center gap-2 mb-3">
-            <span class="brand-dot"></span>
-            <span class="fw-semibold">Astra Tradebot</span>
+            <span class="brand-lockup">
+              <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+              <span class="brand-copy">
+                <span class="brand-kicker">Astra Tradebot</span>
+                <span class="brand-title">Private Registration</span>
+              </span>
+            </span>
             <span class="badge text-bg-secondary ms-1">{{ badge or "Dashboard" }}</span>
           </div>
 
@@ -173,7 +169,7 @@
               />
             </div>
 
-            <button type="submit" class="btn btn-primary-soft btn-lg mt-2">
+            <button type="submit" class="btn btn-astra-primary btn-primary-soft btn-lg mt-2">
               <i class="bi bi-person-plus me-2"></i>Enviar cadastro
             </button>
           </form>

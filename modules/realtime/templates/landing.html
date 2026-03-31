@@ -15,6 +15,9 @@
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
     />
+    {% if performance_visual_html %}
+    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
+    {% endif %}
     <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260330b" />
 
     <style>
@@ -52,18 +55,52 @@
         justify-content: flex-end;
       }
 
+      .brand-lockup {
+        display: inline-flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .brand-mark {
+        width: 46px;
+        height: 46px;
+        object-fit: contain;
+        filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.22));
+      }
+
+      .brand-copy {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+      }
+
+      .brand-overline {
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        font-size: 0.68rem;
+        font-weight: 700;
+      }
+
+      .brand-name {
+        font-size: 1.08rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        line-height: 1.05;
+      }
+
       .hero-wrap {
         padding: 88px 0 32px;
       }
 
       .hero-grid {
         display: grid;
-        grid-template-columns: minmax(0, 1.25fr) minmax(380px, 0.75fr);
+        grid-template-columns: 1fr;
         gap: 26px;
-        align-items: stretch;
       }
 
       .hero-card,
+      .performance-section,
       .summary-card,
       .section-card,
       .info-card,
@@ -103,6 +140,40 @@
         max-width: 920px;
       }
 
+      .hero-brand {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        margin-bottom: 20px;
+      }
+
+      .hero-brand img {
+        width: clamp(96px, 10vw, 128px);
+        height: auto;
+        object-fit: contain;
+        filter: drop-shadow(0 18px 28px rgba(0, 0, 0, 0.24));
+      }
+
+      .hero-brand-copy {
+        display: grid;
+        gap: 2px;
+      }
+
+      .hero-brand-copy .brand-line {
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-size: 0.68rem;
+        font-weight: 700;
+      }
+
+      .hero-brand-copy .brand-statement {
+        font-size: 0.92rem;
+        line-height: 1.55;
+        color: rgba(255, 255, 255, 0.72);
+        max-width: 420px;
+      }
+
       .hero-actions {
         display: flex;
         gap: 12px;
@@ -134,6 +205,94 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 16px;
+      }
+
+      .performance-shell {
+        display: grid;
+        gap: 20px;
+      }
+
+      .performance-visual {
+        display: grid;
+        gap: 10px;
+      }
+
+      .performance-visual-card {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+          rgba(255, 255, 255, 0.015);
+        border-radius: 20px;
+        overflow: hidden;
+        padding: 8px 8px 2px;
+      }
+
+      .performance-visual-card .plotly-graph-div {
+        width: 100%;
+        min-height: 420px;
+      }
+
+      .performance-visual-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .performance-visual-title {
+        font-size: 0.95rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+
+      .performance-visual-caption {
+        color: rgba(255, 255, 255, 0.62);
+        font-size: 0.83rem;
+      }
+
+      .performance-note {
+        color: var(--text-muted);
+        line-height: 1.75;
+        margin: 0;
+      }
+
+      .performance-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .performance-card {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+          rgba(255, 255, 255, 0.03);
+        border-radius: 18px;
+        padding: 1rem;
+      }
+
+      .performance-card .label {
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.72rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+      }
+
+      .performance-card .value {
+        font-size: 1.9rem;
+        font-weight: 800;
+        letter-spacing: -0.04em;
+        line-height: 1;
+        margin-bottom: 0.45rem;
+      }
+
+      .performance-card .sub {
+        color: rgba(255, 255, 255, 0.7);
+        font-size: 0.92rem;
+        line-height: 1.55;
       }
 
       .stat-label {
@@ -250,10 +409,13 @@
       }
 
       @media (max-width: 1180px) {
-        .hero-grid,
         .info-grid,
         .contact-grid {
           grid-template-columns: 1fr;
+        }
+
+        .performance-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
 
@@ -270,6 +432,10 @@
 
         .stat-grid {
           grid-template-columns: 1fr 1fr;
+        }
+
+        .performance-grid {
+          grid-template-columns: 1fr;
         }
 
         .pipeline-item {
@@ -294,8 +460,13 @@
         <div class="site-shell w-100">
           <div class="site-nav">
             <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
-              <span class="brand-dot"></span>
-              <span class="fw-semibold">Astra Tradebot</span>
+              <span class="brand-lockup">
+                <img class="brand-mark" src="{{ brand_logo or url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+                <span class="brand-copy">
+                  <span class="brand-overline">Astra Tradebot</span>
+                  <span class="brand-name">Systematic crypto infrastructure</span>
+                </span>
+              </span>
               <span class="badge text-bg-secondary ms-1">{{ runtime_badge or "Astra" }}</span>
             </a>
             <div class="site-nav-actions">
@@ -322,21 +493,55 @@
           <div class="hero-grid">
             <section class="hero-card p-4 p-lg-5">
               <div class="eyebrow mb-3">{{ hero_eyebrow }}</div>
-              <h1 class="hero-title mb-4">{{ hero_prefix }} <span class="accent">{{ hero_accent }}</span>{{ hero_suffix }}</h1>
+              <div class="hero-brand">
+                <img src="{{ brand_logo or url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+                <div class="hero-brand-copy">
+                  <div class="brand-line">{{ hero_brand_line or "Systematic research • execution discipline" }}</div>
+                  <div class="brand-statement">{{ hero_brand_copy or "Private capital, clean systematic process, and production-grade operating standards." }}</div>
+                </div>
+              </div>
+              <h1 class="hero-title mb-4">{{ hero_prefix }} <span class="accent">{{ hero_accent }}{{ hero_suffix }}</span></h1>
               <p class="hero-copy mb-4">{{ hero_copy }}</p>
               <div class="hero-actions">
                 <a href="#contact" class="btn btn-accent btn-lg">
                   <i class="bi bi-chat-left-text me-2"></i>Request Conversation
                 </a>
-                <a href="#methodology" class="btn btn-outline-secondary btn-lg">
-                  <i class="bi bi-diagram-3 me-2"></i>System Overview
+                <a href="#performance" class="btn btn-outline-secondary btn-lg">
+                  <i class="bi bi-graph-up-arrow me-2"></i>Performance Overview
                 </a>
               </div>
             </section>
+          </div>
+        </section>
 
-            <aside class="summary-card p-4 p-lg-4">
-              <div class="eyebrow mb-3">Current stack</div>
-              <div class="stat-grid mb-3">
+        <div class="section-stack">
+          <section id="performance" class="performance-section p-4 p-lg-5">
+            <div class="eyebrow mb-2">{{ performance_title or "Walk-forward OOS performance" }}</div>
+            <h2 class="section-title mb-3">{{ performance_visual_title or "Stitched OOS equity" }}</h2>
+            <p class="section-copy mb-4">{{ performance_note }}</p>
+            <div class="performance-shell">
+              {% if performance_visual_html %}
+              <div class="performance-visual">
+                  <div class="performance-visual-card">
+                    {{ performance_visual_html | safe }}
+                  </div>
+                  <div class="performance-visual-meta">
+                    <div class="performance-visual-title">{{ performance_visual_title }}</div>
+                  <div class="performance-visual-caption">{{ performance_visual_caption }}</div>
+                </div>
+              </div>
+              {% endif %}
+              <div class="performance-grid">
+                {% for item in performance_metrics %}
+                <div class="performance-card">
+                  <div class="label">{{ item["label"] }}</div>
+                  <div class="value">{{ item["value"] }}</div>
+                  <div class="sub">{{ item["sub"] }}</div>
+                </div>
+                {% endfor %}
+              </div>
+              <div class="divider-line"></div>
+              <div class="stat-grid">
                 {% for item in stats %}
                 <div>
                   <div class="stat-label">{{ item["label"] }}</div>
@@ -344,20 +549,17 @@
                 </div>
                 {% endfor %}
               </div>
-              <div class="divider-line"></div>
-              <p class="section-copy mb-3">{{ summary_copy }}</p>
+              <p class="section-copy mb-0">{{ summary_copy }}</p>
               <div class="chip-row">
                 {% for chip in chips %}
                 <span class="chip">{{ chip }}</span>
                 {% endfor %}
               </div>
-            </aside>
-          </div>
-        </section>
+            </div>
+          </section>
 
-        <div class="section-stack">
           <section id="methodology" class="section-card p-4 p-lg-5">
-            <div class="eyebrow mb-2">System overview</div>
+            <div class="eyebrow mb-2">Why Astra</div>
             <h2 class="section-title mb-3">{{ system_title }}</h2>
             <p class="section-copy mb-0">{{ system_copy }}</p>
           </section>
@@ -373,8 +575,8 @@
           </section>
 
           <section class="section-card p-4 p-lg-5">
-            <div class="eyebrow mb-2">Research and infrastructure pipeline</div>
-            <h2 class="section-title mb-4">Built as a complete stack, not a single isolated model.</h2>
+            <div class="eyebrow mb-2">Why it is robust</div>
+            <h2 class="section-title mb-4">Built to survive changing market regimes, not to sell a single lucky backtest.</h2>
             <div class="pipeline-list">
               {% for item in pipeline %}
               <div class="pipeline-item">
@@ -391,10 +593,10 @@
           <section id="contact" class="contact-grid">
             <section class="section-card p-4 p-lg-5">
               <div class="eyebrow mb-2">Partnership model</div>
-              <h2 class="section-title mb-3">Selective collaboration for aligned capital and engineering-focused partnerships.</h2>
+              <h2 class="section-title mb-3">Private conversations for capital that values discipline over noise.</h2>
               <p class="section-copy mb-0">
-                Astra is not presented as a public fund. The positioning here is systematic research, proprietary infrastructure,
-                and quant/engineering capability for private conversations with family offices, smaller funds, and serious partners.
+                Astra is positioned for selective relationships where return quality, drawdown control, and operating seriousness matter
+                more than promotional storytelling.
               </p>
             </section>
             <aside class="contact-card p-4">

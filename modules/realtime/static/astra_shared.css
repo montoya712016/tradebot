@@ -139,6 +139,59 @@
   display: inline-block;
 }
 
+.brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-symbol {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.18));
+}
+
+.brand-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.brand-kicker {
+  color: rgba(255, 255, 255, 0.58);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.brand-title {
+  color: #f8fafc;
+  font-weight: 700;
+  font-size: 1.06rem;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+
+.btn-astra-primary {
+  background: linear-gradient(135deg, rgba(124, 92, 255, 0.18), rgba(76, 58, 140, 0.34));
+  color: #fff;
+  border: 1px solid rgba(124, 92, 255, 0.34);
+  backdrop-filter: blur(10px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 10px 24px rgba(0, 0, 0, 0.22);
+}
+
+.btn-astra-primary:hover,
+.btn-astra-primary:focus {
+  color: #fff;
+  background: linear-gradient(135deg, rgba(124, 92, 255, 0.24), rgba(88, 66, 164, 0.42));
+  border-color: rgba(124, 92, 255, 0.46);
+}
+
 .status-dot {
   width: 10px;
   height: 10px;

@@ -222,8 +222,13 @@
     <header class="navbar navbar-expand-lg navbar-glass sticky-top">
       <div class="container-fluid px-3">
         <a class="navbar-brand d-flex align-items-center gap-2" href="{{ home_url }}">
-          <span class="brand-dot"></span>
-          <span class="fw-semibold">Astra Tradebot</span>
+          <span class="brand-lockup">
+            <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+            <span class="brand-copy">
+              <span class="brand-kicker">Astra Tradebot</span>
+              <span class="brand-title">Access Control</span>
+            </span>
+          </span>
           <span class="badge text-bg-secondary ms-1">{{ badge or "Admin" }}</span>
         </a>
         <div class="d-flex align-items-center gap-2">

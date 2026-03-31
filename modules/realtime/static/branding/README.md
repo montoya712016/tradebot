@@ -35,3 +35,7 @@ Ideias:
 - `signal-mark`: simbolo mais modular e sistematico
 
 Todos os arquivos sao SVG editaveis e podem ser refinados depois.
+
+Uso atual:
+- a landing publica compartilhada passou a usar `astra-tradebot-symbol-premium.svg` como mark default do mock institucional
+- o `astra-tradebot-logo-premium.svg` continua disponivel como wordmark completo para usos futuros

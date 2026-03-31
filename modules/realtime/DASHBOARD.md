@@ -32,6 +32,8 @@ Os dois dashboards agora compartilham a mesma base visual:
 - paleta, spacing e atmosfera visual compartilhados
 - CSS base comum em `modules/realtime/static/astra_shared.css`
 - landing pública compartilhada em `modules/realtime/templates/landing.html`
+- a landing pública já expõe o logo SVG institucional e um bloco de métricas comerciais ilustrativas para mock de posicionamento
+- as superfícies protegidas também passaram a usar o símbolo SVG da Astra no navbar, em vez do antigo `brand-dot`
 
 O conteúdo e layout mudam por dashboard, mas a identidade visual é a mesma.
 
@@ -190,11 +192,20 @@ O `basic auth` do ngrok deixou de ser a camada principal de login. A autenticaç
 
 ### Auth e UI compartilhados
 - `modules/realtime/auth.py`
+- `modules/realtime/site_oos_assets.py`
 - `modules/realtime/templates/base.html`
 - `modules/realtime/templates/login.html`
 - `modules/realtime/templates/register.html`
 - `modules/realtime/templates/admin_users.html`
 - `modules/realtime/static/astra_shared.css`
+
+## Landing publica
+
+As duas landings publicas agora usam artefatos reais do OOS walk-forward `v5`:
+- metricas carregadas de `data/generated/fair_wf_explore_v5/robustness_report`
+- curva stitched OOS embutida em Plotly para uso visual no site
+- mesma imagem e mesmo bloco de metricas tanto no realtime quanto no Fair Explore
+- o bloco de performance ganhou protagonismo visual e a copy foi simplificada para enfatizar robustez, drawdown e validade comercial do processo
 
 ## Observações
 
