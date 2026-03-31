@@ -119,6 +119,7 @@ class TrainSniperWFSettings:
     exit_params: dict = field(default_factory=lambda: dict(DEFAULT_EXIT_PARAMS))
     # opcional: flags de features custom (senão usa o default por asset)
     feature_flags: dict | None = None
+    feature_preset_name: str | None = None
     # opcional: diretório para cache de features
     feature_cache_dir: str | None = None
     # contrato (se None, usa o DEFAULT_TRADE_CONTRACT do pacote)
@@ -192,6 +193,7 @@ def run(settings: TrainSniperWFSettings | None = None) -> str:
         symbols=tuple(settings.symbols),
         symbols_file=Path(settings.symbols_file) if settings.symbols_file else None,
         feature_flags=settings.feature_flags,
+        feature_preset_name=(str(settings.feature_preset_name).strip() if settings.feature_preset_name else None),
         feature_cache_dir=Path(settings.feature_cache_dir) if settings.feature_cache_dir else None,
         contract=contract_obj,
     )

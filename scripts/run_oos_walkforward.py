@@ -3,8 +3,11 @@ import re
 import subprocess
 import sys
 import time
+import csv
+import math
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 
@@ -54,6 +57,14 @@ CLUSTER_PARAM_COLS = [
     "min_trade_exposure",
     "exposure_multiplier",
 ]
+FAMILY_PARAM_COLS = [
+    "label_profit_thr",
+    "exit_ema_span_min",
+    "exit_ema_init_offset_pct",
+    "entry_ratio_neg_per_pos",
+    "calib_tail_blend",
+    "calib_tail_boost",
+]
 
 
 def _fair_root() -> Path:
@@ -63,6 +74,8 @@ def _fair_root() -> Path:
 
 def _to_float(value, default=0.0):
     try:
+        if value is None or value == "":
+            return float(default)
         if pd.isna(value):
             return float(default)
         return float(value)
@@ -72,6 +85,8 @@ def _to_float(value, default=0.0):
 
 def _to_int(value, default=0):
     try:
+        if value is None or value == "":
+            return int(default)
         if pd.isna(value):
             return int(default)
         return int(float(value))
@@ -98,18 +113,36 @@ def _safe_rank(series: pd.Series, ascending: bool = True) -> pd.Series:
     return series.rank(pct=True, ascending=ascending, method="average").fillna(0.0)
 
 
+def _load_explore_df(csv_path: Path, *, columns: list[str] | None = None, backtest_only: bool = False) -> pd.DataFrame:
+    if not csv_path.exists():
+        return pd.DataFrame(columns=columns or [])
+    selected_cols = columns or ["*"]
+    select_sql = ", ".join(selected_cols)
+    where_clauses = []
+    if backtest_only:
+        where_clauses.append("stage='backtest'")
+        where_clauses.append("status='ok'")
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    query = f"""
+    SELECT {select_sql}
+    FROM read_csv_auto('{csv_path.as_posix()}', all_varchar=true)
+    {where_sql}
+    """
+    try:
+        rel = duckdb.sql(query)
+        fetched_cols = [d[0] for d in rel.description]
+        rows = rel.fetchall()
+        return pd.DataFrame.from_records(rows, columns=fetched_cols)
+    except Exception:
+        return pd.DataFrame(columns=columns or [])
+
+
 def _build_global_param_scaler(step_paths: dict[int, Path]) -> dict[str, pd.Series]:
     frames = []
     cols = list(dict.fromkeys(PARAM_COLS + CLUSTER_PARAM_COLS))
     for step_dir in step_paths.values():
         csv_path = step_dir / "explore_runs.csv"
-        if not csv_path.exists():
-            continue
-        try:
-            df = pd.read_csv(csv_path)
-        except Exception:
-            continue
-        df = df[(df["stage"].astype(str) == "backtest") & (df["status"].astype(str) == "ok")].copy()
+        df = _load_explore_df(csv_path, columns=cols + ["stage", "status"], backtest_only=True)
         if df.empty:
             continue
         frame = df.reindex(columns=cols).copy()
@@ -149,6 +182,17 @@ def _normalize_with_scaler(frame: pd.DataFrame, cols: list[str], scaler: dict[st
     return ((work - mins) / span).to_numpy(dtype=float)
 
 
+def _family_key_from_row(row: pd.Series | dict) -> str:
+    return (
+        f"thr={_to_float(row.get('label_profit_thr'), 0.0):.6f}|"
+        f"span={_to_int(row.get('exit_ema_span_min'), 0)}|"
+        f"off={_to_float(row.get('exit_ema_init_offset_pct'), 0.0):.6f}|"
+        f"neg={_to_float(row.get('entry_ratio_neg_per_pos'), 0.0):.6f}|"
+        f"blend={_to_float(row.get('calib_tail_blend'), 0.0):.6f}|"
+        f"boost={_to_float(row.get('calib_tail_boost'), 0.0):.6f}"
+    )
+
+
 def _calc_selection_score(row: pd.Series) -> float:
     ret = _to_float(row.get("ret_pct"), 0.0) * 100.0
     dd = _to_float(row.get("max_dd"), 0.0)
@@ -171,6 +215,51 @@ def _calc_selection_score(row: pd.Series) -> float:
     return float(smoothed_ret * dd_penalty * trade_mult * pf_mult * month_support * streak_penalty * underwater_penalty * regime_penalty)
 
 
+def _calc_survival_score(row: pd.Series | dict) -> float:
+    ret = _to_float(row.get("ret_pct"), 0.0)
+    dd = _to_float(row.get("max_dd"), 1.0)
+    pf = _to_float(row.get("profit_factor"), 1.0)
+    trades = _to_float(row.get("trades"), 0.0)
+    month_pos = _to_float(row.get("month_pos_frac"), 0.0)
+    streak = _to_float(row.get("max_neg_month_streak"), 0.0)
+    underwater = _to_float(row.get("underwater_frac"), 1.0)
+    worst_90d = _to_float(row.get("worst_rolling_90d"), 0.0)
+    worst_day = _to_float(row.get("worst_day"), 0.0)
+    sum5 = _to_float(row.get("sum5_worst_days"), 0.0)
+    worst_14d = _to_float(row.get("worst_14d"), 0.0)
+    worst_30d = _to_float(row.get("worst_30d"), 0.0)
+    total_exp = _to_float(row.get("total_exposure"), 1.0)
+    trade_exp = _to_float(row.get("max_trade_exposure"), 0.1)
+
+    if ret <= 0.0 or dd > 0.15 or worst_day < -0.08 or sum5 < -0.22 or worst_30d < -0.15:
+        return 0.0
+
+    return_component = math.log1p(ret * 8.0)
+    dd_penalty = math.exp(-12.0 * dd) * math.exp(-42.0 * max(0.0, dd - 0.05))
+    tail_penalty = math.exp(-18.0 * max(0.0, -worst_day - 0.015))
+    tail_penalty *= math.exp(-7.0 * max(0.0, -sum5 - 0.06))
+    tail_penalty *= math.exp(-10.0 * max(0.0, -worst_14d - 0.04))
+    regime_penalty = math.exp(-7.5 * max(0.0, -worst_90d))
+    regime_penalty *= math.exp(-11.0 * max(0.0, -worst_30d - 0.06))
+    support = 0.86 + 0.14 * np.clip(month_pos, 0.0, 1.0)
+    support *= math.exp(-0.70 * max(0.0, streak - 1.0))
+    support *= math.exp(-2.2 * max(0.0, underwater - 0.30))
+    trade_support = min(1.0, trades / 120.0)
+    pf_support = min(1.20, max(0.90, pf))
+    exposure_penalty = math.exp(-0.28 * max(0.0, total_exp - 1.0))
+    exposure_penalty *= math.exp(-1.25 * max(0.0, trade_exp - 0.10))
+    return float(
+        return_component
+        * dd_penalty
+        * tail_penalty
+        * regime_penalty
+        * support
+        * trade_support
+        * pf_support
+        * exposure_penalty
+    )
+
+
 def _equity_metrics_from_bt_dir(bt_out_dir: str) -> dict[str, float]:
     csv_path = Path(str(bt_out_dir or "").strip()) / "portfolio_equity.csv"
     metrics = {
@@ -179,15 +268,33 @@ def _equity_metrics_from_bt_dir(bt_out_dir: str) -> dict[str, float]:
         "max_neg_month_streak": 0.0,
         "underwater_frac": 1.0,
         "worst_rolling_90d": 0.0,
+        "worst_day": 0.0,
+        "sum5_worst_days": 0.0,
+        "worst_14d": 0.0,
+        "worst_30d": 0.0,
     }
     try:
-        eq = pd.read_csv(csv_path, index_col=0)
-        eq.index = pd.to_datetime(eq.index)
-        if "equity" in eq.columns and not eq.empty:
-            eq_s = pd.to_numeric(eq["equity"], errors="coerce").dropna()
-            month_ret = eq_s.resample("ME").last().pct_change().dropna()
+        dates: list[pd.Timestamp] = []
+        equity: list[float] = []
+        with csv_path.open("r", encoding="utf-8", newline="") as f:
+            r = csv.reader(f)
+            next(r, None)
+            for row in r:
+                if len(row) < 2 or not row[0].strip():
+                    continue
+                try:
+                    dates.append(pd.Timestamp(row[0]))
+                    equity.append(float(row[1]))
+                except Exception:
+                    continue
+        if len(equity) >= 2:
+            eq_s = pd.Series(equity, index=pd.Index(dates)).sort_index()
+            eq_s = pd.to_numeric(eq_s, errors="coerce").dropna()
+            month_last = eq_s.groupby(eq_s.index.to_period("M")).last()
+            month_ret = month_last.pct_change().dropna()
             peaks = eq_s.cummax()
             underwater = (eq_s < peaks).astype(float)
+            daily = eq_s.pct_change().dropna()
             max_streak = 0
             cur_streak = 0
             for value in month_ret.to_numpy(dtype=float):
@@ -197,12 +304,19 @@ def _equity_metrics_from_bt_dir(bt_out_dir: str) -> dict[str, float]:
                 else:
                     cur_streak = 0
             rolling_90d = (eq_s / eq_s.shift(90)) - 1.0
+            rolling_14d = (eq_s / eq_s.shift(14)) - 1.0
+            rolling_30d = (eq_s / eq_s.shift(30)) - 1.0
+            worst_days = np.sort(daily.to_numpy(dtype=float))
             metrics = {
                 "month_pos_frac": float((month_ret > 0.0).mean()) if len(month_ret) else 0.0,
                 "month_worst": float(month_ret.min()) if len(month_ret) else 0.0,
                 "max_neg_month_streak": float(max_streak),
                 "underwater_frac": float(underwater.mean()) if len(underwater) else 1.0,
                 "worst_rolling_90d": float(rolling_90d.min()) if rolling_90d.notna().any() else 0.0,
+                "worst_day": float(daily.min()) if len(daily) else 0.0,
+                "sum5_worst_days": float(worst_days[: min(5, len(worst_days))].sum()) if len(worst_days) else 0.0,
+                "worst_14d": float(rolling_14d.min()) if rolling_14d.notna().any() else 0.0,
+                "worst_30d": float(rolling_30d.min()) if rolling_30d.notna().any() else 0.0,
             }
     except Exception:
         pass
@@ -277,6 +391,7 @@ def _build_robust_candidates(
     work["worst_rolling_90d"] = work.get("worst_rolling_90d", 0.0).fillna(0.0)
     work["top1_share_pos"] = work.get("top1_share_pos", 1.0).fillna(1.0)
     work["avg_trades_per_cluster"] = work.get("avg_trades_per_cluster", 10.0).fillna(10.0)
+    work["family_key"] = work.apply(_family_key_from_row, axis=1)
 
     viable = work[
         (work["score"] > 0.0)
@@ -301,6 +416,8 @@ def _build_robust_candidates(
     viable["roll90_rank"] = _safe_rank(viable["worst_rolling_90d"], ascending=True)
     viable["top1_rank"] = _safe_rank(viable["top1_share_pos"], ascending=False)
     viable["cluster_rank"] = _safe_rank(viable["avg_trades_per_cluster"], ascending=False)
+    viable["total_exp_rank"] = _safe_rank(pd.to_numeric(viable.get("total_exposure"), errors="coerce").fillna(np.inf), ascending=False)
+    viable["trade_exp_rank"] = _safe_rank(pd.to_numeric(viable.get("max_trade_exposure"), errors="coerce").fillna(np.inf), ascending=False)
 
     q_cut = viable["score"].quantile(0.75)
     elite = viable[viable["score"] >= q_cut].copy()
@@ -387,6 +504,13 @@ def _build_robust_candidates(
         + viable["cluster_rank"] * 0.01
     )
     viable["local_dd_score"] *= (0.82 + 0.18 * viable["neighbor_std_rank"])
+    viable["prudent_variant_score"] = (
+        viable["local_dd_score"] * 0.40
+        + viable["local_robust_score"] * 0.18
+        + viable["total_exp_rank"] * 0.22
+        + viable["trade_exp_rank"] * 0.12
+        + viable["dd_rank"] * 0.08
+    )
 
     cluster_frame = viable.reindex(columns=CLUSTER_PARAM_COLS).copy()
     cluster_frame = cluster_frame.fillna(cluster_frame.median(numeric_only=True)).fillna(0.0)
@@ -516,6 +640,110 @@ def _build_robust_candidates(
     viable["causal_continuity"] = viable["causal_continuity"].fillna(0.0)
     viable["causal_coverage_steps"] = viable["causal_coverage_steps"].fillna(0.0)
 
+    family_arr = _normalize_with_scaler(viable, FAMILY_PARAM_COLS, global_scaler)
+    family_centers = {}
+    family_dist = np.zeros(len(viable), dtype=float)
+    for family_key in sorted(pd.unique(viable["family_key"])):
+        mask = viable["family_key"].astype(str).to_numpy() == str(family_key)
+        center = np.median(family_arr[mask], axis=0)
+        family_centers[str(family_key)] = center
+        family_dist[mask] = np.sqrt(np.sum((family_arr[mask] - center) ** 2, axis=1))
+    viable["family_center_dist"] = family_dist
+    viable["family_center_rank"] = _safe_rank(viable["family_center_dist"], ascending=False)
+
+    family_stats = (
+        viable.groupby("family_key", as_index=False)
+        .agg(
+            family_size=("family_key", "size"),
+            family_local_score_median=("local_robust_score", "median"),
+            family_local_score_q25=("local_robust_score", lambda x: float(np.quantile(np.asarray(x, dtype=float), 0.25))),
+            family_dd_median=("max_dd", "median"),
+            family_pf_median=("profit_factor", "median"),
+            family_trade_median=("trades", "median"),
+            family_month_median=("month_pos_frac", "median"),
+            family_streak_median=("max_neg_month_streak", "median"),
+            family_underwater_median=("underwater_frac", "median"),
+            family_roll90_median=("worst_rolling_90d", "median"),
+            family_total_exp_median=("total_exposure", "median"),
+            family_trade_exp_median=("max_trade_exposure", "median"),
+            family_prudent_median=("prudent_variant_score", "median"),
+        )
+        .copy()
+    )
+    family_stats["family_global_center"] = family_stats["family_key"].map(family_centers)
+    family_stats["family_size_rank"] = _safe_rank(family_stats["family_size"], ascending=True)
+    family_stats["family_local_median_rank"] = _safe_rank(family_stats["family_local_score_median"], ascending=True)
+    family_stats["family_local_q25_rank"] = _safe_rank(family_stats["family_local_score_q25"], ascending=True)
+    family_stats["family_dd_rank"] = _safe_rank(family_stats["family_dd_median"], ascending=False)
+    family_stats["family_pf_rank"] = _safe_rank(family_stats["family_pf_median"], ascending=True)
+    family_stats["family_trade_rank"] = _safe_rank(family_stats["family_trade_median"], ascending=True)
+    family_stats["family_month_rank"] = _safe_rank(family_stats["family_month_median"], ascending=True)
+    family_stats["family_streak_rank"] = _safe_rank(family_stats["family_streak_median"], ascending=False)
+    family_stats["family_underwater_rank"] = _safe_rank(family_stats["family_underwater_median"], ascending=False)
+    family_stats["family_roll90_rank"] = _safe_rank(family_stats["family_roll90_median"], ascending=True)
+    family_stats["family_total_exp_rank"] = _safe_rank(family_stats["family_total_exp_median"], ascending=False)
+    family_stats["family_trade_exp_rank"] = _safe_rank(family_stats["family_trade_exp_median"], ascending=False)
+    family_stats["family_prudent_rank"] = _safe_rank(family_stats["family_prudent_median"], ascending=True)
+    family_stats["family_score"] = (
+        family_stats["family_local_q25_rank"] * 0.20
+        + family_stats["family_local_median_rank"] * 0.16
+        + family_stats["family_dd_rank"] * 0.12
+        + family_stats["family_pf_rank"] * 0.06
+        + family_stats["family_trade_rank"] * 0.05
+        + family_stats["family_month_rank"] * 0.03
+        + family_stats["family_streak_rank"] * 0.05
+        + family_stats["family_underwater_rank"] * 0.05
+        + family_stats["family_roll90_rank"] * 0.06
+        + family_stats["family_size_rank"] * 0.06
+        + family_stats["family_total_exp_rank"] * 0.08
+        + family_stats["family_trade_exp_rank"] * 0.04
+        + family_stats["family_prudent_rank"] * 0.04
+    )
+
+    prior_mem = list(prior_cluster_memory or [])
+    if prior_mem:
+        family_continuity = []
+        family_cov = []
+        for _, row in family_stats.iterrows():
+            center = row["family_global_center"]
+            sims = []
+            steps_seen = set()
+            for mem in prior_mem:
+                prev_center = mem.get("family_center_vec")
+                if prev_center is None:
+                    prev_center = mem.get("center_vec")
+                if prev_center is None:
+                    continue
+                step_gap = 1.0
+                if step is not None and mem.get("step") is not None:
+                    step_gap = max(1.0, abs(float(mem["step"]) - float(step)) / 180.0)
+                dist = float(np.sqrt(np.sum((center - prev_center) ** 2)))
+                sim = float(np.exp(-3.0 * dist) * np.exp(-0.30 * (step_gap - 1.0)))
+                quality = float(mem.get("quality", 0.5))
+                sims.append(sim * (0.75 + 0.25 * quality))
+                if sim >= 0.55:
+                    steps_seen.add(int(mem.get("step", -1)))
+            top = sorted(sims, reverse=True)[:4]
+            family_continuity.append(float(np.mean(top)) if top else 0.0)
+            family_cov.append(float(len(steps_seen)))
+        family_stats["family_causal_continuity"] = family_continuity
+        family_stats["family_causal_coverage"] = family_cov
+    else:
+        family_stats["family_causal_continuity"] = 0.0
+        family_stats["family_causal_coverage"] = 0.0
+    family_stats["family_causal_cont_rank"] = _safe_rank(family_stats["family_causal_continuity"], ascending=True)
+    family_stats["family_causal_cov_rank"] = _safe_rank(family_stats["family_causal_coverage"], ascending=True)
+    family_stats["family_causal_score"] = (
+        family_stats["family_score"] * 0.74
+        + family_stats["family_causal_cont_rank"] * 0.20
+        + family_stats["family_causal_cov_rank"] * 0.06
+    )
+    viable = viable.merge(family_stats, on="family_key", how="left")
+    viable["family_score"] = viable["family_score"].fillna(0.0)
+    viable["family_causal_score"] = viable["family_causal_score"].fillna(0.0)
+    viable["family_causal_continuity"] = viable["family_causal_continuity"].fillna(0.0)
+    viable["family_causal_coverage"] = viable["family_causal_coverage"].fillna(0.0)
+
     if selector_mode == "causal_cluster":
         viable["robust_score"] = (
             viable["causal_cluster_score"] * 0.62
@@ -547,6 +775,20 @@ def _build_robust_candidates(
         )
         viable["robust_score"] = viable["local_dd_score"] * (0.92 + 0.12 * viable["cluster_guard"])
         sort_cols = ["cluster_guard", "robust_score", "cluster_size", "neighbor_q25_score", "score"]
+    elif selector_mode == "family_causal":
+        viable["robust_score"] = (
+            viable["family_causal_score"] * 0.58
+            + viable["prudent_variant_score"] * 0.24
+            + viable["local_dd_score"] * 0.10
+            + viable["local_robust_score"] * 0.08
+        )
+        sort_cols = [
+            "family_causal_score",
+            "prudent_variant_score",
+            "robust_score",
+            "family_center_rank",
+            "score",
+        ]
     elif selector_mode == "local":
         viable["robust_score"] = viable["local_robust_score"]
         sort_cols = ["robust_score", "neighbor_q25_score", "neighbor_mean_score", "score"]
@@ -566,6 +808,28 @@ def get_best_individual(csv_path: Path):
 def _extract_cluster_memory(robust: pd.DataFrame, step: int, limit: int = 3) -> list[dict]:
     if robust.empty:
         return []
+    if _selector_mode() == "family_causal" and "family_key" in robust.columns:
+        family_rows = (
+            robust.sort_values(
+                ["family_causal_score", "family_score", "prudent_variant_score", "robust_score"],
+                ascending=False,
+                na_position="last",
+            )
+            .drop_duplicates(subset=["family_key"])
+            .head(limit)
+        )
+        out = []
+        for _, row in family_rows.iterrows():
+            out.append(
+                {
+                    "step": int(step),
+                    "family_key": str(row.get("family_key") or ""),
+                    "family_center_vec": row.get("family_global_center"),
+                    "quality": float(_to_float(row.get("family_causal_score"), 0.0)),
+                    "family_score": float(_to_float(row.get("family_score"), 0.0)),
+                }
+            )
+        return out
     cluster_col = "causal_cluster_score" if "causal_cluster_score" in robust.columns else "cluster_score"
     cluster_rows = (
         robust.sort_values(
@@ -630,27 +894,51 @@ def _select_individual(
     global_scaler: dict[str, pd.Series] | None = None,
     step: int | None = None,
 ) -> dict | None:
-    if not csv_path.exists():
-        return None
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        return None
-
-    df = df[(df["stage"] == "backtest") & (df["status"] == "ok")].copy()
+    df = _load_explore_df(csv_path, backtest_only=True)
     if df.empty:
         return None
-    for col in ("max_neg_month_streak", "underwater_frac", "worst_rolling_90d"):
+    for col in (
+        "max_neg_month_streak",
+        "underwater_frac",
+        "worst_rolling_90d",
+        "worst_day",
+        "sum5_worst_days",
+        "worst_14d",
+        "worst_30d",
+    ):
         if col not in df.columns:
             df[col] = np.nan
-    missing_mask = df["max_neg_month_streak"].isna() | df["underwater_frac"].isna() | df["worst_rolling_90d"].isna()
+    missing_mask = (
+        df["max_neg_month_streak"].isna()
+        | df["underwater_frac"].isna()
+        | df["worst_rolling_90d"].isna()
+        | df["worst_day"].isna()
+        | df["sum5_worst_days"].isna()
+        | df["worst_14d"].isna()
+        | df["worst_30d"].isna()
+    )
     if missing_mask.any():
         enriched = df.loc[missing_mask, "bt_out_dir"].apply(_equity_metrics_from_bt_dir)
-        for col in ("month_pos_frac", "month_worst", "max_neg_month_streak", "underwater_frac", "worst_rolling_90d"):
+        for col in (
+            "month_pos_frac",
+            "month_worst",
+            "max_neg_month_streak",
+            "underwater_frac",
+            "worst_rolling_90d",
+            "worst_day",
+            "sum5_worst_days",
+            "worst_14d",
+            "worst_30d",
+        ):
             if col not in df.columns:
                 df[col] = np.nan
             df.loc[missing_mask, col] = enriched.apply(lambda x: x.get(col, np.nan))
-    df["score"] = df.apply(_calc_selection_score, axis=1)
+    score_mode = _selector_score_mode()
+    records = df.to_dict(orient="records")
+    df["legacy_score"] = [_calc_selection_score(row) for row in records]
+    df["survival_score"] = [_calc_survival_score(row) for row in records]
+    df["score"] = df["survival_score"] if score_mode == "survival" else df["legacy_score"]
+    df["score_mode"] = score_mode
 
     robust = _build_robust_candidates(
         df,
@@ -659,45 +947,92 @@ def _select_individual(
         step=step,
     )
     if not robust.empty:
-        cluster_score_col = "causal_cluster_score" if ("causal_cluster_score" in robust.columns and prior_cluster_memory) else "cluster_score"
-        best_cluster_id = (
-            robust.sort_values(
+        if _selector_mode() == "family_causal":
+            family_score_col = "family_causal_score" if ("family_causal_score" in robust.columns and prior_cluster_memory) else "family_score"
+            best_family_key = (
+                robust.sort_values(
+                    [
+                        family_score_col,
+                        "family_score",
+                        "family_size",
+                        "family_local_score_q25",
+                        "prudent_variant_score",
+                    ],
+                    ascending=False,
+                    na_position="last",
+                )
+                .iloc[0]
+                .get("family_key")
+            )
+            cluster_rows = robust[robust["family_key"] == best_family_key].copy()
+            if cluster_rows.empty:
+                cluster_rows = robust.copy()
+            cluster_rows["family_center_dist"] = pd.to_numeric(cluster_rows.get("family_center_dist"), errors="coerce").fillna(np.inf)
+            cluster_rows["score"] = pd.to_numeric(cluster_rows.get("score"), errors="coerce").fillna(0.0)
+            cluster_rows["legacy_score"] = pd.to_numeric(cluster_rows.get("legacy_score"), errors="coerce").fillna(0.0)
+            cluster_rows["survival_score"] = pd.to_numeric(cluster_rows.get("survival_score"), errors="coerce").fillna(0.0)
+            cluster_rows["prudent_variant_score"] = pd.to_numeric(cluster_rows.get("prudent_variant_score"), errors="coerce").fillna(0.0)
+            cluster_rows["max_dd"] = pd.to_numeric(cluster_rows.get("max_dd"), errors="coerce").fillna(np.inf)
+            cluster_rows["total_exposure"] = pd.to_numeric(cluster_rows.get("total_exposure"), errors="coerce").fillna(np.inf)
+            cluster_rows["max_trade_exposure"] = pd.to_numeric(cluster_rows.get("max_trade_exposure"), errors="coerce").fillna(np.inf)
+            cluster_rows = cluster_rows.sort_values(
                 [
-                    cluster_score_col,
-                    "cluster_score",
-                    "cluster_size",
-                    "cluster_local_score_q25",
+                    family_score_col,
+                    "prudent_variant_score",
                     "robust_score",
+                    "survival_score",
+                    "family_center_dist",
+                    "max_dd",
+                    "total_exposure",
+                    "max_trade_exposure",
+                    "score",
                 ],
-                ascending=False,
+                ascending=[False, False, False, False, True, True, True, True, False],
                 na_position="last",
             )
-            .iloc[0]
-            .get("cluster_id")
-        )
-        cluster_rows = robust[robust["cluster_id"] == best_cluster_id].copy()
-        if cluster_rows.empty:
-            cluster_rows = robust.copy()
-        cluster_rows["cluster_center_dist"] = pd.to_numeric(cluster_rows.get("cluster_center_dist"), errors="coerce").fillna(np.inf)
-        cluster_rows["neighbor_q25_score"] = pd.to_numeric(cluster_rows.get("neighbor_q25_score"), errors="coerce").fillna(0.0)
-        cluster_rows["score"] = pd.to_numeric(cluster_rows.get("score"), errors="coerce").fillna(0.0)
-        cluster_rows["max_dd"] = pd.to_numeric(cluster_rows.get("max_dd"), errors="coerce").fillna(np.inf)
-        cluster_rows["total_exposure"] = pd.to_numeric(cluster_rows.get("total_exposure"), errors="coerce").fillna(np.inf)
-        cluster_rows["max_trade_exposure"] = pd.to_numeric(cluster_rows.get("max_trade_exposure"), errors="coerce").fillna(np.inf)
-        cluster_rows = cluster_rows.sort_values(
-            [
-                cluster_score_col,
-                "robust_score",
-                "cluster_center_dist",
-                "max_dd",
-                "total_exposure",
-                "max_trade_exposure",
-                "neighbor_q25_score",
-                "score",
-            ],
-            ascending=[False, False, True, True, True, True, False, False],
-            na_position="last",
-        )
+        else:
+            cluster_score_col = "causal_cluster_score" if ("causal_cluster_score" in robust.columns and prior_cluster_memory) else "cluster_score"
+            best_cluster_id = (
+                robust.sort_values(
+                    [
+                        cluster_score_col,
+                        "cluster_score",
+                        "cluster_size",
+                        "cluster_local_score_q25",
+                        "robust_score",
+                    ],
+                    ascending=False,
+                    na_position="last",
+                )
+                .iloc[0]
+                .get("cluster_id")
+            )
+            cluster_rows = robust[robust["cluster_id"] == best_cluster_id].copy()
+            if cluster_rows.empty:
+                cluster_rows = robust.copy()
+            cluster_rows["cluster_center_dist"] = pd.to_numeric(cluster_rows.get("cluster_center_dist"), errors="coerce").fillna(np.inf)
+            cluster_rows["neighbor_q25_score"] = pd.to_numeric(cluster_rows.get("neighbor_q25_score"), errors="coerce").fillna(0.0)
+            cluster_rows["score"] = pd.to_numeric(cluster_rows.get("score"), errors="coerce").fillna(0.0)
+            cluster_rows["legacy_score"] = pd.to_numeric(cluster_rows.get("legacy_score"), errors="coerce").fillna(0.0)
+            cluster_rows["survival_score"] = pd.to_numeric(cluster_rows.get("survival_score"), errors="coerce").fillna(0.0)
+            cluster_rows["max_dd"] = pd.to_numeric(cluster_rows.get("max_dd"), errors="coerce").fillna(np.inf)
+            cluster_rows["total_exposure"] = pd.to_numeric(cluster_rows.get("total_exposure"), errors="coerce").fillna(np.inf)
+            cluster_rows["max_trade_exposure"] = pd.to_numeric(cluster_rows.get("max_trade_exposure"), errors="coerce").fillna(np.inf)
+            cluster_rows = cluster_rows.sort_values(
+                [
+                    cluster_score_col,
+                    "robust_score",
+                    "survival_score",
+                    "cluster_center_dist",
+                    "max_dd",
+                    "total_exposure",
+                    "max_trade_exposure",
+                    "neighbor_q25_score",
+                    "score",
+                ],
+                ascending=[False, False, False, True, True, True, True, False, False],
+                na_position="last",
+            )
         selected = cluster_rows.iloc[0].to_dict()
         selected["_cluster_memory"] = _extract_cluster_memory(robust, int(step or -1))
         return selected
@@ -722,7 +1057,11 @@ def build_contract_from_row(row, candle_sec: int):
 
 def build_cfg_from_row(row):
     cfg = _default_portfolio_cfg()
-    cfg.max_positions = _to_int(row.get("max_positions"), cfg.max_positions)
+    # max_positions is kept only for backward compatibility with older explore roots.
+    # New roots are expected to control concurrency purely via exposure budget.
+    cfg.max_positions = 0
+    if row.get("max_positions") not in {None, ""}:
+        cfg.max_positions = _to_int(row.get("max_positions"), cfg.max_positions)
     cfg.total_exposure = _to_float(row.get("total_exposure"), cfg.total_exposure)
     cfg.max_trade_exposure = _to_float(row.get("max_trade_exposure"), cfg.max_trade_exposure)
     cfg.min_trade_exposure = _to_float(row.get("min_trade_exposure"), cfg.min_trade_exposure)
@@ -731,6 +1070,7 @@ def build_cfg_from_row(row):
     max_trade_override = os.getenv("WF_OOS_MAX_TRADE_EXPOSURE")
     min_trade_override = os.getenv("WF_OOS_MIN_TRADE_EXPOSURE")
     if max_pos_override not in {None, ""}:
+        # Kept only for compatibility when replaying older runs that still used max_positions.
         cfg.max_positions = _to_int(max_pos_override, cfg.max_positions)
     if total_exp_override not in {None, ""}:
         cfg.total_exposure = _to_float(total_exp_override, cfg.total_exposure)
@@ -752,10 +1092,17 @@ def _mode() -> str:
 
 
 def _selector_mode() -> str:
-    raw = str(os.getenv("WF_OOS_SELECTOR", "causal_cluster") or "causal_cluster").strip().lower()
-    if raw in {"local", "local_dd", "cluster_filter", "cluster_blend", "causal_cluster"}:
+    raw = str(os.getenv("WF_OOS_SELECTOR", "family_causal") or "family_causal").strip().lower()
+    if raw in {"local", "local_dd", "cluster_filter", "cluster_blend", "causal_cluster", "family_causal"}:
         return raw
-    return "causal_cluster"
+    return "family_causal"
+
+
+def _selector_score_mode() -> str:
+    raw = str(os.getenv("WF_OOS_SCORE_MODE", "survival") or "survival").strip().lower()
+    if raw in {"survival", "legacy"}:
+        return raw
+    return "survival"
 
 
 def build_train_env_from_row(row, oos_target_tail: int):
@@ -840,6 +1187,7 @@ def main():
     report_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] OOS mode: {mode}")
     print(f"[INFO] Selector mode: {_selector_mode()}")
+    print(f"[INFO] Score mode: {_selector_score_mode()}")
 
     for source_idx, m_source in enumerate(source_steps):
         idx = MILESTONES.index(m_source)
@@ -880,8 +1228,15 @@ def main():
         print(f"Selected representative from step T-{m_source}: {best.get('label_id')}/{best.get('model_id')}/{best.get('backtest_id')}")
         print(
             "Selection: "
+            f"score_mode={best.get('score_mode') or _selector_score_mode()} "
             f"score={_to_float(best.get('score'), 0.0):.4f} "
+            f"survival={_to_float(best.get('survival_score'), 0.0):.4f} "
+            f"legacy={_to_float(best.get('legacy_score'), 0.0):.4f} "
             f"robust={_to_float(best.get('robust_score'), 0.0):.4f} "
+            f"family={str(best.get('family_key') or '')} "
+            f"family_score={_to_float(best.get('family_score'), 0.0):.4f} "
+            f"family_causal={_to_float(best.get('family_causal_score'), 0.0):.4f} "
+            f"prudent={_to_float(best.get('prudent_variant_score'), 0.0):.4f} "
             f"cluster={_to_int(best.get('cluster_id'), -1)} "
             f"cluster_score={_to_float(best.get('cluster_score'), 0.0):.4f} "
             f"causal_cluster={_to_float(best.get('causal_cluster_score'), 0.0):.4f} "
@@ -960,6 +1315,7 @@ def main():
                 {
                     "mode": mode,
                     "selector_mode": _selector_mode(),
+                    "score_mode": best.get("score_mode") or _selector_score_mode(),
                     "source_step": m_source,
                     "retrain_step": m_retrain if m_retrain is not None else "",
                     "test_start_step": m_test_start,
@@ -972,7 +1328,13 @@ def main():
                     "retrain_minutes": retrain_minutes,
                     "tau_entry": tau_entry,
                     "is_score": _to_float(best.get("score"), 0.0),
+                    "legacy_score": _to_float(best.get("legacy_score"), 0.0),
+                    "survival_score": _to_float(best.get("survival_score"), 0.0),
                     "robust_score": _to_float(best.get("robust_score"), 0.0),
+                    "family_key": str(best.get("family_key") or ""),
+                    "family_score": _to_float(best.get("family_score"), 0.0),
+                    "family_causal_score": _to_float(best.get("family_causal_score"), 0.0),
+                    "prudent_variant_score": _to_float(best.get("prudent_variant_score"), 0.0),
                     "causal_cluster_score": _to_float(best.get("causal_cluster_score"), 0.0),
                     "causal_continuity": _to_float(best.get("causal_continuity"), 0.0),
                     "causal_coverage_steps": _to_float(best.get("causal_coverage_steps"), 0.0),

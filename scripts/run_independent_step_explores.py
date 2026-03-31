@@ -4,7 +4,7 @@ import subprocess
 import time
 from pathlib import Path
 from datetime import datetime
-import pandas as pd
+import duckdb  # type: ignore
 
 
 def _env_int(name: str, default: int) -> int:
@@ -30,10 +30,10 @@ def _fmt_duration(seconds: float) -> str:
     return f"{(minutes / 60.0):.2f}h"
 
 
-def _extract_max_numeric_suffix(series: pd.Series, prefix: str) -> int:
+def _extract_max_numeric_suffix(values: list[str], prefix: str) -> int:
     max_val = 0
-    for value in series.dropna().astype(str):
-        value = value.strip()
+    for raw in values:
+        value = str(raw or "").strip()
         if not value.startswith(prefix):
             continue
         tail = value[len(prefix):]
@@ -67,24 +67,30 @@ def _step_progress(step_dir: Path) -> dict:
     if not csv_path.exists():
         return out
     try:
-        df = pd.read_csv(csv_path)
+        rel = duckdb.sql(f"SELECT * FROM read_csv_auto('{csv_path.as_posix()}', all_varchar=true)")
+        rows = rel.fetchall()
+        cols = [str(c) for c in rel.columns]
     except Exception:
         return out
-
-    df_ok = df[df.get("status").astype(str) == "ok"].copy() if "status" in df.columns else df.copy()
+    if not rows:
+        return out
+    idx = {c: i for i, c in enumerate(cols)}
+    status_i = idx.get("status")
+    stage_i = idx.get("stage")
+    label_i = idx.get("label_id")
+    model_i = idx.get("model_id")
+    bt_i = idx.get("backtest_id")
+    ok_rows = [r for r in rows if status_i is None or str(r[status_i] or "") == "ok"]
     out["has_csv"] = True
-    if "stage" in df_ok.columns:
-        out["ok_refresh"] = int((df_ok["stage"].astype(str) == "refresh").sum())
-        bt_ok = df_ok[df_ok["stage"].astype(str) == "backtest"].copy()
-    else:
-        bt_ok = df_ok.copy()
+    out["ok_refresh"] = int(sum(1 for r in ok_rows if stage_i is not None and str(r[stage_i] or "") == "refresh"))
+    bt_ok = [r for r in ok_rows if stage_i is None or str(r[stage_i] or "") == "backtest"]
     out["ok_backtests"] = int(len(bt_ok))
-    if "label_id" in df_ok.columns:
-        out["max_label_idx"] = _extract_max_numeric_suffix(df_ok["label_id"], "label_")
-    if "model_id" in df_ok.columns:
-        out["max_model_idx"] = _extract_max_numeric_suffix(df_ok["model_id"], "model_")
-    if "backtest_id" in df_ok.columns:
-        out["max_bt_idx"] = _extract_max_numeric_suffix(df_ok["backtest_id"], "bt_")
+    if label_i is not None:
+        out["max_label_idx"] = _extract_max_numeric_suffix([r[label_i] for r in ok_rows], "label_")
+    if model_i is not None:
+        out["max_model_idx"] = _extract_max_numeric_suffix([r[model_i] for r in ok_rows], "model_")
+    if bt_i is not None:
+        out["max_bt_idx"] = _extract_max_numeric_suffix([r[bt_i] for r in ok_rows], "bt_")
     return out
 
 
@@ -100,28 +106,39 @@ def _generation_progress(step_dir: Path, label_start: int, label_count: int, ret
     if not csv_path.exists():
         return out
     try:
-        df = pd.read_csv(csv_path, low_memory=False)
+        rel = duckdb.sql(f"SELECT * FROM read_csv_auto('{csv_path.as_posix()}', all_varchar=true)")
+        rows = rel.fetchall()
+        cols = [str(c) for c in rel.columns]
     except Exception:
         return out
-    if df.empty or "label_id" not in df.columns:
+    if not rows:
+        return out
+    idx = {c: i for i, c in enumerate(cols)}
+    label_i = idx.get("label_id")
+    stage_i = idx.get("stage")
+    status_i = idx.get("status")
+    model_i = idx.get("model_id")
+    bt_i = idx.get("backtest_id")
+    if label_i is None:
         return out
     label_end = int(label_start) + int(label_count) - 1
-    label_nums = df["label_id"].apply(lambda x: _extract_numeric_suffix(x, "label_"))
-    df = df[(label_nums >= int(label_start)) & (label_nums <= int(label_end))].copy()
-    if df.empty:
+    scoped_rows = []
+    for row in rows:
+        label_num = _extract_numeric_suffix(row[label_i], "label_")
+        if int(label_start) <= label_num <= int(label_end):
+            scoped_rows.append(row)
+    if not scoped_rows:
         return out
-    df_ok = df[df.get("status").astype(str) == "ok"].copy() if "status" in df.columns else df.copy()
-    if "stage" in df_ok.columns:
-        out["ok_refresh"] = int((df_ok["stage"].astype(str) == "refresh").sum())
-        bt_ok = df_ok[df_ok["stage"].astype(str) == "backtest"].copy()
-        train_ok = df_ok[df_ok["stage"].astype(str) == "train"].copy()
-    else:
-        bt_ok = df_ok.copy()
-        train_ok = df_ok.copy()
+    ok_rows = [r for r in scoped_rows if status_i is None or str(r[status_i] or "") == "ok"]
+    out["ok_refresh"] = int(sum(1 for r in ok_rows if stage_i is not None and str(r[stage_i] or "") == "refresh"))
+    bt_ok = [r for r in ok_rows if stage_i is None or str(r[stage_i] or "") == "backtest"]
+    train_ok = [r for r in ok_rows if stage_i is None or str(r[stage_i] or "") == "train"]
     out["ok_backtests"] = int(len(bt_ok))
-    out["labels_seen"] = int(df_ok["label_id"].astype(str).nunique()) if "label_id" in df_ok.columns else 0
-    out["models_seen"] = int(train_ok["model_id"].astype(str).replace("nan", "").nunique()) if "model_id" in train_ok.columns else 0
-    out["backtests_seen"] = int(bt_ok["backtest_id"].astype(str).replace("nan", "").nunique()) if "backtest_id" in bt_ok.columns else 0
+    out["labels_seen"] = int(len({str(r[label_i] or "") for r in ok_rows if str(r[label_i] or "").strip()}))
+    if model_i is not None:
+        out["models_seen"] = int(len({str(r[model_i] or "") for r in train_ok if str(r[model_i] or "").strip() and str(r[model_i] or "").strip().lower() != "nan"}))
+    if bt_i is not None:
+        out["backtests_seen"] = int(len({str(r[bt_i] or "") for r in bt_ok if str(r[bt_i] or "").strip() and str(r[bt_i] or "").strip().lower() != "nan"}))
     return out
 
 
@@ -183,6 +200,7 @@ def run_generation(
     env["WF_EXPLORE_GENERATION"] = str(int(generation))
     env["WF_EXPLORE_LABEL_START"] = str(int(label_start))
     env["WF_EXPLORE_LABEL_COUNT"] = str(int(label_count))
+    env.setdefault("WF_EXPLORE_FEATURE_PRESET", str(os.getenv("WF_EXPLORE_FEATURE_PRESET", "core80") or "core80"))
     worker_count = int(_env_int("WF_EXPLORE_SAFE_THREADS", 8))
     env["WF_EXPLORE_SAFE_THREADS"] = str(worker_count)
     env["SNIPER_LABELS_REFRESH_WORKERS"] = str(worker_count)
@@ -237,17 +255,21 @@ def run_generation(
 
 def main():
     repo_root = Path(__file__).resolve().parent.parent
-    fair_root_name = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v5") or "fair_wf_explore_v5").strip()
+    fair_root_name = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v6") or "fair_wf_explore_v6").strip()
+    os.environ["WF_FAIR_ROOT"] = fair_root_name
+    os.environ.setdefault("WF_EXPLORE_FEATURE_PRESET", "core80")
+    os.environ.setdefault("WF_EXPLORE_SAFE_THREADS", "8")
+    os.environ.setdefault("WF_EXPLORE_CANDLE_SEC", "300")
     fair_root = repo_root / "data" / "generated" / fair_root_name
 
     # Configuração local para rodar direto pelo VS Code, sem env vars.
     # Estas são as METAS FINAIS por step.
     # O orquestrador completa o que faltar até este alvo e depois para.
-    TARGET_LABEL_TRIALS = 49
-    TARGET_RETRAINS_PER_LABEL = 1
-    TARGET_BACKTESTS_PER_RETRAIN = 26
+    TARGET_LABEL_TRIALS = 56
+    TARGET_RETRAINS_PER_LABEL = 2
+    TARGET_BACKTESTS_PER_RETRAIN = 21
     GENERATION_PLAN = [
-        {"phase": "broad", "generation": 1, "label_start": 1, "label_count": 49},
+        {"phase": "broad", "generation": 1, "label_start": 1, "label_count": 56},
     ]
     
     # Resume Capability: Don't move the folder, just append/skip
@@ -259,6 +281,11 @@ def main():
     dash_script = repo_root / "scripts" / "fair_dashboard.py"
     dash_log = fair_root / "dashboard.log"
     print(f"[INFO] Fair root: {fair_root}")
+    print(
+        f"[INFO] Explore defaults: feature_preset={os.environ.get('WF_EXPLORE_FEATURE_PRESET', 'core80')} "
+        f"safe_threads={os.environ.get('WF_EXPLORE_SAFE_THREADS', '8')} "
+        f"candle_sec={os.environ.get('WF_EXPLORE_CANDLE_SEC', '300')}"
+    )
     print(f"[INFO] Launching Fair Dashboard: {dash_script} (Log: {dash_log})")
     
     with open(dash_log, "a") as log_f:

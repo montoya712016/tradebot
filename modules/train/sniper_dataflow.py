@@ -52,6 +52,10 @@ except Exception:
     from prepare_features.data import load_ohlc_1m_series, to_ohlc_from_1m  # type: ignore[import]
     from prepare_features.sniper_dataset import build_sniper_datasets, warmup_sniper_dataset_numba  # type: ignore[import]
     from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore[import]
+try:
+    from train.feature_presets import active_feature_allowlist, active_feature_preset_name, feature_flags_for_preset
+except Exception:
+    from modules.train.feature_presets import active_feature_allowlist, active_feature_preset_name, feature_flags_for_preset  # type: ignore[import]
 
 
 GLOBAL_FLAGS_FULL = build_flags(enable=FEATURE_KEYS, label=True)
@@ -118,6 +122,10 @@ def _default_flags_for_asset(asset_class: str) -> dict:
         flags, _, _, _, _ = _stock_helper_bundle()
         if flags:
             return dict(flags)
+    if asset == "crypto":
+        preset = active_feature_preset_name("full")
+        if preset != "full":
+            return dict(feature_flags_for_preset(preset, label=True))
     return dict(GLOBAL_FLAGS_FULL)
 
 
@@ -156,11 +164,14 @@ def _frozen_ohlc_mask(df: pd.DataFrame) -> pd.Series:
 
 
 def _list_feature_columns(df: pd.DataFrame) -> List[str]:
+    allowlist = active_feature_allowlist("full")
     cols: List[str] = []
     for c in df.columns:
         if c in DROP_COLS_EXACT:
             continue
         if any(c.startswith(pref) for pref in DROP_COL_PREFIXES):
+            continue
+        if allowlist is not None and c not in allowlist:
             continue
         if pd.api.types.is_numeric_dtype(df[c]):
             # evita colunas sempre NaN que zerariam o dataset no dropna
@@ -272,6 +283,9 @@ def _cache_dir(asset_class: str | None = None, candle_sec: int | None = None) ->
     tail = int(os.getenv("SNIPER_REMOVE_TAIL_DAYS", "0") or "0")
     if tail > 0:
         tag = f"{tag}_tail_{tail}d"
+    preset = active_feature_preset_name("full")
+    if preset != "full":
+        tag = f"{tag}_{preset}"
         
     try:
         from utils.paths import cache_sniper_root  # type: ignore
@@ -374,6 +388,35 @@ def _save_feature_cache(df: pd.DataFrame, path: Path, *, fmt: str) -> Path:
         df.to_pickle(tmp)
         tmp.replace(pkl)
         return pkl
+
+
+def _trim_feature_cache_df(df: pd.DataFrame) -> pd.DataFrame:
+    allowlist = active_feature_allowlist("full")
+    if allowlist is None or df.empty:
+        return df
+    keep_cols: List[str] = []
+    essential_exact = {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "gap_after",
+    }
+    essential_prefixes = ("sniper_", "label_")
+    for col in df.columns:
+        if col in allowlist:
+            keep_cols.append(col)
+            continue
+        if col in essential_exact:
+            keep_cols.append(col)
+            continue
+        if any(str(col).startswith(pref) for pref in essential_prefixes):
+            keep_cols.append(col)
+            continue
+    if not keep_cols:
+        return df
+    return df.loc[:, keep_cols].copy()
 
 
 def _build_stock_features(df_all: pd.DataFrame, flags: Dict[str, bool], contract: TradeContract) -> pd.DataFrame:
@@ -660,6 +703,7 @@ def ensure_feature_cache(
                 flags=flags_run,
                 asset_class=asset_class,
             )
+            df_pf = _trim_feature_cache_df(df_pf)
             t_pf = time.perf_counter()
             real_path = _save_feature_cache(df_pf, data_path, fmt=fmt)
             t_save = time.perf_counter()

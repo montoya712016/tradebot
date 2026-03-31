@@ -8,28 +8,31 @@ Treino walk-forward e explorer fair.
 - `wf_portfolio_explorer.py` - explorer fair atual.
 
 ## Explorer fair atual
-O `wf_portfolio_explorer.py` da `v5` trabalha assim:
+O `wf_portfolio_explorer.py` da `v6` trabalha assim:
 
-- otimiza só `4` parâmetros de edge:
+- usa preset de features `core80`
+- grava cache de features em diretório segregado por preset quando não for `full`
+- otimiza `7` parâmetros entre edge e treino leve:
   - `label_profit_thr`
   - `exit_ema_span_min`
   - `exit_ema_init_offset_pct`
+  - `entry_ratio_neg_per_pos`
+  - `calib_tail_blend`
+  - `calib_tail_boost`
   - `tau_entry`
-- fixa treino em:
-  - `entry_ratio_neg_per_pos = 6.0`
-  - `calib_tail_blend = 0.70`
-  - `calib_tail_boost = 2.25`
 - fixa risco em:
-  - `max_positions = 10`
   - `total_exposure = 1.00`
   - `max_trade_exposure = 0.10`
+  - `min_trade_exposure = 0.02`
+
+`max_positions` não faz mais parte do explore novo. O limite simultâneo passa a ser imposto indiretamente pelo orçamento de exposição.
 
 Plano padrão:
-- `49` refreshes
-- `1` retrain por refresh
-- `26` backtests por refresh
+- `56` refreshes
+- `2` retrains por refresh
+- `21` backtests por retrain
 
-Os refreshes cobrem um subconjunto determinístico e bem distribuído do grid de contratos, e os backtests varrem `tau` de `0.70` a `0.95` em passo `0.01`.
+Os refreshes cobrem um subconjunto determinístico e bem distribuído do grid de contratos, os retrains percorrem um grid pequeno e uniforme de presets de treino/calibração, e os backtests varrem `tau` de `0.70` a `0.90` em passo `0.01`.
 
 ## Entry points
 ```bash

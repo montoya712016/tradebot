@@ -42,13 +42,14 @@ def main() -> None:
         out_root=_env_str("WF_EXPLORE_OUT_ROOT", "wf_portfolio_explore"),
         results_csv=_env_str("WF_EXPLORE_RESULTS_CSV", "explore_runs.csv"),
         seed=_env_int("WF_EXPLORE_SEED", 42),
-        max_label_trials=_env_int("WF_EXPLORE_LABEL_TRIALS", 49),
-        retrains_per_label=_env_int("WF_EXPLORE_RETRAINS_PER_LABEL", 1),
-        backtests_per_retrain=_env_int("WF_EXPLORE_BACKTESTS_PER_RETRAIN", 26),
+        max_label_trials=_env_int("WF_EXPLORE_LABEL_TRIALS", 56),
+        retrains_per_label=_env_int("WF_EXPLORE_RETRAINS_PER_LABEL", 2),
+        backtests_per_retrain=_env_int("WF_EXPLORE_BACKTESTS_PER_RETRAIN", 21),
         days=_env_int("WF_EXPLORE_DAYS", 4 * 360),
         max_symbols=_env_int("WF_EXPLORE_MAX_SYMBOLS", 0),
         candle_sec=_env_int("WF_EXPLORE_CANDLE_SEC", 300),
-        safe_threads=_env_int("WF_EXPLORE_SAFE_THREADS", 1),
+        safe_threads=_env_int("WF_EXPLORE_SAFE_THREADS", 8),
+        feature_preset=_env_str("WF_EXPLORE_FEATURE_PRESET", "core80"),
     )
     run(settings)
 

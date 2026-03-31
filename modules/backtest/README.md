@@ -13,3 +13,6 @@ Motores de backtest e simulação usados pelo repositório.
 - OOS walk-forward oficial: `python scripts/run_oos_walkforward.py`
 
 O script `run_oos_walkforward.py` é o entrypoint principal para validar os pools do fair explore.
+Por padrão, ele agora lê `explore_runs.csv` via `duckdb`, usa `WF_OOS_SCORE_MODE=survival` e `WF_OOS_SELECTOR=family_causal` para selecionar o representante por step.
+Nesse modo, o OOS monta shortlist por família de parâmetros, aplica continuidade causal entre steps e escolhe a variante mais prudente dentro da família.
+Para reproduzir o score antigo, use `WF_OOS_SCORE_MODE=legacy`.

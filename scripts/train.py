@@ -22,6 +22,7 @@ def _add_repo_paths() -> None:
 _add_repo_paths()
 
 from train.train_sniper_wf import TrainSniperWFSettings, run  # type: ignore
+from train.feature_presets import feature_flags_for_preset, summarize_preset  # type: ignore
 from config.trade_contract import (  # type: ignore
     CRYPTO_PIPELINE_CANDLE_SEC,
     apply_crypto_pipeline_env,
@@ -171,6 +172,8 @@ def main() -> None:
     
     candle_sec = apply_crypto_pipeline_env(CRYPTO_PIPELINE_CANDLE_SEC)
     contract = build_default_crypto_contract(candle_sec)
+    feature_preset_name = _env_str("TRAIN_FEATURE_PRESET", _env_str("SNIPER_FEATURE_PRESET", "full")).strip().lower() or "full"
+    os.environ["SNIPER_FEATURE_PRESET"] = feature_preset_name
     
     # --- 2. CONFIGURATION ---
     max_symbols = _env_int("TRAIN_MAX_SYMBOLS", 0)  # 0 means all available symbols
@@ -318,6 +321,13 @@ def main() -> None:
         print("[train-wf-crypto] ohlc prewarm: skipped (labels-only refresh mode)", flush=True)
 
     metric_mode = "aucpr"
+    feature_flags = feature_flags_for_preset(feature_preset_name, label=True)
+    preset_info = summarize_preset(feature_preset_name)
+    print(
+        f"[train-wf-crypto] feature_preset={preset_info.get('preset')} "
+        f"feature_count={preset_info.get('count')} blocks={len(preset_info.get('blocks') or [])}",
+        flush=True,
+    )
     # Modo simplificado pedido: treino somente de entry (sem regressão de exit).
     os.environ["SNIPER_TRAIN_EXIT_MODEL"] = "0"
     if bool(refresh_labels_before_train):
@@ -374,6 +384,8 @@ def main() -> None:
         # Pool full para slicing por periodo (evita rebuild completo por step).
         full_pool_max_rows_entry=int(full_pool_max_rows_entry),
         min_symbols_used_per_period=int(min_symbols_used_per_period),
+        feature_flags=feature_flags,
+        feature_preset_name=str(preset_info.get("preset") or ""),
     )
     run_dir = run(settings)
     print(f"[train-wf-crypto] run_dir: {run_dir}", flush=True)

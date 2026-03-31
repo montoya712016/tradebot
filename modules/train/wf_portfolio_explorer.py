@@ -25,6 +25,7 @@ import time
 
 import numpy as np
 import pandas as pd
+import duckdb  # type: ignore
 
 
 def _ensure_modules_on_sys_path() -> None:
@@ -96,6 +97,8 @@ RESULTS_HEADER = [
     "top_metric_qs",
     "top_metric_min_count",
     "tau_entry",
+    # Kept in the CSV schema only so older analysis code can still read mixed roots.
+    # New explores no longer vary or populate max_positions.
     "max_positions",
     "total_exposure",
     "max_trade_exposure",
@@ -127,6 +130,9 @@ VARIED_PARAM_COLS = [
     "label_profit_thr",
     "exit_ema_span_min",
     "exit_ema_init_offset_pct",
+    "entry_ratio_neg_per_pos",
+    "calib_tail_blend",
+    "calib_tail_boost",
     "tau_entry",
 ]
 
@@ -136,32 +142,35 @@ class ExploreSettings:
     out_root: str = "wf_portfolio_explore"
     results_csv: str = "explore_runs.csv"
     seed: int = 42
-    max_label_trials: int = 49
-    retrains_per_label: int = 1
-    backtests_per_retrain: int = 26
+    max_label_trials: int = 56
+    retrains_per_label: int = 2
+    backtests_per_retrain: int = 21
     days: int = 4 * 360
     max_symbols: int = 0
     candle_sec: int = 300
     safe_threads: int = 1
-    # V3: search-space tightened by structural plausibility, not by historical winners.
+    # V6: keep structural policy fixed, expand edge/training modestly.
     label_profit_choices: tuple[float, ...] = (0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08)
     exit_span_choices: tuple[int, ...] = (60, 90, 120, 180, 300)
     exit_offset_choices: tuple[float, ...] = (0.00, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03)
-    # V5: freeze training params to structurally reasonable central values.
-    neg_pos_choices: tuple[float, ...] = (6.0,)
-    tail_blend_choices: tuple[float, ...] = (0.70,)
-    tail_boost_choices: tuple[float, ...] = (2.25,)
+    # V6: small train/calibration preset space, not the free-for-all from v4.
+    neg_pos_choices: tuple[float, ...] = (4.0, 6.0, 8.0)
+    tail_blend_choices: tuple[float, ...] = (0.60, 0.70, 0.80)
+    tail_boost_choices: tuple[float, ...] = (1.75, 2.25, 2.75)
     top_q_presets: tuple[str, ...] = (
+        "0.0005,0.001,0.0025",
         "0.0025,0.005,0.01",
+        "0.001,0.0025,0.005",
     )
-    top_min_count_choices: tuple[int, ...] = (48,)
-    tau_entry_choices: tuple[float, ...] = tuple(round(0.70 + (0.01 * i), 2) for i in range(26))
-    # V5: freeze portfolio risk policy to a simple non-levered profile.
-    max_positions_choices: tuple[int, ...] = (10,)
+    top_min_count_choices: tuple[int, ...] = (48, 64)
+    tau_entry_choices: tuple[float, ...] = tuple(round(0.70 + (0.01 * i), 2) for i in range(21))
+    # V6: portfolio risk is controlled only by exposure budget. The practical
+    # simultaneous-position cap now comes from total_exposure/max_trade_exposure.
     total_exposure_choices: tuple[float, ...] = (1.00,)
     max_trade_exposure_choices: tuple[float, ...] = (0.10,)
     min_trade_exposure_choices: tuple[float, ...] = (0.02,)
     exposure_multiplier_choices: tuple[float, ...] = (0.0,)
+    feature_preset: str = "core80"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -203,6 +212,18 @@ def _fmt_duration(seconds: float) -> str:
     if minutes < 60.0:
         return f"{minutes:.1f}m"
     return f"{(minutes / 60.0):.2f}h"
+
+
+def _read_results_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=RESULTS_HEADER)
+    try:
+        rel = duckdb.sql(f"SELECT * FROM read_csv_auto('{path.as_posix()}', all_varchar=true)")
+        rows = rel.fetchall()
+        cols = [str(c) for c in rel.columns]
+        return pd.DataFrame(rows, columns=cols)
+    except Exception:
+        return pd.read_csv(path, low_memory=False)
 
 
 def _append_csv(path: Path, row: dict) -> None:
@@ -424,10 +445,11 @@ def _build_contract(candle_sec: int, label_profit_thr: float, exit_span_min: int
     )
 
 
-def _refresh_labels(contract: TradeContract, candle_sec: int) -> dict[str, object]:
+def _refresh_labels(contract: TradeContract, candle_sec: int, feature_preset: str) -> dict[str, object]:
     refresh_workers = max(1, int(os.environ.get("SNIPER_LABELS_REFRESH_WORKERS", os.environ.get("SNIPER_DATASET_WORKERS", "4"))))
     env = {
         "SNIPER_ASSET_CLASS": "crypto",
+        "SNIPER_FEATURE_PRESET": str(feature_preset or "full"),
         "SNIPER_LABELS_REFRESH_WORKERS": str(refresh_workers),
         "SNIPER_TRAIN_EXIT_MODEL": "0",
         "CRYPTO_PIPELINE_CANDLE_SEC": str(int(candle_sec)),
@@ -450,16 +472,17 @@ def _refresh_labels(contract: TradeContract, candle_sec: int) -> dict[str, objec
         return refresh_labels(s)
 
 
-def _list_cached_symbols(candle_sec: int) -> list[str]:
-    cache_dir = _cache_dir("crypto", int(candle_sec))
-    fmt = _cache_format()
-    suffix = ".parquet" if fmt == "parquet" else ".pkl"
-    symbols: list[str] = []
-    for p in sorted(cache_dir.glob(f"*{suffix}")):
-        sym = str(p.stem or "").strip().upper()
-        if sym:
-            symbols.append(sym)
-    return symbols
+def _list_cached_symbols(candle_sec: int, feature_preset: str) -> list[str]:
+    with _temp_env({"SNIPER_FEATURE_PRESET": str(feature_preset or "full")}):
+        cache_dir = _cache_dir("crypto", int(candle_sec))
+        fmt = _cache_format()
+        suffix = ".parquet" if fmt == "parquet" else ".pkl"
+        symbols: list[str] = []
+        for p in sorted(cache_dir.glob(f"*{suffix}")):
+            sym = str(p.stem or "").strip().upper()
+            if sym:
+                symbols.append(sym)
+        return symbols
 
 
 def _write_symbol_manifest(label_dir: Path, symbols: list[str]) -> str:
@@ -625,11 +648,41 @@ def _label_cfg_from_grid(label_ordinal: int, s: ExploreSettings) -> dict[str, ob
 def _bt_cfg_from_grid(bt_ordinal: int, s: ExploreSettings) -> dict[str, object]:
     return {
         "tau_entry": float(_grid_choice(int(bt_ordinal), tuple(float(v) for v in s.tau_entry_choices))),
-        "max_positions": int(_grid_choice(0, s.max_positions_choices)),
         "total_exposure": float(_grid_choice(0, s.total_exposure_choices)),
         "max_trade_exposure": float(_grid_choice(0, s.max_trade_exposure_choices)),
         "min_trade_exposure": float(_grid_choice(0, s.min_trade_exposure_choices)),
         "exposure_multiplier": float(_grid_choice(0, s.exposure_multiplier_choices)),
+    }
+
+
+def _train_cfg_from_grid(train_ordinal: int, s: ExploreSettings) -> dict[str, object]:
+    neg_choices = tuple(float(v) for v in s.neg_pos_choices)
+    blend_choices = tuple(float(v) for v in s.tail_blend_choices)
+    boost_choices = tuple(float(v) for v in s.tail_boost_choices)
+    q_choices = tuple(str(v) for v in s.top_q_presets)
+    min_count_choices = tuple(int(v) for v in s.top_min_count_choices)
+    total = len(neg_choices) * len(blend_choices) * len(boost_choices) * len(q_choices) * len(min_count_choices)
+    if total <= 0:
+        raise ValueError("train grid must not be empty")
+    permuted = (int(train_ordinal) * 97) % total
+    n0 = len(blend_choices) * len(boost_choices) * len(q_choices) * len(min_count_choices)
+    n1 = len(boost_choices) * len(q_choices) * len(min_count_choices)
+    n2 = len(q_choices) * len(min_count_choices)
+    n3 = len(min_count_choices)
+    neg_idx = permuted // n0
+    rem = permuted % n0
+    blend_idx = rem // n1
+    rem = rem % n1
+    boost_idx = rem // n2
+    rem = rem % n2
+    q_idx = rem // n3
+    min_idx = rem % n3
+    return {
+        "neg_per_pos": _grid_choice(neg_idx, neg_choices),
+        "tail_blend": _grid_choice(blend_idx, blend_choices),
+        "tail_boost": _grid_choice(boost_idx, boost_choices),
+        "top_qs": _grid_choice(q_idx, q_choices),
+        "top_min_count": _grid_choice(min_idx, min_count_choices),
     }
 
 
@@ -709,7 +762,7 @@ def _load_refine_seeds(results_csv: Path, generation: int) -> list[dict]:
     if not results_csv.exists():
         return []
     try:
-        df = pd.read_csv(results_csv, low_memory=False)
+        df = _read_results_csv(results_csv)
     except Exception:
         return []
     if df.empty:
@@ -784,7 +837,6 @@ def _load_refine_seeds(results_csv: Path, generation: int) -> list[dict]:
                 "calib_tail_blend": float(rep.get("calib_tail_blend")),
                 "calib_tail_boost": float(rep.get("calib_tail_boost")),
                 "tau_entry": float(rep.get("tau_entry")),
-                "max_positions": int(float(rep.get("max_positions"))),
                 "total_exposure": float(rep.get("total_exposure")),
                 "max_trade_exposure": float(rep.get("max_trade_exposure")),
                 "source_label_id": str(rep.get("label_id") or ""),
@@ -818,7 +870,6 @@ def _sample_bt_cfg(seq_idx: int, s: ExploreSettings) -> dict[str, object]:
 
     return {
         "tau_entry": float(tau_entry),
-        "max_positions": int(_sample_choice(s.max_positions_choices, seq_idx, base=53, salt=13)),
         "total_exposure": float(_sample_choice(s.total_exposure_choices, seq_idx, base=59, salt=19)),
         "max_trade_exposure": float(_sample_choice(s.max_trade_exposure_choices, seq_idx, base=61, salt=31)),
         "min_trade_exposure": float(_sample_choice(s.min_trade_exposure_choices, seq_idx, base=67, salt=41)),
@@ -850,7 +901,6 @@ def _sample_bt_cfg_refine(seq_idx: int, s: ExploreSettings, seed: dict, generati
     radius = _refine_radius(generation)
     return {
         "tau_entry": float(_neighbor_choice(s.tau_entry_choices, seed.get("tau_entry"), seq_idx, base=23, salt=7, radius=radius)),
-        "max_positions": int(_neighbor_choice(s.max_positions_choices, seed.get("max_positions"), seq_idx, base=53, salt=13, radius=radius)),
         "total_exposure": float(_neighbor_choice(s.total_exposure_choices, seed.get("total_exposure"), seq_idx, base=59, salt=19, radius=radius)),
         "max_trade_exposure": float(_neighbor_choice(s.max_trade_exposure_choices, seed.get("max_trade_exposure"), seq_idx, base=61, salt=31, radius=radius)),
         "min_trade_exposure": float(_sample_choice(s.min_trade_exposure_choices, seq_idx, base=67, salt=41)),
@@ -879,7 +929,8 @@ def run(settings: ExploreSettings | None = None) -> None:
     log.write(
         f"[explore] seed={s.seed} seq_base={base_sequence} "
         f"phase={phase} generation={generation} labels={label_start}..{label_end} "
-        f"retrains_per_label={s.retrains_per_label} backtests_per_retrain={s.backtests_per_retrain}"
+        f"retrains_per_label={s.retrains_per_label} backtests_per_retrain={s.backtests_per_retrain} "
+        f"feature_preset={s.feature_preset}"
     )
     if forced_step_days > 0:
         log.write(
@@ -892,7 +943,7 @@ def run(settings: ExploreSettings | None = None) -> None:
     train_run_dirs = {} # (label_id, model_id) -> run_dir
     if results_csv.exists():
         try:
-            df_old = pd.read_csv(results_csv)
+            df_old = _read_results_csv(results_csv)
             # Ensure columns are treated as strings to avoid issues
             for _, row in df_old.iterrows():
                 st = str(row.get("stage", ""))
@@ -939,7 +990,7 @@ def run(settings: ExploreSettings | None = None) -> None:
             status = "ok"
             label_symbols_manifest = ""
             try:
-                syms_cached = _list_cached_symbols(int(s.candle_sec))
+                syms_cached = _list_cached_symbols(int(s.candle_sec), str(s.feature_preset))
                 if syms_cached:
                     label_symbols_manifest = _write_symbol_manifest(label_dir, syms_cached)
             except Exception:
@@ -960,8 +1011,8 @@ def run(settings: ExploreSettings | None = None) -> None:
             label_symbols_manifest = ""
             try:
                 log.write(f"[explore] {label_id} refresh start profit_thr={label_cfg['label_profit_thr']} exit_span={label_cfg['exit_span_min']} offset={label_cfg['exit_offset']}")
-                refresh_info = _refresh_labels(contract, int(s.candle_sec))
-                syms_cached = _list_cached_symbols(int(s.candle_sec))
+                refresh_info = _refresh_labels(contract, int(s.candle_sec), str(s.feature_preset))
+                syms_cached = _list_cached_symbols(int(s.candle_sec), str(s.feature_preset))
                 if syms_cached:
                     label_symbols_manifest = _write_symbol_manifest(label_dir, syms_cached)
             except Exception as e:
@@ -1016,7 +1067,7 @@ def run(settings: ExploreSettings | None = None) -> None:
             train_cfg = (
                 _sample_train_cfg_refine(train_seq, s, train_seed, generation)
                 if train_seed is not None
-                else _sample_train_cfg(train_seq, s)
+                else _train_cfg_from_grid(train_seq - 1, s)
             )
             forced_period = int(forced_period_days) if int(forced_period_days) > 0 else None
 
@@ -1068,6 +1119,7 @@ def run(settings: ExploreSettings | None = None) -> None:
                         "SNIPER_CACHE_WORKERS": str(int(s.safe_threads)),
                         "SNIPER_DATASET_WORKERS": str(int(s.safe_threads)),
                         "TRAIN_MIN_SYMBOLS_USED_PER_PERIOD": ("10" if forced_period is not None else "30"),
+                        "TRAIN_FEATURE_PRESET": str(s.feature_preset),
                         "TRAIN_OVR_SNIPER_ENTRY_CALIB_TAIL_BLEND": str(train_cfg["tail_blend"]),
                         "TRAIN_OVR_SNIPER_ENTRY_CALIB_TAIL_BOOST": str(train_cfg["tail_boost"]),
                         "TRAIN_OVR_SNIPER_ENTRY_TOP_METRIC_QS": str(train_cfg["top_qs"]),
@@ -1254,7 +1306,9 @@ def run(settings: ExploreSettings | None = None) -> None:
                 equity_html = ""
                 try:
                     cfg = _default_portfolio_cfg()
-                    cfg.max_positions = int(bt_cfg["max_positions"])
+                    # max_positions is intentionally disabled for new explores.
+                    # Exposure budget provides the practical cap on simultaneous entries.
+                    cfg.max_positions = 0
                     cfg.total_exposure = float(bt_cfg["total_exposure"])
                     cfg.max_trade_exposure = float(bt_cfg["max_trade_exposure"])
                     cfg.min_trade_exposure = float(bt_cfg["min_trade_exposure"])
@@ -1269,7 +1323,8 @@ def run(settings: ExploreSettings | None = None) -> None:
                     )
                     log.write(
                         f"[explore] {label_id}/{model_id}/{bt_id} backtest start tau={bt_cfg['tau_entry']} "
-                        f"max_pos={bt_cfg['max_positions']} phase={phase} gen={generation} "
+                        f"total_exp={bt_cfg['total_exposure']:.2f} max_trade={bt_cfg['max_trade_exposure']:.2f} "
+                        f"phase={phase} gen={generation} "
                         f"seed_cluster={bt_seed.get('cluster_id', '') if bt_seed else ''}"
                     )
                     bt_out = run_prepared_portfolio(
@@ -1350,7 +1405,7 @@ def run(settings: ExploreSettings | None = None) -> None:
                         "top_metric_qs": train_cfg["top_qs"],
                         "top_metric_min_count": train_cfg["top_min_count"],
                         "tau_entry": bt_cfg["tau_entry"],
-                        "max_positions": bt_cfg["max_positions"],
+                        "max_positions": "",
                         "total_exposure": bt_cfg["total_exposure"],
                         "max_trade_exposure": bt_cfg["max_trade_exposure"],
                         "min_trade_exposure": bt_cfg["min_trade_exposure"],
@@ -1394,13 +1449,14 @@ def main() -> None:
         out_root=_env_str("WF_EXPLORE_OUT_ROOT", "wf_portfolio_explore"),
         results_csv=_env_str("WF_EXPLORE_RESULTS_CSV", "explore_runs.csv"),
         seed=_env_int("WF_EXPLORE_SEED", 42),
-        max_label_trials=_env_int("WF_EXPLORE_LABEL_TRIALS", 49),
-        retrains_per_label=_env_int("WF_EXPLORE_RETRAINS_PER_LABEL", 1),
-        backtests_per_retrain=_env_int("WF_EXPLORE_BACKTESTS_PER_RETRAIN", 26),
+        max_label_trials=_env_int("WF_EXPLORE_LABEL_TRIALS", 56),
+        retrains_per_label=_env_int("WF_EXPLORE_RETRAINS_PER_LABEL", 2),
+        backtests_per_retrain=_env_int("WF_EXPLORE_BACKTESTS_PER_RETRAIN", 21),
         days=_env_int("WF_EXPLORE_DAYS", 4 * 360),
         max_symbols=_env_int("WF_EXPLORE_MAX_SYMBOLS", 0),
         candle_sec=_env_int("WF_EXPLORE_CANDLE_SEC", 300),
-        safe_threads=_env_int("WF_EXPLORE_SAFE_THREADS", 4),
+        safe_threads=_env_int("WF_EXPLORE_SAFE_THREADS", 8),
+        feature_preset=_env_str("WF_EXPLORE_FEATURE_PRESET", "core80"),
     )
     run(s)
 

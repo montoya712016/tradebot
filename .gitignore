@@ -32,3 +32,6 @@ modules/config/secrets.py
 .env
 local/
 
+# Temporary local analysis / scratch scripts
+temp/
+

@@ -317,7 +317,6 @@ TRAIN_PARAM_FIELDS = [
 ]
 TRIAL_PARAM_FIELDS = [
     "tau_entry",
-    "max_positions",
     "total_exposure",
     "max_trade_exposure",
     "min_trade_exposure",

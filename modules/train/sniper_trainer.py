@@ -113,6 +113,7 @@ class TrainConfig:
     symbols: Sequence[str] | None = None
     # flags de features custom (senão escolhe default por asset)
     feature_flags: dict | None = None
+    feature_preset_name: str | None = None
     # onde salvar/ler cache de features (senão usa padrão por asset)
     feature_cache_dir: Path | None = None
     use_full_entry_pool: bool = True
@@ -1615,6 +1616,7 @@ def _full_pool_cache_key(
         "pool_rows_entry": int(pool_rows),
         "contract": asdict(contract),
         "feature_flags": dict(feature_flags or {}),
+        "feature_preset_name": str(getattr(cfg, "feature_preset_name", "") or ""),
         "cache_fp": str(cache_fp),
         "train_exit_model": str(os.getenv("SNIPER_TRAIN_EXIT_MODEL", "1") or "1"),
         "bin_step_x10": str(os.getenv("SNIPER_ENTRY_WEIGHT_BIN_STEP_X10", "1") or "1"),
@@ -2365,6 +2367,7 @@ def train_sniper_models(cfg: TrainConfig | None = None) -> Path:
                 "feature_cols": base_batch.feature_cols,
                 "calibration": base_meta.get("calibrator", {"type": "identity"}),
             },
+            "feature_preset": str(getattr(cfg, "feature_preset_name", "") or ""),
             # Ponto final do treino (auditavel): preferimos o valor deterministico vindo do dataflow
             # (cutoff - lookahead). Se nao existir, cai no max(ts) do dataset amostrado.
             "train_end_utc": (
