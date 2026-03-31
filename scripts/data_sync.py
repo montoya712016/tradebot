@@ -24,10 +24,11 @@ def _add_repo_paths() -> None:
 _add_repo_paths()
 
 from train.sniper_trainer import TrainConfig, _select_symbols  # type: ignore
-from prepare_features.data import load_ohlc_1m_series  # type: ignore
+from prepare_features.data import load_ohlc_1m_series, load_ohlc_series  # type: ignore
 from prepare_features.data import _ohlc_cache_paths  # type: ignore
 from utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # type: ignore
 from utils.progress import LineProgressPrinter  # type: ignore
+from utils.resource_sizing import apply_env_worker_default  # type: ignore
 
 
 _GUARD = GuardedRunner(
@@ -62,8 +63,8 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-def _cache_ok(sym: str) -> bool:
-    cache_path, meta_path = _ohlc_cache_paths(sym)
+def _cache_ok(sym: str, candle_sec: int) -> bool:
+    cache_path, meta_path = _ohlc_cache_paths(sym, int(candle_sec))
     if not cache_path.exists():
         return False
     try:
@@ -91,6 +92,7 @@ def run_build(
     mcap_max_usd: float = 150_000_000_000.0,
     refresh: bool = False,
     workers: int = 0,
+    candle_sec: int = 60,
 ) -> dict[str, Any]:
     os.environ.setdefault("PF_OHLC_CACHE", "1")
     os.environ["PF_OHLC_CACHE_REFRESH"] = "1" if bool(refresh) else "0"
@@ -106,7 +108,7 @@ def run_build(
         symbols = symbols[: int(max_symbols)]
 
     print(
-        f"[ohlc-cache] symbols={len(symbols)} days={int(days)} refresh={os.environ['PF_OHLC_CACHE_REFRESH']} "
+        f"[ohlc-cache] symbols={len(symbols)} days={int(days)} candle_sec={int(candle_sec)} refresh={os.environ['PF_OHLC_CACHE_REFRESH']} "
         f"mcap=[{float(mcap_min_usd):.0f}..{float(mcap_max_usd):.0f}]",
         flush=True,
     )
@@ -119,7 +121,8 @@ def run_build(
     prog = LineProgressPrinter(prefix="ohlc-cache", total=total, width=26, stream=sys.stderr, min_interval_s=1.0)
 
     if int(workers) <= 0:
-        workers = _env_int("OHLC_CACHE_WORKERS", min(4, int(os.cpu_count() or 4)))
+        kind = "ohlc_1m" if int(candle_sec) == 60 else "ohlc_5m"
+        workers = apply_env_worker_default("OHLC_CACHE_WORKERS", kind)
     workers = max(1, int(workers))
     policy = _GUARD.make_policy()
     print(
@@ -130,10 +133,13 @@ def run_build(
 
     def _worker(sym: str) -> dict[str, Any]:
         _GUARD.thermal_wait(f"ohlc:{sym}")
-        if (not refresh) and _cache_ok(sym):
+        if (not refresh) and _cache_ok(sym, int(candle_sec)):
             return {"sym": sym, "skip": True, "rows": 0, "sec": 0.0}
         t1 = time.time()
-        df = load_ohlc_1m_series(sym, days=int(days), remove_tail_days=0)
+        if int(candle_sec) == 60:
+            df = load_ohlc_1m_series(sym, days=int(days), remove_tail_days=0)
+        else:
+            df = load_ohlc_series(sym, days=int(days), candle_sec=int(candle_sec), remove_tail_days=0)
         return {"sym": sym, "skip": False, "rows": int(len(df)), "sec": float(time.time() - t1)}
 
     for sym_submitted, fut in _GUARD.adaptive_map(
@@ -179,6 +185,7 @@ def main() -> None:
     mcap_min = _env_float("MCAP_MIN_USD", 100_000_000.0)
     mcap_max = _env_float("MCAP_MAX_USD", 150_000_000_000.0)
     workers = _env_int("OHLC_CACHE_WORKERS", 0)
+    candle_sec = _env_int("OHLC_CANDLE_SEC", 60)
     _ = run_build(
         max_symbols=max_symbols,
         days=days,
@@ -186,6 +193,7 @@ def main() -> None:
         mcap_max_usd=mcap_max,
         refresh=bool(refresh),
         workers=int(workers),
+        candle_sec=int(candle_sec),
     )
 
 

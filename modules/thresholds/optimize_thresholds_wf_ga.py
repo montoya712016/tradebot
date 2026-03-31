@@ -58,6 +58,7 @@ try:
         apply_threshold_overrides,
     )
     from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio
+    from utils.resource_sizing import apply_env_worker_default
     from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL
     from trade_contract import DEFAULT_TRADE_CONTRACT
     from config.symbols import load_top_market_cap_symbols
@@ -78,6 +79,7 @@ except Exception:
         apply_threshold_overrides,
     )
     from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio  # type: ignore[import]
+    from utils.resource_sizing import apply_env_worker_default  # type: ignore[import]
     from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL  # type: ignore[import]
     from trade_contract import DEFAULT_TRADE_CONTRACT  # type: ignore[import]
     from config.symbols import load_top_market_cap_symbols  # type: ignore[import]
@@ -1779,7 +1781,7 @@ def main() -> None:
         # IMPORTANT: evita "hit" com cache antigo/curto (que reduz end_global e corta steps).
         strict_total_days=True,
         parallel=True,
-        max_workers=32,
+        max_workers=int(apply_env_worker_default("SNIPER_CACHE_WORKERS", "feature_cache")),
     )
     syms = [s for s in syms if s in cache_map]
     if not syms:

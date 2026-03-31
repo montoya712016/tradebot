@@ -35,18 +35,19 @@ def _ensure_modules_on_sys_path() -> None:
 _ensure_modules_on_sys_path()
 
 from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore
+from utils.resource_sizing import apply_env_worker_default  # type: ignore
 
 # Defaults de performance/telemetria para rodar com "Run" sem flags externas.
 os.environ.setdefault("SNIPER_CACHE_PROGRESS_EVERY_S", "3")
-os.environ.setdefault("SNIPER_CACHE_WORKERS", "4")
+apply_env_worker_default("SNIPER_CACHE_WORKERS", "feature_cache")
 os.environ.setdefault("SNIPER_CACHE_RAM_PCT", "78")
 os.environ.setdefault("SNIPER_CACHE_MIN_FREE_MB", "3072")
 os.environ.setdefault("SNIPER_CACHE_PER_WORKER_MB", "1024")
-os.environ.setdefault("SNIPER_DATASET_WORKERS", "2")
+apply_env_worker_default("SNIPER_DATASET_WORKERS", "dataset")
 os.environ.setdefault("SNIPER_DATASET_RAM_PCT", "80")
 os.environ.setdefault("SNIPER_DATASET_MIN_FREE_MB", "3072")
 os.environ.setdefault("SNIPER_DATASET_PER_WORKER_MB", "1024")
-os.environ.setdefault("SNIPER_LABELS_REFRESH_WORKERS", "4")
+apply_env_worker_default("SNIPER_LABELS_REFRESH_WORKERS", "labels_refresh")
 os.environ.setdefault("SNIPER_THERMAL_GUARD", "1")
 os.environ.setdefault("SNIPER_THERMAL_MAX_TEMP_C", "76")
 os.environ.setdefault("SNIPER_THERMAL_RESUME_BELOW_C", "66")

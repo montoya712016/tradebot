@@ -58,6 +58,7 @@ import pandas as pd
 from backtest.sniper_walkforward import load_period_models, predict_scores_walkforward, select_entry_mid
 from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL, _cache_dir, _cache_format
+from utils.resource_sizing import apply_env_worker_default
 from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract
 from config.thresholds import DEFAULT_THRESHOLD_OVERRIDES
 from config.symbols import load_top_market_cap_symbols
@@ -664,7 +665,7 @@ def main() -> None:
         refresh=bool(getattr(args, "refresh_cache", False)),
         strict_total_days=bool(getattr(args, "strict_cache_total_days", False)),
         parallel=True,
-        max_workers=32,
+        max_workers=int(apply_env_worker_default("SNIPER_CACHE_WORKERS", "feature_cache")),
     )
     # Universo final: usa somente sÃ­mbolos que de fato existem no cache.
     syms = sorted([str(s).upper() for s in cache_map.keys()])

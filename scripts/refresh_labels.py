@@ -21,9 +21,9 @@ def _add_repo_paths() -> None:
 
 def main() -> None:
     _add_repo_paths()
+    from utils.resource_sizing import apply_env_worker_default  # type: ignore
     os.environ.setdefault("SNIPER_ASSET_CLASS", "crypto")
-    # Refresh robusto (evita abort por RAM em lotes longos).
-    os.environ["SNIPER_LABELS_REFRESH_WORKERS"] = "1"
+    workers = apply_env_worker_default("SNIPER_LABELS_REFRESH_WORKERS", "labels_refresh")
     os.environ["PF_ENTRY_LABEL_NET_PROFIT_THR"] = "0.03"
     os.environ["PF_ENTRY_LABEL_PROFIT_ONLY"] = "1"
     os.environ["PF_ENTRY_LABEL_REQUIRE_NO_DIP"] = "0"
@@ -54,7 +54,7 @@ def main() -> None:
     candle_sec = apply_crypto_pipeline_env(CRYPTO_PIPELINE_CANDLE_SEC)
     contract = build_default_crypto_contract(candle_sec)
     settings = RefreshLabelsSettings(contract=contract, candle_sec=candle_sec)
-    settings.workers = 1
+    settings.workers = int(workers)
     settings.max_ram_pct = 72.0
     settings.min_free_mb = 4096.0
     settings.per_worker_mem_mb = 1024.0

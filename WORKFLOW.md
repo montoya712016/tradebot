@@ -14,6 +14,10 @@ O orquestrador roda cada step histórico de forma independente e gravável:
 - root padrão: `data/generated/fair_wf_explore_v6/`
 - resume granular por `refresh`, `train` e `backtest`
 - dashboard automático com acompanhamento em tempo real
+- prewarm obrigatório por step antes do primeiro refresh
+- build global de OHLC antes de qualquer step
+- build global do cache de features do preset ativo antes de qualquer step
+- sizing automático de workers por workload antes de cada fase principal
 
 ## 2. Como a v6 busca parâmetros
 
@@ -22,6 +26,8 @@ Na `v6`, o explore continua com risco fixo, mas abre um espaço pequeno de trein
 Preset de features:
 - `core80`
 - cache de features separado por preset quando não for `full`
+- prewarm integrado de features/OHLC por padrão
+- pass separado de OHLC opcional por `WF_EXPLORE_PREWARM_SEPARATE_OHLC=1`
 
 Parâmetros de edge otimizados:
 - `label_profit_thr`
@@ -57,6 +63,22 @@ Total por step:
 - `2352` backtests
 
 A busca continua determinística e espalhada. Os refreshes percorrem um subconjunto bem distribuído do grid completo de labels/contrato, os retrains cobrem um grid pequeno e uniforme de presets de treino, e cada retrain varre `tau` em `0.70..0.90` (passo `0.01`).
+
+Ordem operacional padrão do script:
+1. build global do cache OHLC base para o universo inteiro
+2. build global do cache OHLC `5m` para o universo inteiro
+3. build global do cache de features do preset ativo (`features_pf_5m_core80`)
+4. prewarm integrado do cache de features dos steps (`tail_1260d..tail_180d`)
+5. opcionalmente, pass separado de OHLC por step se `WF_EXPLORE_PREWARM_SEPARATE_OHLC=1`
+6. refreshes de labels
+7. retrains
+8. backtests
+
+Concorrência:
+- os entrypoints não assumem mais `4/8/16` como padrão fixo
+- cada fase escolhe `max_workers` automaticamente com base em CPU e RAM
+- o `GuardedRunner` continua reduzindo a concorrência efetiva se a memória apertar
+- o `run_independent_step_explores.py` registra telemetria de workers, duração e pico de memória por workload em `modules/utils/parallel_runtime_telemetry.json`
 
 ## 3. Validação OOS walk-forward
 

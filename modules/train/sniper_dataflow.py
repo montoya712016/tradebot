@@ -30,6 +30,10 @@ try:
 except Exception:
     from modules.utils.progress import LineProgressPrinter  # type: ignore[import]
 try:
+    from utils.resource_sizing import apply_env_worker_default  # type: ignore
+except Exception:
+    from modules.utils.resource_sizing import apply_env_worker_default  # type: ignore[import]
+try:
     import psutil  # type: ignore
 except Exception:
     psutil = None  # type: ignore
@@ -40,7 +44,7 @@ try:
         FEATURE_KEYS,
         build_flags,
     )
-    from prepare_features.data import load_ohlc_1m_series, to_ohlc_from_1m
+    from prepare_features.data import load_ohlc_1m_series, load_ohlc_series, to_ohlc_from_1m
     from prepare_features.sniper_dataset import build_sniper_datasets, warmup_sniper_dataset_numba
     from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT
 except Exception:
@@ -49,7 +53,7 @@ except Exception:
         FEATURE_KEYS,
         build_flags,
     )
-    from prepare_features.data import load_ohlc_1m_series, to_ohlc_from_1m  # type: ignore[import]
+    from prepare_features.data import load_ohlc_1m_series, load_ohlc_series, to_ohlc_from_1m  # type: ignore[import]
     from prepare_features.sniper_dataset import build_sniper_datasets, warmup_sniper_dataset_numba  # type: ignore[import]
     from trade_contract import TradeContract, DEFAULT_TRADE_CONTRACT  # type: ignore[import]
 try:
@@ -494,15 +498,12 @@ def _build_features_for_symbol(
             raise
         raw = load_ohlc_1m_series_stock(symbol, int(total_days), remove_tail_days=0)
     else:
-        raw = load_ohlc_1m_series(symbol, int(total_days), remove_tail_days=0)
+        raw = load_ohlc_series(symbol, int(total_days), candle_sec=candle_sec, remove_tail_days=int(remove_tail_days))
     t_load = time.perf_counter()
     if raw.empty:
-        raise RuntimeError("sem dados 1m no intervalo solicitado")
+        raise RuntimeError("sem OHLC no intervalo solicitado")
 
-    df_all = to_ohlc_from_1m(raw, candle_sec)
-    if remove_tail_days > 0:
-        cutoff = df_all.index[-1] - pd.Timedelta(days=int(remove_tail_days))
-        df_all = df_all[df_all.index < cutoff]
+    df_all = raw
     if df_all.empty or int(len(df_all)) < 500:
         raise RuntimeError(f"sem OHLC suficiente (rows={len(df_all)})")
     if df_all[["open", "high", "low", "close"]].isna().all(axis=None):
@@ -778,11 +779,8 @@ def ensure_feature_cache(
                 except Exception:
                     mw = 0
             else:
-                # fallback conservador para evitar estourar RAM em historico completo
-                if int(total_days) <= 0:
-                    mw = min(4, int(os.cpu_count() or 4))
-                else:
-                    mw = min(8, int(os.cpu_count() or 8))
+                kind = "feature_cache_global" if int(total_days) <= 0 else "feature_cache"
+                mw = apply_env_worker_default("SNIPER_CACHE_WORKERS", kind)
         mw = max(1, int(mw))
         # Nota: o gargalo aqui é misto (I/O MySQL + CPU features). Threads ajudam porque há muito I/O/espera.
         cache_policy = _CACHE_GUARD.make_policy(
@@ -2129,7 +2127,7 @@ def prepare_sniper_dataset_from_cache(
             mw = int(max_workers)
         else:
             env_mw = os.getenv("SNIPER_DATASET_WORKERS", "").strip()
-            mw = int(env_mw) if env_mw else min(8, int(os.cpu_count() or 4))
+            mw = int(env_mw) if env_mw else apply_env_worker_default("SNIPER_DATASET_WORKERS", "dataset")
         mw = max(1, mw)
         dataset_policy = _DATASET_GUARD.make_policy()
         print(

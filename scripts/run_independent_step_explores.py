@@ -5,6 +5,28 @@ import time
 from pathlib import Path
 from datetime import datetime
 import duckdb  # type: ignore
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None  # type: ignore
+
+
+def _add_repo_paths() -> None:
+    here = Path(__file__).resolve()
+    repo_root = here
+    for p in here.parents:
+        if p.name.lower() == "tradebot":
+            repo_root = p
+            break
+    for cand in (repo_root, repo_root / "modules"):
+        sp = str(cand)
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
+
+
+_add_repo_paths()
+
+from utils.resource_sizing import apply_env_worker_default, record_workload_observation  # type: ignore
 
 
 def _env_int(name: str, default: int) -> int:
@@ -28,6 +50,90 @@ def _fmt_duration(seconds: float) -> str:
     if minutes < 60.0:
         return f"{minutes:.1f}m"
     return f"{(minutes / 60.0):.2f}h"
+
+
+def _system_mem_snapshot() -> tuple[float, float]:
+    if psutil is None:
+        return 0.0, float("inf")
+    vm = psutil.virtual_memory()
+    return float(vm.percent), float(vm.available) / (1024.0 * 1024.0)
+
+
+def _process_tree_rss_mb(pid: int) -> float:
+    if psutil is None:
+        return 0.0
+    try:
+        proc = psutil.Process(int(pid))
+    except Exception:
+        return 0.0
+    rss = 0.0
+    try:
+        rss += float(proc.memory_info().rss)
+    except Exception:
+        pass
+    try:
+        for child in proc.children(recursive=True):
+            try:
+                rss += float(child.memory_info().rss)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return float(rss) / (1024.0 * 1024.0)
+
+
+def _run_command_with_telemetry(
+    *,
+    cmd: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    workload_kind: str,
+    workers: int,
+    units: int = 0,
+    unit_name: str = "",
+    stdout_target=None,
+    stderr_target=None,
+) -> float:
+    started = time.time()
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        cwd=str(cwd),
+        stdout=stdout_target,
+        stderr=stderr_target,
+    )
+    peak_process_mb = 0.0
+    peak_used_pct = 0.0
+    min_available_mb = float("inf")
+    while True:
+        peak_process_mb = max(peak_process_mb, _process_tree_rss_mb(int(proc.pid)))
+        used_pct, avail_mb = _system_mem_snapshot()
+        peak_used_pct = max(peak_used_pct, float(used_pct))
+        min_available_mb = min(min_available_mb, float(avail_mb))
+        code = proc.poll()
+        if code is not None:
+            break
+        time.sleep(0.5)
+    peak_process_mb = max(peak_process_mb, _process_tree_rss_mb(int(proc.pid)))
+    used_pct, avail_mb = _system_mem_snapshot()
+    peak_used_pct = max(peak_used_pct, float(used_pct))
+    min_available_mb = min(min_available_mb, float(avail_mb))
+    duration = time.time() - started
+    record_workload_observation(
+        workload_kind,
+        workers=int(max(1, workers)),
+        duration_s=float(duration),
+        peak_process_mb=float(peak_process_mb),
+        peak_used_pct=float(peak_used_pct),
+        min_available_mb=(float(min_available_mb) if min_available_mb != float("inf") else 0.0),
+        units=int(units),
+        unit_name=str(unit_name or ""),
+        success=bool(int(proc.returncode or 0) == 0),
+        metadata={"cmd0": str(cmd[0]) if cmd else "", "cwd": str(cwd)},
+    )
+    if int(proc.returncode or 0) != 0:
+        raise subprocess.CalledProcessError(int(proc.returncode or 0), cmd)
+    return float(duration)
 
 
 def _extract_max_numeric_suffix(values: list[str], prefix: str) -> int:
@@ -201,11 +307,11 @@ def run_generation(
     env["WF_EXPLORE_LABEL_START"] = str(int(label_start))
     env["WF_EXPLORE_LABEL_COUNT"] = str(int(label_count))
     env.setdefault("WF_EXPLORE_FEATURE_PRESET", str(os.getenv("WF_EXPLORE_FEATURE_PRESET", "core80") or "core80"))
-    worker_count = int(_env_int("WF_EXPLORE_SAFE_THREADS", 8))
+    worker_count = int(apply_env_worker_default("WF_EXPLORE_SAFE_THREADS", "explore"))
     env["WF_EXPLORE_SAFE_THREADS"] = str(worker_count)
-    env["SNIPER_LABELS_REFRESH_WORKERS"] = str(worker_count)
-    env["SNIPER_CACHE_WORKERS"] = str(worker_count)
-    env["SNIPER_DATASET_WORKERS"] = str(worker_count)
+    env["SNIPER_LABELS_REFRESH_WORKERS"] = str(int(apply_env_worker_default("SNIPER_LABELS_REFRESH_WORKERS", "labels_refresh")))
+    env["SNIPER_CACHE_WORKERS"] = str(int(apply_env_worker_default("SNIPER_CACHE_WORKERS", "feature_cache")))
+    env["SNIPER_DATASET_WORKERS"] = str(int(apply_env_worker_default("SNIPER_DATASET_WORKERS", "dataset")))
     # Note: WF_EXPLORE_DAYS and SNIPER_REMOVE_TAIL_DAYS are already set in os.environ by the loop
     
     # Use explore.py directly instead of monolith to have a finite run
@@ -216,14 +322,15 @@ def run_generation(
         finished_flag = step_dir / ".finished"
         if finished_flag.exists():
             finished_flag.unlink()
-        start_t = time.time()
-        result = subprocess.run(
-            [sys.executable, "-u", str(explore_script)],
+        duration = _run_command_with_telemetry(
+            cmd=[sys.executable, "-u", str(explore_script)],
             env=env,
-            cwd=str(repo_root),
-            check=True
+            cwd=repo_root,
+            workload_kind="explore",
+            workers=int(worker_count),
+            units=int(label_count) * int(retrains_per_label) * int(backtests_per_retrain),
+            unit_name="backtests",
         )
-        duration = time.time() - start_t
         progress = _generation_progress(step_dir, label_start, label_count, retrains_per_label, backtests_per_retrain)
         meets_targets = _generation_meets_targets(progress, label_count, retrains_per_label, backtests_per_retrain)
         if meets_targets:
@@ -253,14 +360,153 @@ def run_generation(
         
     return True
 
+
+def run_prewarm(
+    repo_root: Path,
+    days: int,
+    out_base: Path,
+):
+    step_dir = out_base / f"step_{days}d"
+    step_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Step {days}d prewarm: OHLC + feature cache bootstrap")
+
+    env = os.environ.copy()
+    env["WF_EXPLORE_OUT_ROOT"] = str(step_dir)
+    env["WF_EXPLORE_MODE"] = "prewarm"
+    env.setdefault("WF_EXPLORE_FEATURE_PRESET", str(os.getenv("WF_EXPLORE_FEATURE_PRESET", "core80") or "core80"))
+    worker_count = int(apply_env_worker_default("WF_EXPLORE_SAFE_THREADS", "explore"))
+    env["WF_EXPLORE_SAFE_THREADS"] = str(worker_count)
+    env["SNIPER_LABELS_REFRESH_WORKERS"] = str(int(apply_env_worker_default("SNIPER_LABELS_REFRESH_WORKERS", "labels_refresh")))
+    env["SNIPER_CACHE_WORKERS"] = str(int(apply_env_worker_default("SNIPER_CACHE_WORKERS", "feature_cache")))
+    env["SNIPER_DATASET_WORKERS"] = str(int(apply_env_worker_default("SNIPER_DATASET_WORKERS", "dataset")))
+    env["OHLC_CACHE_WORKERS"] = str(int(apply_env_worker_default("OHLC_CACHE_WORKERS", "ohlc_5m")))
+    env.setdefault("WF_EXPLORE_PREWARM_REFRESH_OHLC", "0")
+    env.setdefault("WF_EXPLORE_PREWARM_REFRESH_FEATURES", "0")
+    env.setdefault("WF_EXPLORE_PREWARM_SEPARATE_OHLC", "0")
+
+    explore_script = repo_root / "scripts" / "explore.py"
+    try:
+        duration = _run_command_with_telemetry(
+            cmd=[sys.executable, "-u", str(explore_script)],
+            env=env,
+            cwd=repo_root,
+            workload_kind="feature_cache",
+            workers=int(max(1, worker_count)),
+            units=1,
+            unit_name="step",
+        )
+        print(f"[OK] Step {days}d prewarm finished in {_fmt_duration(duration)}")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Step {days}d prewarm failed with exit code {e.returncode}")
+        return False
+    except KeyboardInterrupt:
+        print("\n[STOP] User interrupted during prewarm. Stopping orchestrator.")
+        sys.exit(1)
+    return True
+
+
+def run_global_ohlc_prewarm(repo_root: Path, fair_root: Path, *, candle_sec: int, label: str) -> bool:
+    print(f"[INFO] Global OHLC prewarm: building base {label} cache for the full crypto universe")
+    env = os.environ.copy()
+    if int(candle_sec) == 60:
+        worker_count = int(apply_env_worker_default("WF_GLOBAL_OHLC_1M_WORKERS", "ohlc_1m"))
+    else:
+        worker_count = int(apply_env_worker_default("WF_GLOBAL_OHLC_5M_WORKERS", "ohlc_5m"))
+    max_symbols = int(_env_int("WF_GLOBAL_OHLC_MAX_SYMBOLS", 0))
+    env["PF_OHLC_CACHE"] = "1"
+    env["PF_OHLC_CACHE_REFRESH"] = str(int(_env_int("WF_GLOBAL_OHLC_REFRESH", 0)))
+    env["MAX_SYMBOLS"] = "0" if max_symbols <= 0 else str(max_symbols)
+    env["DAYS"] = "0"
+    env["MCAP_MIN_USD"] = "100000000"
+    env["MCAP_MAX_USD"] = "150000000000"
+    env["OHLC_CACHE_WORKERS"] = str(worker_count)
+    env["OHLC_CANDLE_SEC"] = str(int(candle_sec))
+    log_path = fair_root / f"ohlc_{label}_prewarm.log"
+    script = repo_root / "scripts" / "data_sync.py"
+    try:
+        with open(log_path, "a", encoding="utf-8") as log_f:
+            duration = _run_command_with_telemetry(
+                cmd=[sys.executable, "-u", str(script)],
+                env=env,
+                cwd=repo_root,
+                workload_kind=("ohlc_1m" if int(candle_sec) == 60 else "ohlc_5m"),
+                workers=int(max(1, worker_count)),
+                units=int(max_symbols),
+                unit_name="symbols",
+                stdout_target=log_f,
+                stderr_target=subprocess.STDOUT,
+            )
+        print(f"[OK] Global OHLC {label} prewarm finished in {_fmt_duration(duration)}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Global OHLC {label} prewarm failed with exit code {e.returncode}")
+        return False
+    except KeyboardInterrupt:
+        print(f"\n[STOP] User interrupted during global OHLC {label} prewarm. Stopping orchestrator.")
+        sys.exit(1)
+
+
+def run_global_feature_prewarm(repo_root: Path, fair_root: Path) -> bool:
+    env = os.environ.copy()
+    # Com o cache global de OHLC 5m, o bootstrap full-history volta a escalar
+    # melhor; mantemos paralelização moderada por padrão.
+    worker_count = int(apply_env_worker_default("WF_GLOBAL_FEATURE_PREWARM_WORKERS", "feature_cache_global"))
+    print(
+        f"[INFO] Global feature prewarm: building base feature cache for the full crypto universe "
+        f"(workers={worker_count})"
+    )
+    env["WF_EXPLORE_OUT_ROOT"] = str(fair_root / "_global_feature_prewarm")
+    env["WF_EXPLORE_MODE"] = "prewarm"
+    env["WF_EXPLORE_DAYS"] = "0"
+    env["WF_EXPLORE_STEP_DAYS"] = "0"
+    env["SNIPER_REMOVE_TAIL_DAYS"] = "0"
+    env.setdefault("WF_EXPLORE_FEATURE_PRESET", str(os.getenv("WF_EXPLORE_FEATURE_PRESET", "core80") or "core80"))
+    env["WF_EXPLORE_SAFE_THREADS"] = str(worker_count)
+    env["SNIPER_LABELS_REFRESH_WORKERS"] = str(worker_count)
+    env["SNIPER_CACHE_WORKERS"] = str(worker_count)
+    env["SNIPER_DATASET_WORKERS"] = str(worker_count)
+    env["OHLC_CACHE_WORKERS"] = str(worker_count)
+    env.setdefault("WF_EXPLORE_PREWARM_REFRESH_OHLC", "0")
+    env.setdefault("WF_EXPLORE_PREWARM_REFRESH_FEATURES", "0")
+    env.setdefault("WF_EXPLORE_PREWARM_SEPARATE_OHLC", "0")
+    explore_script = repo_root / "scripts" / "explore.py"
+    try:
+        duration = _run_command_with_telemetry(
+            cmd=[sys.executable, "-u", str(explore_script)],
+            env=env,
+            cwd=repo_root,
+            workload_kind="feature_cache_global",
+            workers=int(max(1, worker_count)),
+            units=1,
+            unit_name="global_prewarm",
+        )
+        print(f"[OK] Global feature prewarm finished in {_fmt_duration(duration)}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Global feature prewarm failed with exit code {e.returncode}")
+        return False
+    except KeyboardInterrupt:
+        print("\n[STOP] User interrupted during global feature prewarm. Stopping orchestrator.")
+        sys.exit(1)
+
+
 def main():
     repo_root = Path(__file__).resolve().parent.parent
     fair_root_name = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v6") or "fair_wf_explore_v6").strip()
     os.environ["WF_FAIR_ROOT"] = fair_root_name
     os.environ.setdefault("WF_EXPLORE_FEATURE_PRESET", "core80")
-    os.environ.setdefault("WF_EXPLORE_SAFE_THREADS", "8")
     os.environ.setdefault("WF_EXPLORE_CANDLE_SEC", "300")
+    os.environ.setdefault("WF_EXPLORE_PREWARM_REFRESH_OHLC", "0")
+    os.environ.setdefault("WF_EXPLORE_PREWARM_REFRESH_FEATURES", "0")
+    os.environ.setdefault("WF_EXPLORE_PREWARM_SEPARATE_OHLC", "0")
+    os.environ.setdefault("WF_GLOBAL_OHLC_PREWARM", "1")
+    os.environ.setdefault("WF_GLOBAL_OHLC_REFRESH", "0")
     fair_root = repo_root / "data" / "generated" / fair_root_name
+    explore_workers = int(apply_env_worker_default("WF_EXPLORE_SAFE_THREADS", "explore"))
+    label_workers = int(apply_env_worker_default("SNIPER_LABELS_REFRESH_WORKERS", "labels_refresh"))
+    cache_workers = int(apply_env_worker_default("SNIPER_CACHE_WORKERS", "feature_cache"))
+    dataset_workers = int(apply_env_worker_default("SNIPER_DATASET_WORKERS", "dataset"))
+    ohlc_workers = int(apply_env_worker_default("OHLC_CACHE_WORKERS", "ohlc_5m"))
 
     # Configuração local para rodar direto pelo VS Code, sem env vars.
     # Estas são as METAS FINAIS por step.
@@ -283,8 +529,12 @@ def main():
     print(f"[INFO] Fair root: {fair_root}")
     print(
         f"[INFO] Explore defaults: feature_preset={os.environ.get('WF_EXPLORE_FEATURE_PRESET', 'core80')} "
-        f"safe_threads={os.environ.get('WF_EXPLORE_SAFE_THREADS', '8')} "
-        f"candle_sec={os.environ.get('WF_EXPLORE_CANDLE_SEC', '300')}"
+        f"safe_threads={int(explore_workers)} "
+        f"candle_sec={os.environ.get('WF_EXPLORE_CANDLE_SEC', '300')} "
+        f"prewarm_separate_ohlc={os.environ.get('WF_EXPLORE_PREWARM_SEPARATE_OHLC', '0')} "
+        f"global_ohlc_prewarm={os.environ.get('WF_GLOBAL_OHLC_PREWARM', '1')} "
+        f"cache_workers={int(cache_workers)} dataset_workers={int(dataset_workers)} "
+        f"label_workers={int(label_workers)} ohlc_workers={int(ohlc_workers)}"
     )
     print(f"[INFO] Launching Fair Dashboard: {dash_script} (Log: {dash_log})")
     
@@ -304,22 +554,46 @@ def main():
     # This ensures that each step only backtests its targeted fair window.
     window_days = 180
     
-    # Performance Tuning for the USER's PC (64GB RAM)
-    os.environ.setdefault("WF_EXPLORE_SAFE_THREADS", "8")
-    os.environ.setdefault("SNIPER_LABELS_REFRESH_WORKERS", "8")
-    os.environ.setdefault("SNIPER_CACHE_WORKERS", "8")
-    os.environ.setdefault("SNIPER_DATASET_WORKERS", "8")
-    
     try:
         success_count = 0
+        if str(os.environ.get("WF_GLOBAL_OHLC_PREWARM", "1")).strip().lower() not in {"0", "false", "no", "off"}:
+            if not run_global_ohlc_prewarm(repo_root, fair_root, candle_sec=60, label="1m"):
+                print("[FATAL] Orchestrator stopping due to global OHLC prewarm failure")
+                return
+            if not run_global_ohlc_prewarm(
+                repo_root,
+                fair_root,
+                candle_sec=int(os.environ.get("WF_EXPLORE_CANDLE_SEC", "300") or "300"),
+                label="5m",
+            ):
+                print("[FATAL] Orchestrator stopping due to global 5m OHLC prewarm failure")
+                return
+        print("[INFO] Phase 1/3: prewarming full feature cache for the active preset")
+        if not run_global_feature_prewarm(repo_root, fair_root):
+            print("[FATAL] Orchestrator stopping due to global feature prewarm failure")
+            return
+
+        print(f"[INFO] Phase 2/3: prewarming feature caches for all {len(milestones)} steps")
+        prewarmed_steps = 0
+        for m in milestones:
+            step_dir = fair_root / f"step_{m}d"
+            tail = max(0, m - 180)
+            os.environ["SNIPER_REMOVE_TAIL_DAYS"] = str(tail)
+            os.environ["WF_EXPLORE_DAYS"] = str(window_days)
+            os.environ["WF_EXPLORE_STEP_DAYS"] = str(m)
+            prewarm_ok = run_prewarm(repo_root=repo_root, days=m, out_base=fair_root)
+            if not prewarm_ok:
+                print(f"[FATAL] Orchestrator stopping due to prewarm failure in step {m}d")
+                return
+            prewarmed_steps += 1
+        print(f"[OK] Feature prewarm completed for {prewarmed_steps}/{len(milestones)} steps")
+
+        print(f"[INFO] Phase 3/3: starting explores only after all prewarms are complete")
         for m in milestones:
             step_started = time.time()
             step_dir = fair_root / f"step_{m}d"
-            # To test [T-m, T-(m-180)], we set simulation "Now" at T-(m-180)
             tail = max(0, m - 180)
-            
             progress = _step_progress(step_dir)
-
             step_finished = (step_dir / ".finished").exists()
             meets_targets = _step_meets_targets(progress, TARGET_LABEL_TRIALS, TARGET_RETRAINS_PER_LABEL, TARGET_BACKTESTS_PER_RETRAIN)
             if step_finished and meets_targets:
@@ -340,7 +614,6 @@ def main():
             os.environ["SNIPER_REMOVE_TAIL_DAYS"] = str(tail)
             os.environ["WF_EXPLORE_DAYS"] = str(window_days)
             os.environ["WF_EXPLORE_STEP_DAYS"] = str(m)
-            
             step_success = True
             for gen_cfg in GENERATION_PLAN:
                 gen_progress = _generation_progress(

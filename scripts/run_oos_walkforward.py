@@ -1294,6 +1294,8 @@ def main():
                 rebuild_on_score_error=False,
                 align_global_window=True,
                 align_global_window_use_max_end=False,
+                feature_preset=str(os.getenv("WF_PORTFOLIO_FEATURE_PRESET", os.getenv("WF_EXPLORE_FEATURE_PRESET", "full")) or "full"),
+                feature_remove_tail_days=0,
             )
             prepared = prepare_portfolio_data(settings)
             res = run_prepared_portfolio(

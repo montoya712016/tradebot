@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "updated_utc": "2026-03-31T18:13:58.192095",
+  "hosts": {
+    "cpu32_mem65276": {
+      "cpu_count": 32,
+      "total_mb": 65275.8515625,
+      "updated_utc": "2026-03-31T18:13:58.192095",
+      "workloads": {
+        "ohlc_1m": {
+          "runs": 1,
+          "success_runs": 1,
+          "last_workers": 12,
+          "last_duration_s": 2.035961866378784,
+          "last_peak_process_mb": 335.765625,
+          "last_estimated_per_worker_mb": 27.98046875,
+          "last_peak_used_pct": 44.1,
+          "last_min_available_mb": 36494.9921875,
+          "p90_estimated_per_worker_mb": 27.98046875,
+          "p95_estimated_per_worker_mb": 27.98046875,
+          "max_estimated_per_worker_mb": 27.98046875,
+          "p90_seconds_per_worker": 0.16966348886489868,
+          "p90_seconds_per_unit": 0.0,
+          "max_successful_workers": 12,
+          "samples": [
+            {
+              "utc": "2026-03-31T18:13:56.658956",
+              "success": true,
+              "workers": 12,
+              "duration_s": 2.035961866378784,
+              "peak_process_mb": 335.765625,
+              "estimated_per_worker_mb": 27.98046875,
+              "peak_used_pct": 44.1,
+              "min_available_mb": 36494.9921875,
+              "units": 0,
+              "unit_name": "symbols",
+              "seconds_per_worker": 0.16966348886489868,
+              "seconds_per_unit": 0.0,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            }
+          ]
+        },
+        "ohlc_5m": {
+          "runs": 1,
+          "success_runs": 1,
+          "last_workers": 12,
+          "last_duration_s": 1.5296051502227783,
+          "last_peak_process_mb": 235.984375,
+          "last_estimated_per_worker_mb": 19.665364583333332,
+          "last_peak_used_pct": 44.1,
+          "last_min_available_mb": 36510.71875,
+          "p90_estimated_per_worker_mb": 19.665364583333332,
+          "p95_estimated_per_worker_mb": 19.665364583333332,
+          "max_estimated_per_worker_mb": 19.665364583333332,
+          "p90_seconds_per_worker": 0.1274670958518982,
+          "p90_seconds_per_unit": 0.0,
+          "max_successful_workers": 12,
+          "samples": [
+            {
+              "utc": "2026-03-31T18:13:58.192095",
+              "success": true,
+              "workers": 12,
+              "duration_s": 1.5296051502227783,
+              "peak_process_mb": 235.984375,
+              "estimated_per_worker_mb": 19.665364583333332,
+              "peak_used_pct": 44.1,
+              "min_available_mb": 36510.71875,
+              "units": 0,
+              "unit_name": "symbols",
+              "seconds_per_worker": 0.1274670958518982,
+              "seconds_per_unit": 0.0,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

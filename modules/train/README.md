@@ -12,6 +12,20 @@ O `wf_portfolio_explorer.py` da `v6` trabalha assim:
 
 - usa preset de features `core80`
 - grava cache de features em diretório segregado por preset quando não for `full`
+- constrói primeiro um cache global de OHLC `5m`
+- depois constrói um cache global do preset ativo (`features_pf_5m_core80`) para os backtests OOS do explore
+- dimensiona workers automaticamente por fase:
+  - `ohlc_1m`
+  - `ohlc_5m`
+  - `feature_cache_global`
+  - `feature_cache`
+  - `dataset`
+  - `labels_refresh`
+- faz prewarm por step antes do primeiro refresh:
+  - por padrão, o bootstrap de features já popula o cache OHLC base
+  - o pass separado de OHLC é opcional
+- no workflow padrão do orquestrador, os caches OHLC globais (`1m` e `5m`) são construídos antes de qualquer prewarm de step
+- os refreshes/treinos usam o cache recortado do step, mas o prepare/backtest usa o cache global do preset para conseguir enxergar a janela OOS seguinte
 - otimiza `7` parâmetros entre edge e treino leve:
   - `label_profit_thr`
   - `exit_ema_span_min`
@@ -33,6 +47,13 @@ Plano padrão:
 - `21` backtests por retrain
 
 Os refreshes cobrem um subconjunto determinístico e bem distribuído do grid de contratos, os retrains percorrem um grid pequeno e uniforme de presets de treino/calibração, e os backtests varrem `tau` de `0.70` a `0.90` em passo `0.01`.
+
+## Padrão operacional de workers
+
+- defaults de workers agora vêm de `modules/utils/resource_sizing.py`
+- overrides via env continuam possíveis
+- o `GuardedRunner` segue sendo a segunda camada de proteção quando o workload fica memory-bound
+- o orchestrator grava observações por host/workload em `modules/utils/parallel_runtime_telemetry.json`
 
 ## Entry points
 ```bash

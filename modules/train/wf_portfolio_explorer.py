@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -51,8 +52,12 @@ from backtest.portfolio import (  # noqa: E402
     run_prepared_portfolio,
 )
 from config.trade_contract import TradeContract, bars_from_minutes, apply_crypto_pipeline_env  # noqa: E402
+from config.symbols import default_top_market_cap_path, load_market_caps  # noqa: E402
 from prepare_features.refresh_sniper_labels_in_cache import RefreshLabelsSettings, run as refresh_labels  # noqa: E402
-from train.sniper_dataflow import _cache_dir, _cache_format  # noqa: E402
+from prepare_features.data import load_ohlc_series  # noqa: E402
+from train.feature_presets import feature_flags_for_preset  # noqa: E402
+from train.sniper_dataflow import _cache_dir, _cache_format, ensure_feature_cache  # noqa: E402
+from utils.resource_sizing import apply_env_worker_default  # noqa: E402
 
 
 RESULTS_HEADER = [
@@ -314,7 +319,18 @@ def _infer_max_period_days(run_dir: str) -> int:
 def _validate_required_period_meta(run_dir: str, period_days: int) -> Path:
     meta_path = Path(run_dir) / f"period_{int(period_days)}d" / "meta.json"
     if not meta_path.exists():
-        raise RuntimeError(f"missing meta for required period: {meta_path}")
+        alias_src = Path(run_dir) / "period_0d"
+        alias_dst = Path(run_dir) / f"period_{int(period_days)}d"
+        alias_meta = alias_src / "meta.json"
+        if alias_meta.exists():
+            try:
+                if (not alias_dst.exists()) and alias_src.exists():
+                    shutil.copytree(alias_src, alias_dst)
+                meta_path = alias_dst / "meta.json"
+            except Exception:
+                meta_path = alias_meta
+        if not meta_path.exists():
+            raise RuntimeError(f"missing meta for required period: {meta_path}")
     return meta_path
 
 
@@ -445,8 +461,82 @@ def _build_contract(candle_sec: int, label_profit_thr: float, exit_span_min: int
     )
 
 
-def _refresh_labels(contract: TradeContract, candle_sec: int, feature_preset: str) -> dict[str, object]:
-    refresh_workers = max(1, int(os.environ.get("SNIPER_LABELS_REFRESH_WORKERS", os.environ.get("SNIPER_DATASET_WORKERS", "4"))))
+def _target_universe_symbols(max_symbols: int = 0) -> list[str]:
+    caps = load_market_caps(default_top_market_cap_path())
+    if not caps:
+        return []
+    ranked = sorted(caps.items(), key=lambda kv: kv[1], reverse=True)
+    out: list[str] = []
+    for sym, cap in ranked:
+        if float(cap) < 100_000_000.0 or float(cap) > 150_000_000_000.0:
+            continue
+        s = str(sym).upper()
+        if not s.endswith("USDT"):
+            s = s + "USDT"
+        out.append(s)
+        if int(max_symbols) > 0 and len(out) >= int(max_symbols):
+            break
+    return out
+
+
+def _filter_symbols_with_usable_ohlc(
+    symbols: list[str],
+    *,
+    total_days: int,
+    remove_tail_days: int,
+    candle_sec: int,
+    log: _Tee | None = None,
+) -> list[str]:
+    usable: list[str] = []
+    skipped: list[str] = []
+    checked = 0
+    for sym in symbols:
+        checked += 1
+        try:
+            df_ohlc = load_ohlc_series(
+                sym,
+                days=int(total_days),
+                candle_sec=int(candle_sec),
+                remove_tail_days=int(remove_tail_days),
+            )
+            if df_ohlc is None or len(df_ohlc) <= 0:
+                skipped.append(sym)
+                continue
+            usable.append(sym)
+        except Exception:
+            skipped.append(sym)
+        if log is not None and (checked % 25 == 0 or checked == len(symbols)):
+            log.write(
+                f"[prewarm] ohlc usability checked={checked}/{len(symbols)} "
+                f"usable={len(usable)} skipped={len(skipped)}"
+            )
+    if log is not None:
+        log.write(
+            f"[prewarm] ohlc usability final usable={len(usable)}/{len(symbols)} skipped={len(skipped)}"
+        )
+        if skipped:
+            log.write(f"[prewarm] sample unusable: {', '.join(skipped[:12])}")
+    return usable
+
+
+def _refresh_labels(
+    contract: TradeContract,
+    candle_sec: int,
+    feature_preset: str,
+    max_symbols: int = 0,
+    target_symbols: list[str] | None = None,
+    total_days: int = 0,
+) -> dict[str, object]:
+    refresh_workers = max(
+        1,
+        int(
+            os.environ.get(
+                "SNIPER_LABELS_REFRESH_WORKERS",
+                str(apply_env_worker_default("SNIPER_LABELS_REFRESH_WORKERS", "labels_refresh")),
+            )
+        ),
+    )
+    target_symbols = list(target_symbols) if target_symbols else _target_universe_symbols(int(max_symbols))
     env = {
         "SNIPER_ASSET_CLASS": "crypto",
         "SNIPER_FEATURE_PRESET": str(feature_preset or "full"),
@@ -464,7 +554,24 @@ def _refresh_labels(contract: TradeContract, candle_sec: int, feature_preset: st
     }
     with _temp_env(env):
         apply_crypto_pipeline_env(int(candle_sec))
+        if target_symbols:
+            ensure_feature_cache(
+                target_symbols,
+                total_days=int(total_days),
+                contract=contract,
+                flags=feature_flags_for_preset(feature_preset, label=True),
+                cache_dir=_cache_dir("crypto", int(candle_sec)),
+                refresh=False,
+                parallel=True,
+                max_workers=refresh_workers,
+                strict_total_days=False,
+                allow_build=True,
+                asset_class="crypto",
+                abort_ram_pct=90.0,
+            )
         s = RefreshLabelsSettings(contract=contract, candle_sec=int(candle_sec))
+        s.symbols = list(target_symbols) if target_symbols else None
+        s.max_symbols = int(max_symbols)
         s.workers = int(os.environ.get("SNIPER_LABELS_REFRESH_WORKERS", refresh_workers))
         s.max_ram_pct = 72.0
         s.min_free_mb = 4096.0
@@ -483,6 +590,131 @@ def _list_cached_symbols(candle_sec: int, feature_preset: str) -> list[str]:
             if sym:
                 symbols.append(sym)
         return symbols
+
+
+def _stream_subprocess(cmd: list[str], env: dict[str, str], cwd: Path, log: _Tee, *, prefix: str) -> None:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.stdout is not None
+    for raw_line in proc.stdout:
+        line = str(raw_line or "").rstrip("\r\n")
+        if line:
+            log.write(f"{prefix} {line}")
+    proc.wait()
+    if int(proc.returncode or 0) != 0:
+        raise RuntimeError(f"subprocess failed code={proc.returncode}: {' '.join(cmd)}")
+
+
+def _prewarm_step_cache(s: ExploreSettings, log: _Tee, forced_step_days: int) -> list[str]:
+    step_days = int(forced_step_days or s.days)
+    target_symbols = _target_universe_symbols(int(s.max_symbols))
+    if not target_symbols:
+        log.write("[prewarm] no target symbols resolved for this step")
+        return []
+
+    repo_root = _repo_root()
+    cache_refresh = _env_bool("WF_EXPLORE_PREWARM_REFRESH_FEATURES", False)
+    ohlc_refresh = _env_bool("WF_EXPLORE_PREWARM_REFRESH_OHLC", False)
+    separate_ohlc = _env_bool("WF_EXPLORE_PREWARM_SEPARATE_OHLC", False)
+    worker_count = max(
+        1,
+        int(_env_int("WF_EXPLORE_SAFE_THREADS", int(apply_env_worker_default("WF_EXPLORE_SAFE_THREADS", "explore")))),
+    )
+    log.write(
+        f"[prewarm] start step_days={step_days} symbols={len(target_symbols)} "
+        f"feature_preset={s.feature_preset} ohlc_refresh={int(bool(ohlc_refresh))} "
+        f"feature_refresh={int(bool(cache_refresh))} separate_ohlc={int(bool(separate_ohlc))} "
+        f"workers={worker_count}"
+    )
+
+    if bool(separate_ohlc):
+        ohlc_env = os.environ.copy()
+        ohlc_env.update(
+            {
+                "PF_OHLC_CACHE": "1",
+                "PF_OHLC_CACHE_REFRESH": "1" if bool(ohlc_refresh) else "0",
+                "MAX_SYMBOLS": "0" if int(s.max_symbols) <= 0 else str(int(s.max_symbols)),
+                "DAYS": str(int(step_days)),
+                "MCAP_MIN_USD": "100000000",
+                "MCAP_MAX_USD": "150000000000",
+                "OHLC_CACHE_WORKERS": str(worker_count),
+            }
+        )
+        _stream_subprocess(
+            [sys.executable, "-u", str((repo_root / "scripts" / "data_sync.py").resolve())],
+            ohlc_env,
+            repo_root,
+            log,
+            prefix="[prewarm-ohlc]",
+        )
+    else:
+        log.write("[prewarm] skipping separate OHLC pass; feature bootstrap will populate base OHLC cache on demand")
+
+    target_symbols = _filter_symbols_with_usable_ohlc(
+        list(target_symbols),
+        total_days=int(step_days),
+        remove_tail_days=int(os.getenv("SNIPER_REMOVE_TAIL_DAYS", "0") or "0"),
+        candle_sec=int(s.candle_sec),
+        log=log,
+    )
+    if not target_symbols:
+        log.write("[prewarm] no usable symbols remained after OHLC screening")
+        return []
+
+    contract = _build_contract(
+        candle_sec=int(s.candle_sec),
+        label_profit_thr=float(s.label_profit_choices[0]),
+        exit_span_min=int(s.exit_span_choices[0]),
+        exit_offset=float(s.exit_offset_choices[0]),
+    )
+    with _temp_env({"SNIPER_FEATURE_PRESET": str(s.feature_preset or "full")}):
+        cache_dir = _cache_dir("crypto", int(s.candle_sec))
+        t0 = time.perf_counter()
+        built = ensure_feature_cache(
+            target_symbols,
+            total_days=int(step_days),
+            contract=contract,
+            flags=feature_flags_for_preset(s.feature_preset, label=True),
+            cache_dir=cache_dir,
+            refresh=bool(cache_refresh),
+            parallel=True,
+            max_workers=worker_count,
+            strict_total_days=True,
+            allow_build=True,
+            asset_class="crypto",
+            abort_ram_pct=90.0,
+        )
+        elapsed = time.perf_counter() - t0
+    eligible_symbols = sorted(str(sym).upper() for sym in built.keys())
+    log.write(
+        f"[prewarm] feature cache ready eligible={len(eligible_symbols)}/{len(target_symbols)} "
+        f"cache_dir={cache_dir} dur={_fmt_duration(elapsed)}"
+    )
+    if eligible_symbols:
+        log.write(f"[prewarm] sample eligible: {', '.join(eligible_symbols[:12])}")
+    return eligible_symbols
+
+
+def prewarm(settings: ExploreSettings | None = None) -> None:
+    s = settings or ExploreSettings()
+    forced_step_days = _env_int("WF_EXPLORE_STEP_DAYS", 0)
+    out_root = resolve_generated_path(s.out_root)
+    out_root.mkdir(parents=True, exist_ok=True)
+    log = _Tee(out_root / "loop.log")
+    log.write(
+        f"[prewarm] out_root={out_root} step_days={int(forced_step_days or s.days)} "
+        f"feature_preset={s.feature_preset}"
+    )
+    eligible = _prewarm_step_cache(s, log, forced_step_days)
+    log.write(f"[prewarm] done eligible_symbols={len(eligible)}")
 
 
 def _write_symbol_manifest(label_dir: Path, symbols: list[str]) -> str:
@@ -973,10 +1205,22 @@ def run(settings: ExploreSettings | None = None) -> None:
     train_total_sec = 0.0
     prepare_total_sec = 0.0
     backtest_total_sec = 0.0
+    eligible_symbols_for_step: list[str] | None = None
+    try:
+        prebuilt_symbols = _list_cached_symbols(int(s.candle_sec), str(s.feature_preset))
+        if prebuilt_symbols:
+            eligible_symbols_for_step = list(prebuilt_symbols)
+            log.write(
+                f"[explore] prebuilt eligible universe loaded symbols={len(prebuilt_symbols)} "
+                f"feature_preset={s.feature_preset}"
+            )
+    except Exception as e:
+        log.write(f"[explore] warning: could not load prebuilt eligible universe: {type(e).__name__}: {e}")
 
     for label_idx in range(int(label_start), int(label_end) + 1):
         label_id = f"label_{label_idx:03d}"
         label_dir = out_root / label_id
+        target_symbols = list(eligible_symbols_for_step) if eligible_symbols_for_step else _target_universe_symbols(int(s.max_symbols))
         label_seq = int(base_sequence) * 10_000 + int(label_idx)
         label_seed = _pick_seed(refine_seeds, label_seq) if phase == "refine" else None
         label_cfg = (
@@ -990,9 +1234,12 @@ def run(settings: ExploreSettings | None = None) -> None:
             status = "ok"
             label_symbols_manifest = ""
             try:
-                syms_cached = _list_cached_symbols(int(s.candle_sec), str(s.feature_preset))
-                if syms_cached:
-                    label_symbols_manifest = _write_symbol_manifest(label_dir, syms_cached)
+                if target_symbols:
+                    label_symbols_manifest = _write_symbol_manifest(label_dir, target_symbols)
+                else:
+                    syms_cached = _list_cached_symbols(int(s.candle_sec), str(s.feature_preset))
+                    if syms_cached:
+                        label_symbols_manifest = _write_symbol_manifest(label_dir, syms_cached)
             except Exception:
                 label_symbols_manifest = ""
         else:
@@ -1011,9 +1258,21 @@ def run(settings: ExploreSettings | None = None) -> None:
             label_symbols_manifest = ""
             try:
                 log.write(f"[explore] {label_id} refresh start profit_thr={label_cfg['label_profit_thr']} exit_span={label_cfg['exit_span_min']} offset={label_cfg['exit_offset']}")
-                refresh_info = _refresh_labels(contract, int(s.candle_sec), str(s.feature_preset))
+                refresh_info = _refresh_labels(
+                    contract,
+                    int(s.candle_sec),
+                    str(s.feature_preset),
+                    int(s.max_symbols),
+                    target_symbols=target_symbols,
+                    total_days=int(forced_step_days or s.days),
+                )
                 syms_cached = _list_cached_symbols(int(s.candle_sec), str(s.feature_preset))
                 if syms_cached:
+                    eligible_symbols_for_step = list(syms_cached)
+                if target_symbols:
+                    manifest_symbols = eligible_symbols_for_step if eligible_symbols_for_step else target_symbols
+                    label_symbols_manifest = _write_symbol_manifest(label_dir, manifest_symbols)
+                elif syms_cached:
                     label_symbols_manifest = _write_symbol_manifest(label_dir, syms_cached)
             except Exception as e:
                 status = "error"
@@ -1116,6 +1375,7 @@ def run(settings: ExploreSettings | None = None) -> None:
                         "TRAIN_ENTRY_RATIO_NEG_PER_POS": str(train_cfg["neg_per_pos"]),
                         "TRAIN_REFRESH_LABELS": "0",
                         "TRAIN_MAX_SYMBOLS": "0" if int(s.max_symbols) <= 0 else str(int(s.max_symbols)),
+                        "TRAIN_TOTAL_DAYS": str(int(forced_step_days or s.days)),
                         "SNIPER_CACHE_WORKERS": str(int(s.safe_threads)),
                         "SNIPER_DATASET_WORKERS": str(int(s.safe_threads)),
                         "TRAIN_MIN_SYMBOLS_USED_PER_PERIOD": ("10" if forced_period is not None else "30"),
@@ -1128,7 +1388,11 @@ def run(settings: ExploreSettings | None = None) -> None:
                     if label_symbols_manifest:
                         env["TRAIN_SYMBOLS_FILE"] = str(label_symbols_manifest)
                     if forced_period is not None:
-                        active_offsets = [int(forced_period)]
+                        # O cache do step já vem recortado pela janela histórica do próprio step.
+                        # Se aplicarmos T-180d de novo aqui, o trainer corta o bloco pela segunda vez
+                        # e o dataset fica vazio. Então treinamos no bloco recortado como `period_0d`
+                        # e depois validamos/consumimos isso via alias para `period_{forced_period}d`.
+                        active_offsets = [0]
                     else:
                         num_segments = max(1, math.ceil(int(s.days) / 180))
                         active_offsets = [(i + 1) * 180 for i in range(num_segments)]
@@ -1243,6 +1507,8 @@ def run(settings: ExploreSettings | None = None) -> None:
                             force_period_days=(int(forced_period),),
                             explicit_window_start=str(period_train_end),
                             explicit_window_end=str(period_test_end),
+                            feature_preset=str(s.feature_preset),
+                            feature_remove_tail_days=0,
                         )
                         log.write(f"[explore] {label_id}/{model_id} prepare start")
                         prepared_portfolio = prepare_portfolio_data(prepare_settings)
@@ -1445,6 +1711,7 @@ def run(settings: ExploreSettings | None = None) -> None:
 
 
 def main() -> None:
+    safe_threads = apply_env_worker_default("WF_EXPLORE_SAFE_THREADS", "explore")
     s = ExploreSettings(
         out_root=_env_str("WF_EXPLORE_OUT_ROOT", "wf_portfolio_explore"),
         results_csv=_env_str("WF_EXPLORE_RESULTS_CSV", "explore_runs.csv"),
@@ -1455,7 +1722,7 @@ def main() -> None:
         days=_env_int("WF_EXPLORE_DAYS", 4 * 360),
         max_symbols=_env_int("WF_EXPLORE_MAX_SYMBOLS", 0),
         candle_sec=_env_int("WF_EXPLORE_CANDLE_SEC", 300),
-        safe_threads=_env_int("WF_EXPLORE_SAFE_THREADS", 8),
+        safe_threads=int(safe_threads),
         feature_preset=_env_str("WF_EXPLORE_FEATURE_PRESET", "core80"),
     )
     run(s)

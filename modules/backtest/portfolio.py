@@ -13,6 +13,7 @@ Alinhado com o fluxo atual do single-symbol:
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from contextlib import contextmanager
 import os
 import json
 import time
@@ -28,6 +29,7 @@ from backtest.sniper_walkforward import (
 )
 from backtest.sniper_portfolio import PortfolioConfig, SymbolData, simulate_portfolio
 from train.sniper_dataflow import ensure_feature_cache, GLOBAL_FLAGS_FULL, _symbol_cache_paths, _cache_format
+from train.feature_presets import feature_flags_for_preset
 from trade_contract import DEFAULT_TRADE_CONTRACT, TradeContract
 from plotting.plotting import plot_equity_and_correlation
 
@@ -109,6 +111,8 @@ class PortfolioDemoSettings:
     # Se False, recorta "Ãºltimos days" por sÃ­mbolo (pode misturar perÃ­odos e variar muito).
     align_global_window: bool = True
     align_global_window_use_max_end: bool = False
+    feature_preset: str = field(default_factory=lambda: str(os.getenv("SNIPER_FEATURE_PRESET", "full") or "full"))
+    feature_remove_tail_days: int | None = None
 
 
 @dataclass
@@ -139,6 +143,22 @@ def _best_run_contract() -> TradeContract:
         return DEFAULT_TRADE_CONTRACT
 
 
+@contextmanager
+def _temp_env(overrides: dict[str, str]):
+    old: dict[str, str | None] = {}
+    try:
+        for k, v in overrides.items():
+            old[k] = os.environ.get(k)
+            os.environ[k] = str(v)
+        yield
+    finally:
+        for k, old_v in old.items():
+            if old_v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old_v
+
+
 def _default_flags_for_asset(asset_class: str) -> dict:
     asset = str(asset_class or "crypto").lower()
     if asset == "stocks":
@@ -151,6 +171,26 @@ def _default_flags_for_asset(asset_class: str) -> dict:
         except Exception:
             pass
     return dict(GLOBAL_FLAGS_FULL)
+
+
+def _feature_preset_name(settings: PortfolioDemoSettings) -> str:
+    return str(getattr(settings, "feature_preset", "full") or "full").strip() or "full"
+
+
+def _cache_env_for_settings(settings: PortfolioDemoSettings) -> dict[str, str]:
+    env = {"SNIPER_FEATURE_PRESET": _feature_preset_name(settings)}
+    tail_override = getattr(settings, "feature_remove_tail_days", None)
+    if tail_override is not None:
+        env["SNIPER_REMOVE_TAIL_DAYS"] = str(max(0, int(tail_override)))
+    return env
+
+
+def _flags_for_settings(settings: PortfolioDemoSettings, asset_class: str) -> dict:
+    asset = str(asset_class or "crypto").lower()
+    preset = _feature_preset_name(settings)
+    if asset == "crypto" and preset != "full":
+        return dict(feature_flags_for_preset(preset, label=True))
+    return _default_flags_for_asset(asset)
 
 
 def _default_contract_for_asset(asset_class: str) -> TradeContract:
@@ -184,15 +224,16 @@ def _load_cached_symbol_frame(
         if not bool(getattr(settings, "rebuild_on_score_error", True)):
             raise
         print(f"[cache] WARN {sym}: {type(e).__name__}: {e} -> tentando rebuild do cache", flush=True)
-        cache_map2 = ensure_feature_cache(
-            [sym],
-            total_days=int(settings.total_days_cache),
-            contract=contract,
-            flags=flags,
-            asset_class=asset,
-            parallel=False,
-            refresh=True,
-        )
+        with _temp_env(_cache_env_for_settings(settings)):
+            cache_map2 = ensure_feature_cache(
+                [sym],
+                total_days=int(settings.total_days_cache),
+                contract=contract,
+                flags=flags,
+                asset_class=asset,
+                parallel=False,
+                refresh=True,
+            )
         p2 = cache_map2.get(sym)
         if not p2:
             raise RuntimeError(f"rebuild do cache nao retornou arquivo para {sym}")
@@ -303,17 +344,18 @@ def prepare_portfolio_data(settings: PortfolioDemoSettings | None = None) -> Pre
     if not symbols:
         raise RuntimeError("Sem sÃ­mbolos (defina settings.symbols ou verifique meta.json do WF)")
 
-    flags = _default_flags_for_asset(asset)
+    flags = _flags_for_settings(settings, asset)
     flags["_quiet"] = True
-    cache_map = ensure_feature_cache(
-        symbols,
-        total_days=int(settings.total_days_cache),
-        contract=contract,
-        flags=flags,
-        asset_class=asset,
-        parallel=False,
-        allow_build=not bool(getattr(settings, "require_feature_cache", False)),
-    )
+    with _temp_env(_cache_env_for_settings(settings)):
+        cache_map = ensure_feature_cache(
+            symbols,
+            total_days=int(settings.total_days_cache),
+            contract=contract,
+            flags=flags,
+            asset_class=asset,
+            parallel=False,
+            allow_build=not bool(getattr(settings, "require_feature_cache", False)),
+        )
     symbols = [s for s in symbols if s in cache_map]
     if not symbols:
         raise RuntimeError("Nenhum sÃ­mbolo restou apÃ³s cache (ver logs [cache])")
@@ -415,15 +457,16 @@ def prepare_portfolio_data(settings: PortfolioDemoSettings | None = None) -> Pre
             try:
                 if not bool(getattr(settings, "rebuild_on_score_error", True)):
                     raise
-                cache_map2 = ensure_feature_cache(
-                    [sym],
-                    total_days=int(settings.total_days_cache),
-                    contract=contract,
-                    flags=flags,
-                    asset_class=asset,
-                    parallel=False,
-                    refresh=True,
-                )
+                with _temp_env(_cache_env_for_settings(settings)):
+                    cache_map2 = ensure_feature_cache(
+                        [sym],
+                        total_days=int(settings.total_days_cache),
+                        contract=contract,
+                        flags=flags,
+                        asset_class=asset,
+                        parallel=False,
+                        refresh=True,
+                    )
                 p2 = cache_map2.get(sym)
                 if p2:
                     _, df_retry = _load_cached_symbol_frame(

@@ -76,21 +76,59 @@ def _ohlc_cache_refresh() -> bool:
     return v in {"1", "true", "yes", "on"}
 
 
-def _ohlc_cache_dir() -> Path:
+def _timeframe_tag(candle_sec: int) -> str:
+    candle_sec = int(max(60, candle_sec))
+    if candle_sec % 60 == 0:
+        return f"{int(candle_sec // 60)}m"
+    return f"{int(candle_sec)}s"
+
+
+def _ohlc_cache_dir(candle_sec: int = 60) -> Path:
     env_dir = (os.getenv("PF_OHLC_CACHE_DIR") or "").strip()
     if env_dir:
-        return Path(env_dir)
-    root = _repo_root()
-    if root is not None:
-        return root.parent / "cache_sniper" / "ohlc_1m"
-    return Path.cwd() / "cache_sniper" / "ohlc_1m"
+        base = Path(env_dir)
+    else:
+        root = _repo_root()
+        if root is not None:
+            base = root.parent / "cache_sniper"
+        else:
+            base = Path.cwd() / "cache_sniper"
+    tag = _timeframe_tag(int(candle_sec))
+    return base / f"ohlc_{tag}"
 
 
-def _ohlc_cache_paths(sym: str) -> tuple[Path, Path]:
-    cache_dir = _ohlc_cache_dir()
+def _ohlc_cache_paths(sym: str, candle_sec: int = 60) -> tuple[Path, Path]:
+    cache_dir = _ohlc_cache_dir(candle_sec=int(candle_sec))
     cache_dir.mkdir(parents=True, exist_ok=True)
     safe = sym.lower()
     return (cache_dir / f"{safe}.parquet", cache_dir / f"{safe}.meta.json")
+
+
+def _slice_cached_ohlc_window(
+    dfc: pd.DataFrame,
+    meta: dict[str, Any],
+    *,
+    start_ms: int,
+    end_ms: int | None,
+) -> pd.DataFrame | None:
+    if dfc.empty:
+        return None
+    if getattr(dfc.index, "tz", None) is not None:
+        dfc.index = dfc.index.tz_localize(None)
+    cache_covers_window = False
+    if "start_ms" in meta and "end_ms" in meta:
+        cached_start = int(meta.get("start_ms") or 0)
+        cached_end = int(meta.get("end_ms") or 0)
+        ok_start = True if int(start_ms) <= 0 else (start_ms >= cached_start)
+        ok_end = True if end_ms is None else (end_ms <= cached_end)
+        cache_covers_window = bool(ok_start and ok_end)
+    if not cache_covers_window:
+        return None
+    start_ts = pd.to_datetime(start_ms, unit="ms")
+    if end_ms is None:
+        return dfc.loc[dfc.index >= start_ts]
+    end_ts = pd.to_datetime(end_ms, unit="ms")
+    return dfc.loc[(dfc.index >= start_ts) & (dfc.index < end_ts)]
 
 
 def _load_ohlc_cache(path: Path) -> pd.DataFrame:
@@ -188,33 +226,15 @@ def load_ohlc_1m_series(sym: str, days: int, *, remove_tail_days: int = 0) -> pd
         end_ms = int((now_s - remove_tail_days*86400) * 1000)
 
     if _ohlc_cache_enabled():
-        cache_path, meta_path = _ohlc_cache_paths(sym)
+        cache_path, meta_path = _ohlc_cache_paths(sym, 60)
         refresh = _ohlc_cache_refresh()
         if cache_path.exists() and (not refresh):
             try:
                 meta = _read_cache_meta(meta_path)
                 dfc = _load_ohlc_cache(cache_path)
-                if not dfc.empty:
-                    if getattr(dfc.index, "tz", None) is not None:
-                        dfc.index = dfc.index.tz_localize(None)
-                    if "start_ms" in meta and "end_ms" in meta:
-                        cached_start = int(meta.get("start_ms") or 0)
-                        cached_end = int(meta.get("end_ms") or 0)
-                        ok_start = start_ms >= cached_start
-                        ok_end = True if end_ms is None else (end_ms <= cached_end)
-                        if ok_start and ok_end:
-                            if end_ms is None:
-                                return dfc.loc[dfc.index >= pd.to_datetime(start_ms, unit="ms")]
-                            return dfc.loc[
-                                (dfc.index >= pd.to_datetime(start_ms, unit="ms"))
-                                & (dfc.index < pd.to_datetime(end_ms, unit="ms"))
-                            ]
-                    if end_ms is None:
-                        return dfc.loc[dfc.index >= pd.to_datetime(start_ms, unit="ms")]
-                    return dfc.loc[
-                        (dfc.index >= pd.to_datetime(start_ms, unit="ms"))
-                        & (dfc.index < pd.to_datetime(end_ms, unit="ms"))
-                    ]
+                sliced = _slice_cached_ohlc_window(dfc, meta, start_ms=start_ms, end_ms=end_ms)
+                if sliced is not None:
+                    return sliced
             except Exception:
                 pass
 
@@ -289,18 +309,70 @@ def load_ohlc_1m_series(sym: str, days: int, *, remove_tail_days: int = 0) -> pd
         df.index = df.index.tz_localize(None)
     if _ohlc_cache_enabled():
         try:
-            cache_path, meta_path = _ohlc_cache_paths(sym)
+            cache_path, meta_path = _ohlc_cache_paths(sym, 60)
             _save_ohlc_cache(df, cache_path)
             meta = {
                 "symbol": sym,
                 "start_ms": int(df.index.min().value // 1_000_000),
                 "end_ms": int(df.index.max().value // 1_000_000),
                 "rows": int(len(df)),
+                "candle_sec": 60,
             }
             meta_path.write_text(json.dumps(meta), encoding="utf-8")
         except Exception:
             pass
     return df
+
+
+def load_ohlc_series(sym: str, days: int, *, candle_sec: int = 60, remove_tail_days: int = 0) -> pd.DataFrame:
+    candle_sec = int(max(60, int(candle_sec)))
+    if candle_sec == 60:
+        return load_ohlc_1m_series(sym, days, remove_tail_days=remove_tail_days)
+
+    now_ms = _now_ms_from_env()
+    now_s = now_ms / 1000.0
+    start_ms = 0 if int(days) <= 0 else int((now_s - int(days) * 86400) * 1000)
+    end_ms = None
+    if remove_tail_days and int(remove_tail_days) > 0:
+        end_ms = int((now_s - int(remove_tail_days) * 86400) * 1000)
+
+    if _ohlc_cache_enabled():
+        cache_path, meta_path = _ohlc_cache_paths(sym, candle_sec)
+        refresh = _ohlc_cache_refresh()
+        if cache_path.exists() and (not refresh):
+            try:
+                meta = _read_cache_meta(meta_path)
+                dfc = _load_ohlc_cache(cache_path)
+                sliced = _slice_cached_ohlc_window(dfc, meta, start_ms=start_ms, end_ms=end_ms)
+                if sliced is not None:
+                    return sliced
+            except Exception:
+                pass
+
+    raw_1m = load_ohlc_1m_series(sym, days, remove_tail_days=0)
+    if raw_1m.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "gap_after"])
+    df = to_ohlc_from_1m(raw_1m, candle_sec)
+    if _ohlc_cache_enabled():
+        try:
+            cache_path, meta_path = _ohlc_cache_paths(sym, candle_sec)
+            _save_ohlc_cache(df, cache_path)
+            meta = {
+                "symbol": sym,
+                "start_ms": int(df.index.min().value // 1_000_000),
+                "end_ms": int(df.index.max().value // 1_000_000),
+                "rows": int(len(df)),
+                "candle_sec": int(candle_sec),
+                "source": "ohlc_1m",
+            }
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        except Exception:
+            pass
+    if end_ms is None:
+        return df.loc[df.index >= pd.to_datetime(start_ms, unit="ms")]
+    end_ts = pd.to_datetime(end_ms, unit="ms")
+    start_ts = pd.to_datetime(start_ms, unit="ms")
+    return df.loc[(df.index >= start_ts) & (df.index < end_ts)]
 
 
 def to_ohlc_from_1m(df_1m: pd.DataFrame, candle_sec: int) -> pd.DataFrame:
@@ -349,7 +421,7 @@ def to_ohlc_gapfill(obj: pd.Series | pd.DataFrame, *, candle_sec: int, max_gap_s
 
 __all__ = [
     "DB_CFG_1S","DB_CFG_1M","DEFAULT_MAX_GAP_SEC",
-    "load_close_series","load_ohlc_1m_series","to_ohlc_from_1m","to_ohlc_gapfill",
+    "load_close_series","load_ohlc_1m_series","load_ohlc_series","to_ohlc_from_1m","to_ohlc_gapfill",
 ]
 
 

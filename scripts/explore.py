@@ -21,7 +21,8 @@ def _add_repo_paths() -> None:
 
 _add_repo_paths()
 
-from train.wf_portfolio_explorer import ExploreSettings, run  # type: ignore
+from train.wf_portfolio_explorer import ExploreSettings, prewarm, run  # type: ignore
+from utils.resource_sizing import apply_env_worker_default  # type: ignore
 
 
 def _env_int(name: str, default: int) -> int:
@@ -38,6 +39,8 @@ def _env_str(name: str, default: str) -> str:
 
 
 def main() -> None:
+    mode = _env_str("WF_EXPLORE_MODE", "run").strip().lower() or "run"
+    safe_threads = apply_env_worker_default("WF_EXPLORE_SAFE_THREADS", "explore")
     settings = ExploreSettings(
         out_root=_env_str("WF_EXPLORE_OUT_ROOT", "wf_portfolio_explore"),
         results_csv=_env_str("WF_EXPLORE_RESULTS_CSV", "explore_runs.csv"),
@@ -48,9 +51,12 @@ def main() -> None:
         days=_env_int("WF_EXPLORE_DAYS", 4 * 360),
         max_symbols=_env_int("WF_EXPLORE_MAX_SYMBOLS", 0),
         candle_sec=_env_int("WF_EXPLORE_CANDLE_SEC", 300),
-        safe_threads=_env_int("WF_EXPLORE_SAFE_THREADS", 8),
+        safe_threads=int(safe_threads),
         feature_preset=_env_str("WF_EXPLORE_FEATURE_PRESET", "core80"),
     )
+    if mode == "prewarm":
+        prewarm(settings)
+        return
     run(settings)
 
 

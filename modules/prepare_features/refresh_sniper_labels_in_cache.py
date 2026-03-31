@@ -50,6 +50,7 @@ from train.sniper_dataflow import _cache_dir, _cache_format, _symbol_cache_paths
 from prepare_features.labels import apply_trade_contract_labels  # noqa: E402
 from utils.guarded_runner import GuardedParallelDefaults, GuardedRunner  # noqa: E402
 from utils.progress import LineProgressPrinter  # noqa: E402
+from utils.resource_sizing import apply_env_worker_default  # noqa: E402
 
 
 _GUARD = GuardedRunner(
@@ -186,7 +187,7 @@ def run(settings: RefreshLabelsSettings | None = None) -> dict:
     if workers <= 0:
         workers = int(os.getenv("SNIPER_LABELS_REFRESH_WORKERS", "0") or "0")
     if workers <= 0:
-        workers = min(4, max(1, (os.cpu_count() or 4) // 2))
+        workers = apply_env_worker_default("SNIPER_LABELS_REFRESH_WORKERS", "labels_refresh")
     workers = max(1, min(32, workers))
     policy = _GUARD.make_policy(
         max_ram_pct=float(getattr(s, "max_ram_pct", 78.0)),

@@ -23,6 +23,7 @@ _add_repo_paths()
 
 from train.train_sniper_wf import TrainSniperWFSettings, run  # type: ignore
 from train.feature_presets import feature_flags_for_preset, summarize_preset  # type: ignore
+from utils.resource_sizing import apply_env_worker_default  # type: ignore
 from config.trade_contract import (  # type: ignore
     CRYPTO_PIPELINE_CANDLE_SEC,
     apply_crypto_pipeline_env,
@@ -153,8 +154,8 @@ def main() -> None:
     
     # --- 1.2 RESOURCE OPTIMIZATION ---
     # Configuração agressiva para o PC de 64GB: maximiza velocidade de cache e dataset
-    os.environ.setdefault("SNIPER_CACHE_WORKERS", "12")
-    os.environ.setdefault("SNIPER_DATASET_WORKERS", "12")
+    cache_workers = apply_env_worker_default("SNIPER_CACHE_WORKERS", "feature_cache")
+    dataset_workers = apply_env_worker_default("SNIPER_DATASET_WORKERS", "dataset")
     os.environ.setdefault("SNIPER_CACHE_PER_WORKER_MB", "2048")
     os.environ.setdefault("SNIPER_DATASET_PER_WORKER_MB", "2048")
     os.environ.setdefault("SNIPER_CACHE_RAM_PCT", "90.0")
@@ -167,6 +168,8 @@ def main() -> None:
         os.environ["SNIPER_DATASET_WORKERS"] = "1"
         os.environ["SNIPER_CACHE_PER_WORKER_MB"] = "1024"
         os.environ["SNIPER_DATASET_PER_WORKER_MB"] = "1024"
+        cache_workers = 1
+        dataset_workers = 1
 
     _apply_train_overrides()
     
@@ -177,7 +180,7 @@ def main() -> None:
     
     # --- 2. CONFIGURATION ---
     max_symbols = _env_int("TRAIN_MAX_SYMBOLS", 0)  # 0 means all available symbols
-    total_days = 0
+    total_days = _env_int("TRAIN_TOTAL_DAYS", 0)
     mcap_min_usd = 100_000_000.0
     mcap_max_usd = 150_000_000_000.0
     
@@ -278,7 +281,8 @@ def main() -> None:
     )
     print(
         f"[train-wf-crypto] feature_cache_dir={feature_cache_dir} timeframe={timeframe_tag(int(candle_sec))} "
-        f"bootstrap_cache={int(bool(bootstrap_cache))} files={int(feature_cache_files)}",
+        f"bootstrap_cache={int(bool(bootstrap_cache))} files={int(feature_cache_files)} "
+        f"cache_workers={int(cache_workers)} dataset_workers={int(dataset_workers)}",
         flush=True,
     )
     print(

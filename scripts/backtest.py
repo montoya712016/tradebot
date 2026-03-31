@@ -178,6 +178,7 @@ def main() -> None:
         require_feature_cache=require_feature_cache,
         rebuild_on_score_error=rebuild_on_score_error,
         align_global_window=align_global_window,
+        feature_preset=str(os.getenv("BT_FEATURE_PRESET", os.getenv("SNIPER_FEATURE_PRESET", "full")) or "full"),
     )
     try:
         rr = Path(str(run_dir)).resolve() if run_dir else None
