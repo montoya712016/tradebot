@@ -592,7 +592,7 @@ def index():
         "landing.html",
         title="Astra Tradebot",
         runtime_badge="Fair Explore",
-        brand_logo=url_for("static", filename="branding/astra-tradebot-symbol-premium.svg"),
+        brand_logo=url_for("static", filename="branding/astra-tradebot-symbol-light.svg"),
         dashboard_url=url_for("dashboard"),
         login_url=url_for("login", next=url_for("dashboard")),
         register_url=url_for("register", next=url_for("dashboard")),
@@ -848,7 +848,7 @@ def index():
             <div class="container-fluid px-3">
                 <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
                     <span class="brand-lockup">
-                        <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+                        <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-light.svg') }}" alt="Astra symbol" />
                         <span class="brand-copy">
                             <span class="brand-kicker">Astra Tradebot</span>
                             <span class="brand-title">Astra</span>
@@ -1141,7 +1141,7 @@ def dashboard():
             <div class="container-fluid px-3">
                 <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
                     <span class="brand-lockup">
-                        <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+                        <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-light.svg') }}" alt="Astra symbol" />
                         <span class="brand-copy">
                             <span class="brand-kicker">Astra Tradebot</span>
                             <span class="brand-title">Fair Explore</span>

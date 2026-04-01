@@ -19,7 +19,7 @@
 }
 
 .astra-body::before {
-  opacity: 0.62;
+  opacity: 0.76;
   background-image:
     radial-gradient(circle at 8% 14%, rgba(255, 255, 255, 0.95) 0 1px, transparent 1.7px),
     radial-gradient(circle at 18% 72%, rgba(255, 255, 255, 0.85) 0 1px, transparent 1.8px),
@@ -38,12 +38,20 @@
     radial-gradient(circle at 61% 74%, rgba(170, 255, 222, 0.82) 0 1px, transparent 1.9px),
     radial-gradient(circle at 72% 48%, rgba(255, 255, 255, 0.9) 0 0.95px, transparent 1.8px),
     radial-gradient(circle at 83% 8%, rgba(255, 255, 255, 0.84) 0 0.95px, transparent 1.8px),
-    radial-gradient(circle at 96% 86%, rgba(190, 220, 255, 0.78) 0 1px, transparent 1.9px);
+    radial-gradient(circle at 96% 86%, rgba(190, 220, 255, 0.78) 0 1px, transparent 1.9px),
+    radial-gradient(circle at 11% 58%, rgba(255, 255, 255, 0.84) 0 0.95px, transparent 1.7px),
+    radial-gradient(circle at 21% 18%, rgba(179, 224, 255, 0.82) 0 0.95px, transparent 1.8px),
+    radial-gradient(circle at 33% 66%, rgba(255, 255, 255, 0.88) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 44% 40%, rgba(161, 255, 225, 0.84) 0 0.95px, transparent 1.8px),
+    radial-gradient(circle at 56% 86%, rgba(255, 255, 255, 0.88) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 68% 14%, rgba(188, 220, 255, 0.82) 0 0.95px, transparent 1.8px),
+    radial-gradient(circle at 76% 60%, rgba(255, 255, 255, 0.9) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 89% 44%, rgba(255, 245, 190, 0.78) 0 0.95px, transparent 1.8px);
   animation: astra-stars-drift-a 26s linear infinite, astra-stars-twinkle-a 5.2s ease-in-out infinite alternate;
 }
 
 .astra-body::after {
-  opacity: 0.42;
+  opacity: 0.56;
   background-image:
     radial-gradient(circle at 12% 46%, rgba(255, 255, 255, 0.95) 0 0.9px, transparent 1.6px),
     radial-gradient(circle at 22% 10%, rgba(255, 255, 255, 0.78) 0 0.9px, transparent 1.6px),
@@ -62,7 +70,15 @@
     radial-gradient(circle at 69% 90%, rgba(255, 255, 255, 0.9) 0 0.95px, transparent 1.8px),
     radial-gradient(circle at 78% 28%, rgba(170, 255, 223, 0.74) 0 0.9px, transparent 1.7px),
     radial-gradient(circle at 87% 58%, rgba(255, 255, 255, 0.8) 0 0.9px, transparent 1.7px),
-    radial-gradient(circle at 98% 18%, rgba(255, 255, 255, 0.84) 0 0.9px, transparent 1.7px);
+    radial-gradient(circle at 98% 18%, rgba(255, 255, 255, 0.84) 0 0.9px, transparent 1.7px),
+    radial-gradient(circle at 8% 22%, rgba(255, 255, 255, 0.82) 0 0.85px, transparent 1.6px),
+    radial-gradient(circle at 26% 42%, rgba(180, 220, 255, 0.76) 0 0.85px, transparent 1.7px),
+    radial-gradient(circle at 37% 84%, rgba(255, 255, 255, 0.84) 0 0.9px, transparent 1.7px),
+    radial-gradient(circle at 46% 14%, rgba(255, 233, 170, 0.72) 0 0.85px, transparent 1.7px),
+    radial-gradient(circle at 62% 70%, rgba(255, 255, 255, 0.82) 0 0.9px, transparent 1.7px),
+    radial-gradient(circle at 74% 52%, rgba(173, 255, 225, 0.76) 0 0.85px, transparent 1.7px),
+    radial-gradient(circle at 82% 16%, rgba(255, 255, 255, 0.8) 0 0.85px, transparent 1.6px),
+    radial-gradient(circle at 93% 74%, rgba(196, 225, 255, 0.78) 0 0.9px, transparent 1.7px);
   animation: astra-stars-drift-b 34s linear infinite reverse, astra-stars-twinkle-b 6.8s ease-in-out infinite alternate;
 }
 
@@ -97,23 +113,23 @@
 
 @keyframes astra-stars-twinkle-a {
   0% {
-    opacity: 0.3;
-    filter: brightness(0.9);
+    opacity: 0.4;
+    filter: brightness(0.98);
   }
   100% {
-    opacity: 0.55;
-    filter: brightness(1.18);
+    opacity: 0.68;
+    filter: brightness(1.28);
   }
 }
 
 @keyframes astra-stars-twinkle-b {
   0% {
-    opacity: 0.2;
-    filter: brightness(0.85);
+    opacity: 0.3;
+    filter: brightness(0.92);
   }
   100% {
-    opacity: 0.38;
-    filter: brightness(1.14);
+    opacity: 0.5;
+    filter: brightness(1.22);
   }
 }
 
@@ -259,11 +275,11 @@
 }
 
 [data-bs-theme="light"] .astra-body::before {
-  opacity: 0.22;
+  opacity: 0.28;
 }
 
 [data-bs-theme="light"] .astra-body::after {
-  opacity: 0.15;
+  opacity: 0.2;
 }
 
 [data-bs-theme="light"] .navbar-glass {

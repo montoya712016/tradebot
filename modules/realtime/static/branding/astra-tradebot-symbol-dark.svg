@@ -1,0 +1,38 @@
+<svg width="320" height="320" viewBox="0 0 320 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="starWeaveTopClipDark">
+      <rect x="0" y="0" width="320" height="156" />
+    </clipPath>
+    
+    <mask id="satelliteEraserDark" maskUnits="userSpaceOnUse">
+      <rect x="0" y="0" width="320" height="320" fill="white" />
+      <g transform="translate(160 160) rotate(-28)">
+        <circle cx="152" cy="0" r="11" fill="black" />
+      </g>
+    </mask>
+  </defs>
+
+  <g transform="translate(160 160)">
+    <path d="M0 -96L14 -14L96 0L14 14L0 96L-14 14L-96 0L-14 -14L0 -96Z" fill="none" stroke="#121A2B" stroke-width="5" stroke-linejoin="round"/>
+
+    <g mask="url(#satelliteEraserDark)" transform="translate(-160 -160)">
+      <g transform="translate(160 160)">
+        <g transform="rotate(-34)"><ellipse cx="0" cy="0" rx="160" ry="92" stroke="#121A2B" stroke-width="4" opacity="0.4"/></g>
+        <g transform="rotate(-28)"><ellipse cx="0" cy="0" rx="152" ry="86" stroke="#121A2B" stroke-width="6.5" opacity="0.9"/></g>
+        <g transform="rotate(-22)"><ellipse cx="0" cy="0" rx="144" ry="82" stroke="#121A2B" stroke-width="4.5" opacity="0.6"/></g>
+      </g>
+    </g>
+
+    <g transform="rotate(-28)">
+       <circle cx="152" cy="0" r="10" fill="none" stroke="#121A2B" stroke-width="5"/>
+    </g>
+
+    <g clip-path="url(#starWeaveTopClipDark)" transform="translate(-160 -160)">
+      <g transform="translate(160 160)">
+        <path d="M0 -96L14 -14L96 0L14 14L0 96L-14 14L-96 0L-14 -14L0 -96Z" fill="none" stroke="#121A2B" stroke-width="5" stroke-linejoin="round"/>
+      </g>
+    </g>
+    
+    <circle cx="0" cy="0" r="9" fill="#121A2B"/>
+  </g>
+</svg>

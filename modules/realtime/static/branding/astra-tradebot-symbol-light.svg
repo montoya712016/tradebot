@@ -1,0 +1,54 @@
+<svg width="320" height="320" viewBox="0 0 320 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="hoopBackClip">
+      <rect x="0" y="156" width="320" height="164" />
+    </clipPath>
+    <clipPath id="hoopFrontClip">
+      <rect x="0" y="0" width="320" height="156" />
+    </clipPath>
+  </defs>
+
+  <g transform="translate(160 160)">
+
+    <!-- ORBITS BACK (Behind Star) -->
+    <g clip-path="url(#hoopBackClip)" transform="translate(-160 -160)">
+      <g transform="translate(160 160)">
+        <g transform="rotate(-6)">
+          <ellipse cx="0" cy="0" rx="156" ry="32" stroke="#EEE8DF" stroke-width="2" fill="none" opacity="0.35"/>
+        </g>
+        <g transform="rotate(-14)">
+          <ellipse cx="0" cy="0" rx="156" ry="36" stroke="#EEE8DF" stroke-width="3.5" fill="none" opacity="0.6"/>
+        </g>
+        <g transform="rotate(-22)">
+          <ellipse cx="0" cy="0" rx="156" ry="40" stroke="#EEE8DF" stroke-width="2" fill="none" opacity="0.35"/>
+        </g>
+      </g>
+    </g>
+
+    <!-- STAR -->
+    <path
+      d="M0 -96L14 -14L96 0L14 14L0 96L-14 14L-96 0L-14 -14L0 -96Z"
+      fill="none"
+      stroke="#EEE8DF"
+      stroke-width="5"
+      stroke-linejoin="round"
+    />
+    <circle cx="0" cy="0" r="9" fill="#EEE8DF"/>
+
+    <!-- ORBITS FRONT (In front of Star) -->
+    <g clip-path="url(#hoopFrontClip)" transform="translate(-160 -160)">
+      <g transform="translate(160 160)">
+        <g transform="rotate(-6)">
+          <ellipse cx="0" cy="0" rx="156" ry="32" stroke="#EEE8DF" stroke-width="2" fill="none" opacity="0.35"/>
+        </g>
+        <g transform="rotate(-14)">
+          <ellipse cx="0" cy="0" rx="156" ry="36" stroke="#EEE8DF" stroke-width="3.5" fill="none" opacity="0.6"/>
+        </g>
+        <g transform="rotate(-22)">
+          <ellipse cx="0" cy="0" rx="156" ry="40" stroke="#EEE8DF" stroke-width="2" fill="none" opacity="0.35"/>
+        </g>
+      </g>
+    </g>
+
+  </g>
+</svg>

@@ -18,7 +18,7 @@
     {% if performance_visual_html %}
     <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
     {% endif %}
-    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260330b" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260331a" />
 
     <style>
       :root {
@@ -461,7 +461,7 @@
           <div class="site-nav">
             <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
               <span class="brand-lockup">
-                <img class="brand-mark" src="{{ brand_logo or url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+                <img class="brand-mark" src="{{ brand_logo or url_for('static', filename='branding/astra-tradebot-symbol-light.svg') }}" alt="Astra symbol" />
                 <span class="brand-copy">
                   <span class="brand-overline">Astra Tradebot</span>
                   <span class="brand-name">Systematic crypto infrastructure</span>
@@ -494,7 +494,7 @@
             <section class="hero-card p-4 p-lg-5">
               <div class="eyebrow mb-3">{{ hero_eyebrow }}</div>
               <div class="hero-brand">
-                <img src="{{ brand_logo or url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
+                <img src="{{ brand_logo or url_for('static', filename='branding/astra-tradebot-symbol-light.svg') }}" alt="Astra symbol" />
                 <div class="hero-brand-copy">
                   <div class="brand-line">{{ hero_brand_line or "Systematic research • execution discipline" }}</div>
                   <div class="brand-statement">{{ hero_brand_copy or "Private capital, clean systematic process, and production-grade operating standards." }}</div>

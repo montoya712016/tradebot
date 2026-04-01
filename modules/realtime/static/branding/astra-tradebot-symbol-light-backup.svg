@@ -1,0 +1,63 @@
+<svg width="320" height="320" viewBox="0 0 320 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Weave Clip -->
+    <clipPath id="starWeaveTopClipLight">
+      <rect x="0" y="0" width="320" height="156" />
+    </clipPath>
+    
+    <!-- Mask (Absolute Units to avoid scaling issues) -->
+    <mask id="satelliteEraserLight" maskUnits="userSpaceOnUse">
+      <rect x="0" y="0" width="320" height="320" fill="white" />
+      <g transform="translate(160 160) rotate(-28)">
+        <circle cx="152" cy="0" r="11" fill="black" />
+      </g>
+    </mask>
+  </defs>
+
+  <g transform="translate(160 160)">
+    <!-- 1. Star Base -->
+    <path
+      d="M0 -96L14 -14L96 0L14 14L0 96L-14 14L-96 0L-14 -14L0 -96Z"
+      fill="none"
+      stroke="#EEE8DF"
+      stroke-width="5"
+      stroke-linejoin="round"
+    />
+
+    <!-- 2. Orbits (with mask applied to centered group) -->
+    <g mask="url(#satelliteEraserLight)" transform="translate(-160 -160)">
+      <g transform="translate(160 160)">
+        <g transform="rotate(-34)">
+          <ellipse cx="0" cy="0" rx="160" ry="92" stroke="#EEE8DF" stroke-width="4" opacity="0.4"/>
+        </g>
+        <g transform="rotate(-28)">
+          <ellipse cx="0" cy="0" rx="152" ry="86" stroke="#EEE8DF" stroke-width="6.5" opacity="0.9"/>
+        </g>
+        <g transform="rotate(-22)">
+          <ellipse cx="0" cy="0" rx="144" ry="82" stroke="#EEE8DF" stroke-width="4.5" opacity="0.6"/>
+        </g>
+      </g>
+    </g>
+
+    <!-- 3. Satellite Ring (Fully transparent inside) -->
+    <g transform="rotate(-28)">
+       <circle cx="152" cy="0" r="10" fill="none" stroke="#EEE8DF" stroke-width="5"/>
+    </g>
+
+    <!-- 4. Star Front Clip -->
+    <g clip-path="url(#starWeaveTopClipLight)" transform="translate(-160 -160)">
+      <g transform="translate(160 160)">
+        <path
+          d="M0 -96L14 -14L96 0L14 14L0 96L-14 14L-96 0L-14 -14L0 -96Z"
+          fill="none"
+          stroke="#EEE8DF"
+          stroke-width="5"
+          stroke-linejoin="round"
+        />
+      </g>
+    </g>
+    
+    <!-- 5. Core -->
+    <circle cx="0" cy="0" r="9" fill="#EEE8DF"/>
+  </g>
+</svg>

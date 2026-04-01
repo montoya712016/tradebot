@@ -300,7 +300,7 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
             "landing.html",
             title="Astra Tradebot",
             runtime_badge="Realtime",
-            brand_logo=url_for("static", filename="branding/astra-tradebot-symbol-premium.svg"),
+            brand_logo=url_for("static", filename="branding/astra-tradebot-symbol-light.svg"),
             dashboard_url=url_for("dashboard"),
             login_url=url_for("login", next=url_for("dashboard")),
             register_url=url_for("register", next=url_for("dashboard")),

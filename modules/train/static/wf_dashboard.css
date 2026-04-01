@@ -21,11 +21,60 @@ body.wf-body {
   margin: 0;
   font-family: "Space Grotesk", "Segoe UI", Tahoma, sans-serif;
   color: var(--text);
+  position: relative;
+  overflow-x: hidden;
   background:
     radial-gradient(900px 500px at 10% 0%, rgba(52, 211, 153, 0.16), transparent 60%),
     radial-gradient(900px 500px at 90% 20%, rgba(245, 158, 11, 0.16), transparent 60%),
     linear-gradient(180deg, var(--bg-a), var(--bg-b) 40%, var(--bg-c) 100%);
   min-height: 100vh;
+}
+
+body.wf-body::before,
+body.wf-body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+body.wf-body::before {
+  opacity: 0.66;
+  background-image:
+    radial-gradient(circle at 7% 12%, rgba(255, 255, 255, 0.92) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 16% 68%, rgba(255, 255, 255, 0.82) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 24% 30%, rgba(167, 245, 215, 0.84) 0 1px, transparent 1.9px),
+    radial-gradient(circle at 33% 82%, rgba(255, 255, 255, 0.88) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 42% 16%, rgba(255, 221, 167, 0.78) 0 0.95px, transparent 1.8px),
+    radial-gradient(circle at 51% 54%, rgba(255, 255, 255, 0.82) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 61% 22%, rgba(255, 255, 255, 0.9) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 69% 74%, rgba(176, 238, 255, 0.8) 0 0.95px, transparent 1.8px),
+    radial-gradient(circle at 78% 34%, rgba(255, 255, 255, 0.86) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 87% 86%, rgba(255, 255, 255, 0.82) 0 0.95px, transparent 1.8px),
+    radial-gradient(circle at 95% 24%, rgba(255, 255, 255, 0.88) 0 1px, transparent 1.8px);
+  animation: wf-stars-drift-a 30s linear infinite, wf-stars-twinkle-a 5.6s ease-in-out infinite alternate;
+}
+
+body.wf-body::after {
+  opacity: 0.48;
+  background-image:
+    radial-gradient(circle at 10% 46%, rgba(255, 255, 255, 0.82) 0 0.9px, transparent 1.7px),
+    radial-gradient(circle at 20% 18%, rgba(255, 255, 255, 0.74) 0 0.85px, transparent 1.6px),
+    radial-gradient(circle at 29% 62%, rgba(167, 245, 215, 0.74) 0 0.9px, transparent 1.7px),
+    radial-gradient(circle at 39% 26%, rgba(255, 255, 255, 0.8) 0 0.85px, transparent 1.6px),
+    radial-gradient(circle at 48% 88%, rgba(255, 255, 255, 0.84) 0 0.9px, transparent 1.7px),
+    radial-gradient(circle at 58% 40%, rgba(255, 226, 170, 0.72) 0 0.85px, transparent 1.7px),
+    radial-gradient(circle at 67% 12%, rgba(255, 255, 255, 0.8) 0 0.9px, transparent 1.7px),
+    radial-gradient(circle at 76% 58%, rgba(255, 255, 255, 0.84) 0 0.9px, transparent 1.7px),
+    radial-gradient(circle at 85% 30%, rgba(176, 238, 255, 0.74) 0 0.85px, transparent 1.7px),
+    radial-gradient(circle at 93% 70%, rgba(255, 255, 255, 0.8) 0 0.9px, transparent 1.7px);
+  animation: wf-stars-drift-b 38s linear infinite reverse, wf-stars-twinkle-b 6.8s ease-in-out infinite alternate;
+}
+
+body.wf-body > * {
+  position: relative;
+  z-index: 1;
 }
 
 .topbar {
@@ -418,6 +467,52 @@ body.wf-body {
 
 .dot {
   opacity: 0.5;
+}
+
+@keyframes wf-stars-drift-a {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-9px, 10px, 0) scale(1.01);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes wf-stars-drift-b {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(11px, -9px, 0) scale(1.014);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes wf-stars-twinkle-a {
+  0% {
+    opacity: 0.34;
+    filter: brightness(0.96);
+  }
+  100% {
+    opacity: 0.6;
+    filter: brightness(1.22);
+  }
+}
+
+@keyframes wf-stars-twinkle-b {
+  0% {
+    opacity: 0.24;
+    filter: brightness(0.9);
+  }
+  100% {
+    opacity: 0.44;
+    filter: brightness(1.16);
+  }
 }
 
 @keyframes rise {

@@ -1,424 +1,431 @@
-<!doctype html>
+!doctype html>
 <html lang="pt-br" data-bs-theme="dark">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{{ title or "Astra Tradebot — Usuários" }}</title>
 
-    <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-      rel="stylesheet"
-      integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
-      crossorigin="anonymous"
-    />
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
-    />
-    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260330b" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}?v=20260126a" />
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title or "Astra Tradebot — Usuários" }}</title>
 
-    <style>
-      .admin-wrap {
-        max-width: 1320px;
-        margin: 0 auto;
-      }
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260331a" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}?v=20260126a" />
 
-      .hero-card {
-        overflow: hidden;
-      }
+  <style>
+    .admin-wrap {
+      max-width: 1320px;
+      margin: 0 auto;
+    }
 
-      .hero-card::before {
-        content: "";
-        position: absolute;
-        inset: 0;
-        background:
-          radial-gradient(700px 260px at 10% 0%, rgba(124, 92, 255, 0.16), transparent 60%),
-          radial-gradient(480px 220px at 90% 0%, rgba(0, 255, 179, 0.09), transparent 60%);
-        pointer-events: none;
-      }
+    .hero-card {
+      overflow: hidden;
+    }
 
-      .hero-card .card-body {
-        position: relative;
-      }
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(700px 260px at 10% 0%, rgba(124, 92, 255, 0.16), transparent 60%),
+        radial-gradient(480px 220px at 90% 0%, rgba(0, 255, 179, 0.09), transparent 60%);
+      pointer-events: none;
+    }
 
-      .hero-line {
-        color: rgba(255,255,255,0.56);
-        font-size: 0.78rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        font-weight: 700;
-      }
+    .hero-card .card-body {
+      position: relative;
+    }
 
-      .hero-title {
-        font-size: clamp(2rem, 3vw, 2.7rem);
-        line-height: 1.05;
-        letter-spacing: -0.03em;
-      }
+    .hero-line {
+      color: rgba(255, 255, 255, 0.56);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 700;
+    }
 
-      .hero-title .accent {
-        color: #00ffb3;
-      }
+    .hero-title {
+      font-size: clamp(2rem, 3vw, 2.7rem);
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+    }
 
-      .hero-subtitle {
-        color: rgba(255,255,255,0.68);
-        max-width: 760px;
-      }
+    .hero-title .accent {
+      color: #00ffb3;
+    }
 
-      .muted-chip {
-        border: 1px solid rgba(255,255,255,0.10);
-        background: rgba(255,255,255,0.04);
-        border-radius: 999px;
-        padding: 0.35rem 0.75rem;
-        color: rgba(255,255,255,0.72);
-        font-size: 0.8rem;
-      }
+    .hero-subtitle {
+      color: rgba(255, 255, 255, 0.68);
+      max-width: 760px;
+    }
 
+    .muted-chip {
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 999px;
+      padding: 0.35rem 0.75rem;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 0.8rem;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .stat-card {
+      padding: 1rem 1.1rem;
+      border-radius: 16px;
+    }
+
+    .stat-label {
+      color: rgba(255, 255, 255, 0.58);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 700;
+    }
+
+    .stat-value {
+      font-size: 1.9rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-top: 0.15rem;
+    }
+
+    .stat-value.pending {
+      color: #ffc85c;
+    }
+
+    .stat-value.enabled {
+      color: #00ffb3;
+    }
+
+    .stat-value.admin {
+      color: #7c5cff;
+    }
+
+    .stat-value.owner {
+      color: #ff7af6;
+    }
+
+    .toolbar-card {
+      padding: 0.9rem 1rem;
+      border-radius: 16px;
+    }
+
+    .toolbar-meta {
+      color: rgba(255, 255, 255, 0.62);
+      font-size: 0.9rem;
+    }
+
+    .alert-glass {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 16px;
+    }
+
+    .alert-glass.alert-danger {
+      background: rgba(255, 92, 122, 0.10);
+      border-color: rgba(255, 92, 122, 0.22);
+      color: #ffd9e2;
+    }
+
+    .alert-glass.alert-success {
+      background: rgba(0, 255, 179, 0.10);
+      border-color: rgba(0, 255, 179, 0.18);
+      color: #d7fff1;
+    }
+
+    .users-card {
+      overflow: hidden;
+    }
+
+    .table td,
+    .table th {
+      vertical-align: middle;
+    }
+
+    .table tbody tr:hover {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .cell-mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.88rem;
+    }
+
+    .status-badge {
+      border-radius: 999px;
+      padding: 0.45rem 0.7rem;
+      font-weight: 700;
+    }
+
+    .status-pending {
+      color: #161616;
+      background: linear-gradient(135deg, #ffc85c, #f5df72);
+    }
+
+    .status-enabled {
+      color: #03261d;
+      background: linear-gradient(135deg, #00ffb3, #72ffd4);
+    }
+
+    .role-badge {
+      border-radius: 999px;
+      padding: 0.45rem 0.7rem;
+      font-weight: 700;
+    }
+
+    .role-admin {
+      color: #f5f0ff;
+      background: linear-gradient(135deg, #7c5cff, #5a8cff);
+    }
+
+    .role-user {
+      color: rgba(255, 255, 255, 0.78);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .role-owner {
+      color: #fff4ff;
+      background: linear-gradient(135deg, #ff4fc3, #a45cff);
+    }
+
+    .actions-wrap {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .empty-state {
+      padding: 4rem 1.5rem;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.58);
+    }
+
+    @media (max-width: 992px) {
       .stats-grid {
-        display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-        gap: 1rem;
+        grid-template-columns: 1fr;
       }
+    }
+  </style>
+</head>
 
-      .stat-card {
-        padding: 1rem 1.1rem;
-        border-radius: 16px;
-      }
-
-      .stat-label {
-        color: rgba(255,255,255,0.58);
-        font-size: 0.76rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        font-weight: 700;
-      }
-
-      .stat-value {
-        font-size: 1.9rem;
-        font-weight: 700;
-        letter-spacing: -0.03em;
-        margin-top: 0.15rem;
-      }
-
-      .stat-value.pending {
-        color: #ffc85c;
-      }
-
-      .stat-value.enabled {
-        color: #00ffb3;
-      }
-
-      .stat-value.admin {
-        color: #7c5cff;
-      }
-
-      .stat-value.owner {
-        color: #ff7af6;
-      }
-
-      .toolbar-card {
-        padding: 0.9rem 1rem;
-        border-radius: 16px;
-      }
-
-      .toolbar-meta {
-        color: rgba(255,255,255,0.62);
-        font-size: 0.9rem;
-      }
-
-      .alert-glass {
-        border: 1px solid rgba(255,255,255,0.08);
-        background: rgba(255,255,255,0.04);
-        border-radius: 16px;
-      }
-
-      .alert-glass.alert-danger {
-        background: rgba(255, 92, 122, 0.10);
-        border-color: rgba(255, 92, 122, 0.22);
-        color: #ffd9e2;
-      }
-
-      .alert-glass.alert-success {
-        background: rgba(0, 255, 179, 0.10);
-        border-color: rgba(0, 255, 179, 0.18);
-        color: #d7fff1;
-      }
-
-      .users-card {
-        overflow: hidden;
-      }
-
-      .table td, .table th {
-        vertical-align: middle;
-      }
-
-      .table tbody tr:hover {
-        background: rgba(255,255,255,0.02);
-      }
-
-      .cell-mono {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 0.88rem;
-      }
-
-      .status-badge {
-        border-radius: 999px;
-        padding: 0.45rem 0.7rem;
-        font-weight: 700;
-      }
-
-      .status-pending {
-        color: #161616;
-        background: linear-gradient(135deg, #ffc85c, #f5df72);
-      }
-
-      .status-enabled {
-        color: #03261d;
-        background: linear-gradient(135deg, #00ffb3, #72ffd4);
-      }
-
-      .role-badge {
-        border-radius: 999px;
-        padding: 0.45rem 0.7rem;
-        font-weight: 700;
-      }
-
-      .role-admin {
-        color: #f5f0ff;
-        background: linear-gradient(135deg, #7c5cff, #5a8cff);
-      }
-
-      .role-user {
-        color: rgba(255,255,255,0.78);
-        background: rgba(255,255,255,0.08);
-      }
-
-      .role-owner {
-        color: #fff4ff;
-        background: linear-gradient(135deg, #ff4fc3, #a45cff);
-      }
-
-      .actions-wrap {
-        display: flex;
-        justify-content: flex-end;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-      }
-
-      .empty-state {
-        padding: 4rem 1.5rem;
-        text-align: center;
-        color: rgba(255,255,255,0.58);
-      }
-
-      @media (max-width: 992px) {
-        .stats-grid {
-          grid-template-columns: 1fr;
-        }
-      }
-    </style>
-  </head>
-  <body class="astra-body">
-    <header class="navbar navbar-expand-lg navbar-glass sticky-top">
-      <div class="container-fluid px-3">
-        <a class="navbar-brand d-flex align-items-center gap-2" href="{{ home_url }}">
-          <span class="brand-lockup">
-            <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-premium.svg') }}" alt="Astra symbol" />
-            <span class="brand-copy">
-              <span class="brand-kicker">Astra Tradebot</span>
-              <span class="brand-title">Access Control</span>
-            </span>
+<body class="astra-body">
+  <header class="navbar navbar-expand-lg navbar-glass sticky-top">
+    <div class="container-fluid px-3">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="{{ home_url }}">
+        <span class="brand-lockup">
+          <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-light.svg') }}"
+            alt="Astra symbol" />
+          <span class="brand-copy">
+            <span class="brand-kicker">Astra Tradebot</span>
+            <span class="brand-title">Access Control</span>
           </span>
-          <span class="badge text-bg-secondary ms-1">{{ badge or "Admin" }}</span>
+        </span>
+        <span class="badge text-bg-secondary ms-1">{{ badge or "Admin" }}</span>
+      </a>
+      <div class="d-flex align-items-center gap-2">
+        <a href="{{ home_url }}" class="btn btn-sm btn-outline-secondary">
+          <i class="bi bi-arrow-left"></i>
+          <span class="d-none d-sm-inline ms-1">Voltar</span>
         </a>
-        <div class="d-flex align-items-center gap-2">
-          <a href="{{ home_url }}" class="btn btn-sm btn-outline-secondary">
-            <i class="bi bi-arrow-left"></i>
-            <span class="d-none d-sm-inline ms-1">Voltar</span>
-          </a>
-          <form method="post" action="{{ url_for('logout') }}" class="m-0">
-            <button class="btn btn-sm btn-outline-secondary" type="submit">
-              <i class="bi bi-box-arrow-right"></i>
-              <span class="d-none d-sm-inline ms-1">Sair</span>
-            </button>
-          </form>
-        </div>
+        <form method="post" action="{{ url_for('logout') }}" class="m-0">
+          <button class="btn btn-sm btn-outline-secondary" type="submit">
+            <i class="bi bi-box-arrow-right"></i>
+            <span class="d-none d-sm-inline ms-1">Sair</span>
+          </button>
+        </form>
       </div>
-    </header>
+    </div>
+  </header>
 
-    <main class="container-fluid px-3 py-3">
-      <div class="admin-wrap d-grid gap-3">
-        <section class="card card-glass">
-          <div class="card-body p-4">
-            <div class="d-flex flex-column flex-lg-row justify-content-between align-items-start gap-3">
-              <div>
-                <div class="small text-uppercase text-secondary fw-semibold mb-2">{{ eyebrow or "Administração" }}</div>
-                <h1 class="h2 fw-bold mb-2">{{ heading or "Usuários cadastrados" }}</h1>
-                <div class="text-secondary">{{ subtitle or "Aprove, bloqueie ou remova acessos pendentes." }}</div>
-              </div>
-              <div class="d-flex flex-wrap gap-2">
-                <span class="muted-chip"><strong>{{ total_users }}</strong> contas</span>
-                <span class="muted-chip"><strong>{{ pending_users }}</strong> pendentes</span>
-                <span class="muted-chip"><strong>{{ enabled_users }}</strong> liberadas</span>
-                <span class="muted-chip"><strong>{{ admin_users }}</strong> admins</span>
-                <span class="muted-chip"><strong>{{ owner_users }}</strong> owners</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card card-glass hero-card">
-          <div class="card-body p-4 p-lg-5">
-            <div class="d-flex flex-column flex-xl-row justify-content-between align-items-start gap-4">
-              <div>
-                <div class="hero-line mb-2">{{ eyebrow or "Administração" }}</div>
-                <h1 class="hero-title fw-bold mb-3">{{ heading or "Usuários" }} <span class="accent">Astra Access</span></h1>
-                <div class="hero-subtitle">
-                  {{ subtitle or "Aprove, bloqueie ou remova acessos pendentes mantendo o mesmo padrão visual e operacional do restante dos dashboards." }}
-                </div>
-              </div>
-              <div class="d-flex flex-wrap gap-2 justify-content-xl-end">
-                <span class="muted-chip"><i class="bi bi-shield-check me-2"></i>gestão manual de acesso</span>
-                <span class="muted-chip"><i class="bi bi-person-plus me-2"></i>cadastro assistido</span>
-                <span class="muted-chip"><i class="bi bi-database-lock me-2"></i>base local protegida</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="stats-grid">
-          <div class="card card-glass stat-card">
-            <div class="stat-label">Contas cadastradas</div>
-            <div class="stat-value">{{ total_users }}</div>
-          </div>
-          <div class="card card-glass stat-card">
-            <div class="stat-label">Pendentes</div>
-            <div class="stat-value pending">{{ pending_users }}</div>
-          </div>
-          <div class="card card-glass stat-card">
-            <div class="stat-label">Liberadas</div>
-            <div class="stat-value enabled">{{ enabled_users }}</div>
-          </div>
-          <div class="card card-glass stat-card">
-            <div class="stat-label">Admins</div>
-            <div class="stat-value admin">{{ admin_users }}</div>
-          </div>
-          <div class="card card-glass stat-card">
-            <div class="stat-label">Owners</div>
-            <div class="stat-value owner">{{ owner_users }}</div>
-          </div>
-        </section>
-
-        <section class="card card-glass toolbar-card">
+  <main class="container-fluid px-3 py-3">
+    <div class="admin-wrap d-grid gap-3">
+      <section class="card card-glass">
+        <div class="card-body p-4">
           <div class="d-flex flex-column flex-lg-row justify-content-between align-items-start gap-3">
             <div>
-              <div class="fw-semibold">Painel de aprovação</div>
-              <div class="toolbar-meta">Ações rápidas para conceder, bloquear ou excluir acesso sem editar o JSON manualmente.</div>
+              <div class="small text-uppercase text-secondary fw-semibold mb-2">{{ eyebrow or "Administração" }}</div>
+              <h1 class="h2 fw-bold mb-2">{{ heading or "Usuários cadastrados" }}</h1>
+              <div class="text-secondary">{{ subtitle or "Aprove, bloqueie ou remova acessos pendentes." }}</div>
             </div>
-            <div class="d-flex gap-2 flex-wrap">
-              <a href="{{ home_url }}" class="btn btn-outline-secondary btn-sm">
-                <i class="bi bi-speedometer2 me-2"></i>Voltar ao dashboard
-              </a>
-              <a href="{{ url_for('register') }}" class="btn btn-outline-secondary btn-sm">
-                <i class="bi bi-person-plus me-2"></i>Nova conta
-              </a>
-            </div>
-          </div>
-        </section>
-
-        {% if flash_error %}
-        <div class="alert alert-glass alert-danger mb-0">{{ flash_error }}</div>
-        {% endif %}
-        {% if flash_success %}
-        <div class="alert alert-glass alert-success mb-0">{{ flash_success }}</div>
-        {% endif %}
-
-        <section class="card card-glass users-card">
-          <div class="card-body p-0">
-            <div class="table-responsive">
-              <table class="table table-hover align-middle mb-0">
-                <thead class="table-head">
-                  <tr>
-                    <th>Nome</th>
-                    <th>CPF</th>
-                    <th>Telefone</th>
-                    <th>Email</th>
-                    <th>Usuário</th>
-                    <th>Status</th>
-                    <th>Papel</th>
-                    <th>Criado em</th>
-                    <th>Aprovado em</th>
-                    <th class="text-end">Ações</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {% for user in users %}
-                  <tr>
-                    <td>{{ user.full_name }}</td>
-                    <td class="cell-mono">{{ user.cpf }}</td>
-                    <td class="cell-mono">{{ user.phone }}</td>
-                    <td>{{ user.email }}</td>
-                    <td class="cell-mono">{{ user.username }}</td>
-                    <td>
-                      {% if user.enabled %}
-                      <span class="status-badge status-enabled">Liberado</span>
-                      {% else %}
-                      <span class="status-badge status-pending">Pendente</span>
-                      {% endif %}
-                    </td>
-                    <td>
-                      {% if user.is_owner %}
-                      <span class="role-badge role-owner">Owner</span>
-                      {% elif user.is_admin %}
-                      <span class="role-badge role-admin">Admin</span>
-                      {% else %}
-                      <span class="role-badge role-user">Usuário</span>
-                      {% endif %}
-                    </td>
-                    <td class="small text-secondary">{{ user.created_at or '—' }}</td>
-                    <td class="small text-secondary">{{ user.approved_at or '—' }}</td>
-                    <td class="text-end">
-                      <div class="actions-wrap">
-                        <form method="post" action="{{ action_url }}" class="m-0">
-                          <input type="hidden" name="username" value="{{ user.username }}" />
-                          <input type="hidden" name="action" value="{{ 'remove_owner' if user.is_owner else 'make_owner' }}" />
-                          <button type="submit" class="btn btn-sm {{ 'btn-outline-danger' if user.is_owner else 'btn-outline-info' }}">
-                            {{ 'Remover owner' if user.is_owner else 'Tornar owner' }}
-                          </button>
-                        </form>
-                        <form method="post" action="{{ action_url }}" class="m-0">
-                          <input type="hidden" name="username" value="{{ user.username }}" />
-                          <input type="hidden" name="action" value="{{ 'remove_admin' if user.is_admin else 'make_admin' }}" />
-                          <button type="submit" class="btn btn-sm {{ 'btn-outline-primary' if user.is_admin else 'btn-outline-secondary' }}">
-                            {{ 'Remover admin' if user.is_admin else 'Tornar admin' }}
-                          </button>
-                        </form>
-                        <form method="post" action="{{ action_url }}" class="m-0">
-                          <input type="hidden" name="username" value="{{ user.username }}" />
-                          <input type="hidden" name="action" value="{{ 'disable' if user.enabled else 'enable' }}" />
-                          <button type="submit" class="btn btn-sm {{ 'btn-outline-warning' if user.enabled else 'btn-outline-success' }}">
-                            {{ 'Bloquear' if user.enabled else 'Liberar' }}
-                          </button>
-                        </form>
-                        <form method="post" action="{{ action_url }}" class="m-0" onsubmit="return confirm('Remover o usuário {{ user.username }}?');">
-                          <input type="hidden" name="username" value="{{ user.username }}" />
-                          <input type="hidden" name="action" value="delete" />
-                          <button type="submit" class="btn btn-sm btn-outline-danger">Excluir</button>
-                        </form>
-                      </div>
-                    </td>
-                  </tr>
-                  {% else %}
-                  <tr>
-                    <td colspan="10" class="empty-state">Nenhum usuário cadastrado.</td>
-                  </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
+            <div class="d-flex flex-wrap gap-2">
+              <span class="muted-chip"><strong>{{ total_users }}</strong> contas</span>
+              <span class="muted-chip"><strong>{{ pending_users }}</strong> pendentes</span>
+              <span class="muted-chip"><strong>{{ enabled_users }}</strong> liberadas</span>
+              <span class="muted-chip"><strong>{{ admin_users }}</strong> admins</span>
+              <span class="muted-chip"><strong>{{ owner_users }}</strong> owners</span>
             </div>
           </div>
-        </section>
-      </div>
-    </main>
-  </body>
+        </div>
+      </section>
+
+      <section class="card card-glass hero-card">
+        <div class="card-body p-4 p-lg-5">
+          <div class="d-flex flex-column flex-xl-row justify-content-between align-items-start gap-4">
+            <div>
+              <div class="hero-line mb-2">{{ eyebrow or "Administração" }}</div>
+              <h1 class="hero-title fw-bold mb-3">{{ heading or "Usuários" }} <span class="accent">Astra Access</span>
+              </h1>
+              <div class="hero-subtitle">
+                {{ subtitle or "Aprove, bloqueie ou remova acessos pendentes mantendo o mesmo padrão visual e
+                operacional do restante dos dashboards." }}
+              </div>
+            </div>
+            <div class="d-flex flex-wrap gap-2 justify-content-xl-end">
+              <span class="muted-chip"><i class="bi bi-shield-check me-2"></i>gestão manual de acesso</span>
+              <span class="muted-chip"><i class="bi bi-person-plus me-2"></i>cadastro assistido</span>
+              <span class="muted-chip"><i class="bi bi-database-lock me-2"></i>base local protegida</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stats-grid">
+        <div class="card card-glass stat-card">
+          <div class="stat-label">Contas cadastradas</div>
+          <div class="stat-value">{{ total_users }}</div>
+        </div>
+        <div class="card card-glass stat-card">
+          <div class="stat-label">Pendentes</div>
+          <div class="stat-value pending">{{ pending_users }}</div>
+        </div>
+        <div class="card card-glass stat-card">
+          <div class="stat-label">Liberadas</div>
+          <div class="stat-value enabled">{{ enabled_users }}</div>
+        </div>
+        <div class="card card-glass stat-card">
+          <div class="stat-label">Admins</div>
+          <div class="stat-value admin">{{ admin_users }}</div>
+        </div>
+        <div class="card card-glass stat-card">
+          <div class="stat-label">Owners</div>
+          <div class="stat-value owner">{{ owner_users }}</div>
+        </div>
+      </section>
+
+      <section class="card card-glass toolbar-card">
+        <div class="d-flex flex-column flex-lg-row justify-content-between align-items-start gap-3">
+          <div>
+            <div class="fw-semibold">Painel de aprovação</div>
+            <div class="toolbar-meta">Ações rápidas para conceder, bloquear ou excluir acesso sem editar o JSON
+              manualmente.</div>
+          </div>
+          <div class="d-flex gap-2 flex-wrap">
+            <a href="{{ home_url }}" class="btn btn-outline-secondary btn-sm">
+              <i class="bi bi-speedometer2 me-2"></i>Voltar ao dashboard
+            </a>
+            <a href="{{ url_for('register') }}" class="btn btn-outline-secondary btn-sm">
+              <i class="bi bi-person-plus me-2"></i>Nova conta
+            </a>
+          </div>
+        </div>
+      </section>
+
+      {% if flash_error %}
+      <div class="alert alert-glass alert-danger mb-0">{{ flash_error }}</div>
+      {% endif %}
+      {% if flash_success %}
+      <div class="alert alert-glass alert-success mb-0">{{ flash_success }}</div>
+      {% endif %}
+
+      <section class="card card-glass users-card">
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-head">
+                <tr>
+                  <th>Nome</th>
+                  <th>CPF</th>
+                  <th>Telefone</th>
+                  <th>Email</th>
+                  <th>Usuário</th>
+                  <th>Status</th>
+                  <th>Papel</th>
+                  <th>Criado em</th>
+                  <th>Aprovado em</th>
+                  <th class="text-end">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for user in users %}
+                <tr>
+                  <td>{{ user.full_name }}</td>
+                  <td class="cell-mono">{{ user.cpf }}</td>
+                  <td class="cell-mono">{{ user.phone }}</td>
+                  <td>{{ user.email }}</td>
+                  <td class="cell-mono">{{ user.username }}</td>
+                  <td>
+                    {% if user.enabled %}
+                    <span class="status-badge status-enabled">Liberado</span>
+                    {% else %}
+                    <span class="status-badge status-pending">Pendente</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if user.is_owner %}
+                    <span class="role-badge role-owner">Owner</span>
+                    {% elif user.is_admin %}
+                    <span class="role-badge role-admin">Admin</span>
+                    {% else %}
+                    <span class="role-badge role-user">Usuário</span>
+                    {% endif %}
+                  </td>
+                  <td class="small text-secondary">{{ user.created_at or '—' }}</td>
+                  <td class="small text-secondary">{{ user.approved_at or '—' }}</td>
+                  <td class="text-end">
+                    <div class="actions-wrap">
+                      <form method="post" action="{{ action_url }}" class="m-0">
+                        <input type="hidden" name="username" value="{{ user.username }}" />
+                        <input type="hidden" name="action"
+                          value="{{ 'remove_owner' if user.is_owner else 'make_owner' }}" />
+                        <button type="submit"
+                          class="btn btn-sm {{ 'btn-outline-danger' if user.is_owner else 'btn-outline-info' }}">
+                          {{ 'Remover owner' if user.is_owner else 'Tornar owner' }}
+                        </button>
+                      </form>
+                      <form method="post" action="{{ action_url }}" class="m-0">
+                        <input type="hidden" name="username" value="{{ user.username }}" />
+                        <input type="hidden" name="action"
+                          value="{{ 'remove_admin' if user.is_admin else 'make_admin' }}" />
+                        <button type="submit"
+                          class="btn btn-sm {{ 'btn-outline-primary' if user.is_admin else 'btn-outline-secondary' }}">
+                          {{ 'Remover admin' if user.is_admin else 'Tornar admin' }}
+                        </button>
+                      </form>
+                      <form method="post" action="{{ action_url }}" class="m-0">
+                        <input type="hidden" name="username" value="{{ user.username }}" />
+                        <input type="hidden" name="action" value="{{ 'disable' if user.enabled else 'enable' }}" />
+                        <button type="submit"
+                          class="btn btn-sm {{ 'btn-outline-warning' if user.enabled else 'btn-outline-success' }}">
+                          {{ 'Bloquear' if user.enabled else 'Liberar' }}
+                        </button>
+                      </form>
+                      <form method="post" action="{{ action_url }}" class="m-0"
+                        onsubmit="return confirm('Remover o usuário {{ user.username }}?');">
+                        <input type="hidden" name="username" value="{{ user.username }}" />
+                        <input type="hidden" name="action" value="delete" />
+                        <button type="submit" class="btn btn-sm btn-outline-danger">Excluir</button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+                {% else %}
+                <tr>
+                  <td colspan="10" class="empty-state">Nenhum usuário cadastrado.</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+
 </html>
