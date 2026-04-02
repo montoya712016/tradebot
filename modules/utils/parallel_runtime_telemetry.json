@@ -1,25 +1,25 @@
 {
   "version": 1,
-  "updated_utc": "2026-04-01T21:09:10.637375",
+  "updated_utc": "2026-04-02T02:23:16.756126",
   "hosts": {
     "cpu32_mem65276": {
       "cpu_count": 32,
       "total_mb": 65275.8515625,
-      "updated_utc": "2026-04-01T21:09:10.636789",
+      "updated_utc": "2026-04-02T02:23:16.754616",
       "workloads": {
         "ohlc_1m": {
-          "runs": 5,
-          "success_runs": 5,
+          "runs": 8,
+          "success_runs": 8,
           "last_workers": 12,
-          "last_duration_s": 7.075301885604858,
-          "last_peak_process_mb": 367.52734375,
-          "last_estimated_per_worker_mb": 30.627278645833332,
-          "last_peak_used_pct": 21.2,
-          "last_min_available_mb": 51431.09765625,
-          "p90_estimated_per_worker_mb": 30.627278645833332,
-          "p95_estimated_per_worker_mb": 30.627278645833332,
-          "max_estimated_per_worker_mb": 30.627278645833332,
-          "p90_seconds_per_worker": 0.5896084904670715,
+          "last_duration_s": 3.049553155899048,
+          "last_peak_process_mb": 456.9375,
+          "last_estimated_per_worker_mb": 38.078125,
+          "last_peak_used_pct": 27.5,
+          "last_min_available_mb": 47331.36328125,
+          "p90_estimated_per_worker_mb": 36.7568359375,
+          "p95_estimated_per_worker_mb": 38.078125,
+          "max_estimated_per_worker_mb": 38.078125,
+          "p90_seconds_per_worker": 0.29701616366704303,
           "p90_seconds_per_unit": 0.0,
           "max_successful_workers": 12,
           "samples": [
@@ -112,22 +112,76 @@
                 "cmd0": "C:\\Program Files\\Python312\\python.exe",
                 "cwd": "D:\\astra\\tradebot"
               }
+            },
+            {
+              "utc": "2026-04-02T01:13:07.171468",
+              "success": true,
+              "workers": 12,
+              "duration_s": 3.5641939640045166,
+              "peak_process_mb": 441.08203125,
+              "estimated_per_worker_mb": 36.7568359375,
+              "peak_used_pct": 25.7,
+              "min_available_mb": 48519.9921875,
+              "units": 0,
+              "unit_name": "symbols",
+              "seconds_per_worker": 0.29701616366704303,
+              "seconds_per_unit": 0.0,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:38.991845",
+              "success": true,
+              "workers": 12,
+              "duration_s": 3.0502398014068604,
+              "peak_process_mb": 307.33203125,
+              "estimated_per_worker_mb": 25.611002604166668,
+              "peak_used_pct": 27.7,
+              "min_available_mb": 47193.5625,
+              "units": 0,
+              "unit_name": "symbols",
+              "seconds_per_worker": 0.25418665011723834,
+              "seconds_per_unit": 0.0,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:22:55.112061",
+              "success": true,
+              "workers": 12,
+              "duration_s": 3.049553155899048,
+              "peak_process_mb": 456.9375,
+              "estimated_per_worker_mb": 38.078125,
+              "peak_used_pct": 27.5,
+              "min_available_mb": 47331.36328125,
+              "units": 0,
+              "unit_name": "symbols",
+              "seconds_per_worker": 0.25412942965825397,
+              "seconds_per_unit": 0.0,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
             }
           ]
         },
         "ohlc_5m": {
-          "runs": 5,
-          "success_runs": 5,
+          "runs": 8,
+          "success_runs": 8,
           "last_workers": 12,
-          "last_duration_s": 2.5366294384002686,
-          "last_peak_process_mb": 314.6484375,
-          "last_estimated_per_worker_mb": 26.220703125,
-          "last_peak_used_pct": 21.6,
-          "last_min_available_mb": 51166.6640625,
-          "p90_estimated_per_worker_mb": 26.220703125,
-          "p95_estimated_per_worker_mb": 26.220703125,
-          "max_estimated_per_worker_mb": 26.220703125,
-          "p90_seconds_per_worker": 0.2113857865333557,
+          "last_duration_s": 2.5693514347076416,
+          "last_peak_process_mb": 327.2890625,
+          "last_estimated_per_worker_mb": 27.274088541666668,
+          "last_peak_used_pct": 27.2,
+          "last_min_available_mb": 47521.7421875,
+          "p90_estimated_per_worker_mb": 26.4404296875,
+          "p95_estimated_per_worker_mb": 27.274088541666668,
+          "max_estimated_per_worker_mb": 27.274088541666668,
+          "p90_seconds_per_worker": 0.25416894753774005,
           "p90_seconds_per_unit": 0.0,
           "max_successful_workers": 12,
           "samples": [
@@ -220,23 +274,77 @@
                 "cmd0": "C:\\Program Files\\Python312\\python.exe",
                 "cwd": "D:\\astra\\tradebot"
               }
+            },
+            {
+              "utc": "2026-04-02T01:13:10.226823",
+              "success": true,
+              "workers": 12,
+              "duration_s": 3.0508406162261963,
+              "peak_process_mb": 310.11328125,
+              "estimated_per_worker_mb": 25.8427734375,
+              "peak_used_pct": 25.7,
+              "min_available_mb": 48525.85546875,
+              "units": 0,
+              "unit_name": "symbols",
+              "seconds_per_worker": 0.2542367180188497,
+              "seconds_per_unit": 0.0,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:42.045417",
+              "success": true,
+              "workers": 12,
+              "duration_s": 3.050027370452881,
+              "peak_process_mb": 317.28515625,
+              "estimated_per_worker_mb": 26.4404296875,
+              "peak_used_pct": 27.6,
+              "min_available_mb": 47268.0703125,
+              "units": 0,
+              "unit_name": "symbols",
+              "seconds_per_worker": 0.25416894753774005,
+              "seconds_per_unit": 0.0,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:22:57.688566",
+              "success": true,
+              "workers": 12,
+              "duration_s": 2.5693514347076416,
+              "peak_process_mb": 327.2890625,
+              "estimated_per_worker_mb": 27.274088541666668,
+              "peak_used_pct": 27.2,
+              "min_available_mb": 47521.7421875,
+              "units": 0,
+              "unit_name": "symbols",
+              "seconds_per_worker": 0.21411261955897012,
+              "seconds_per_unit": 0.0,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
             }
           ]
         },
         "feature_cache_global": {
-          "runs": 5,
-          "success_runs": 5,
+          "runs": 8,
+          "success_runs": 8,
           "last_workers": 8,
-          "last_duration_s": 1.523127794265747,
-          "last_peak_process_mb": 189.38671875,
-          "last_estimated_per_worker_mb": 23.67333984375,
-          "last_peak_used_pct": 21.7,
-          "last_min_available_mb": 51096.53515625,
-          "p90_estimated_per_worker_mb": 1975.091517857143,
+          "last_duration_s": 1.5428638458251953,
+          "last_peak_process_mb": 191.40625,
+          "last_estimated_per_worker_mb": 23.92578125,
+          "last_peak_used_pct": 27.1,
+          "last_min_available_mb": 47563.015625,
+          "p90_estimated_per_worker_mb": 27.146205357142858,
           "p95_estimated_per_worker_mb": 1975.091517857143,
           "max_estimated_per_worker_mb": 1975.091517857143,
-          "p90_seconds_per_worker": 18.23011176926749,
-          "p90_seconds_per_unit": 127.61078238487244,
+          "p90_seconds_per_worker": 0.21928606714521134,
+          "p90_seconds_per_unit": 1.5428638458251953,
           "max_successful_workers": 8,
           "samples": [
             {
@@ -328,349 +436,79 @@
                 "cmd0": "C:\\Program Files\\Python312\\python.exe",
                 "cwd": "D:\\astra\\tradebot"
               }
+            },
+            {
+              "utc": "2026-04-02T01:13:11.757027",
+              "success": true,
+              "workers": 8,
+              "duration_s": 1.5261964797973633,
+              "peak_process_mb": 189.7734375,
+              "estimated_per_worker_mb": 23.7216796875,
+              "peak_used_pct": 25.7,
+              "min_available_mb": 48503.0859375,
+              "units": 1,
+              "unit_name": "global_prewarm",
+              "seconds_per_worker": 0.1907745599746704,
+              "seconds_per_unit": 1.5261964797973633,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:43.580049",
+              "success": true,
+              "workers": 8,
+              "duration_s": 1.5300757884979248,
+              "peak_process_mb": 175.9375,
+              "estimated_per_worker_mb": 21.9921875,
+              "peak_used_pct": 27.5,
+              "min_available_mb": 47346.66796875,
+              "units": 1,
+              "unit_name": "global_prewarm",
+              "seconds_per_worker": 0.1912594735622406,
+              "seconds_per_unit": 1.5300757884979248,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:22:59.238949",
+              "success": true,
+              "workers": 8,
+              "duration_s": 1.5428638458251953,
+              "peak_process_mb": 191.40625,
+              "estimated_per_worker_mb": 23.92578125,
+              "peak_used_pct": 27.1,
+              "min_available_mb": 47563.015625,
+              "units": 1,
+              "unit_name": "global_prewarm",
+              "seconds_per_worker": 0.19285798072814941,
+              "seconds_per_unit": 1.5428638458251953,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
             }
           ]
         },
         "feature_cache": {
-          "runs": 29,
-          "success_runs": 29,
+          "runs": 32,
+          "success_runs": 32,
           "last_workers": 10,
-          "last_duration_s": 1.5235254764556885,
-          "last_peak_process_mb": 175.04296875,
-          "last_estimated_per_worker_mb": 17.504296875,
-          "last_peak_used_pct": 28.1,
-          "last_min_available_mb": 46932.3125,
-          "p90_estimated_per_worker_mb": 126.95234375,
-          "p95_estimated_per_worker_mb": 171.263671875,
-          "max_estimated_per_worker_mb": 407.832421875,
-          "p90_seconds_per_worker": 2.538339400291443,
-          "p90_seconds_per_unit": 25.38339400291443,
+          "last_duration_s": 1.5461962223052979,
+          "last_peak_process_mb": 190.03125,
+          "last_estimated_per_worker_mb": 19.003125,
+          "last_peak_used_pct": 27.6,
+          "last_min_available_mb": 47290.921875,
+          "p90_estimated_per_worker_mb": 116.7875,
+          "p95_estimated_per_worker_mb": 121.683984375,
+          "max_estimated_per_worker_mb": 153.4484375,
+          "p90_seconds_per_worker": 0.7109981536865234,
+          "p90_seconds_per_unit": 7.109981536865234,
           "max_successful_workers": 10,
           "samples": [
-            {
-              "utc": "2026-03-31T18:21:00.371761",
-              "success": true,
-              "workers": 10,
-              "duration_s": 294.5600984096527,
-              "peak_process_mb": 4078.32421875,
-              "estimated_per_worker_mb": 407.832421875,
-              "peak_used_pct": 49.8,
-              "min_available_mb": 32790.0703125,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 29.456009840965272,
-              "seconds_per_unit": 294.5600984096527,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T18:25:23.042418",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.529480218887329,
-              "peak_process_mb": 190.5078125,
-              "estimated_per_worker_mb": 19.05078125,
-              "peak_used_pct": 44.5,
-              "min_available_mb": 36239.10546875,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.1529480218887329,
-              "seconds_per_unit": 1.529480218887329,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T18:25:24.572696",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5272533893585205,
-              "peak_process_mb": 190.23046875,
-              "estimated_per_worker_mb": 19.023046875,
-              "peak_used_pct": 44.5,
-              "min_available_mb": 36257.69140625,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15272533893585205,
-              "seconds_per_unit": 1.5272533893585205,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T18:25:26.105922",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5312063694000244,
-              "peak_process_mb": 190.0703125,
-              "estimated_per_worker_mb": 19.00703125,
-              "peak_used_pct": 44.5,
-              "min_available_mb": 36223.6640625,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15312063694000244,
-              "seconds_per_unit": 1.5312063694000244,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T18:25:51.491319",
-              "success": true,
-              "workers": 10,
-              "duration_s": 25.38339400291443,
-              "peak_process_mb": 1712.63671875,
-              "estimated_per_worker_mb": 171.263671875,
-              "peak_used_pct": 46.0,
-              "min_available_mb": 35281.2109375,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 2.538339400291443,
-              "seconds_per_unit": 25.38339400291443,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T18:26:01.148368",
-              "success": true,
-              "workers": 10,
-              "duration_s": 9.655544996261597,
-              "peak_process_mb": 696.828125,
-              "estimated_per_worker_mb": 69.6828125,
-              "peak_used_pct": 44.3,
-              "min_available_mb": 36327.12109375,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.9655544996261597,
-              "seconds_per_unit": 9.655544996261597,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T18:26:16.388900",
-              "success": true,
-              "workers": 10,
-              "duration_s": 15.238529682159424,
-              "peak_process_mb": 865.4375,
-              "estimated_per_worker_mb": 86.54375,
-              "peak_used_pct": 44.6,
-              "min_available_mb": 36151.5390625,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 1.5238529682159423,
-              "seconds_per_unit": 15.238529682159424,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T18:27:02.957781",
-              "success": true,
-              "workers": 10,
-              "duration_s": 46.56586050987244,
-              "peak_process_mb": 1269.5234375,
-              "estimated_per_worker_mb": 126.95234375,
-              "peak_used_pct": 45.4,
-              "min_available_mb": 35637.80078125,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 4.656586050987244,
-              "seconds_per_unit": 46.56586050987244,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:09:22.772044",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5286118984222412,
-              "peak_process_mb": 174.96484375,
-              "estimated_per_worker_mb": 17.496484375,
-              "peak_used_pct": 38.2,
-              "min_available_mb": 40332.03125,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15286118984222413,
-              "seconds_per_unit": 1.5286118984222412,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:09:24.304860",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5298044681549072,
-              "peak_process_mb": 170.28125,
-              "estimated_per_worker_mb": 17.028125,
-              "peak_used_pct": 38.2,
-              "min_available_mb": 40343.109375,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15298044681549072,
-              "seconds_per_unit": 1.5298044681549072,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:09:25.833949",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5275835990905762,
-              "peak_process_mb": 173.78125,
-              "estimated_per_worker_mb": 17.378125,
-              "peak_used_pct": 38.2,
-              "min_available_mb": 40341.2734375,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15275835990905762,
-              "seconds_per_unit": 1.5275835990905762,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:09:27.361532",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5255770683288574,
-              "peak_process_mb": 175.36328125,
-              "estimated_per_worker_mb": 17.536328125,
-              "peak_used_pct": 38.2,
-              "min_available_mb": 40317.3046875,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15255770683288575,
-              "seconds_per_unit": 1.5255770683288574,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:09:28.899168",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5341229438781738,
-              "peak_process_mb": 171.6953125,
-              "estimated_per_worker_mb": 17.16953125,
-              "peak_used_pct": 38.2,
-              "min_available_mb": 40310.6328125,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.1534122943878174,
-              "seconds_per_unit": 1.5341229438781738,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:09:30.434566",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5338940620422363,
-              "peak_process_mb": 171.59375,
-              "estimated_per_worker_mb": 17.159375,
-              "peak_used_pct": 38.2,
-              "min_available_mb": 40330.5,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15338940620422364,
-              "seconds_per_unit": 1.5338940620422363,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:09:31.966854",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5292842388153076,
-              "peak_process_mb": 175.23046875,
-              "estimated_per_worker_mb": 17.523046875,
-              "peak_used_pct": 38.2,
-              "min_available_mb": 40333.69921875,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15292842388153077,
-              "seconds_per_unit": 1.5292842388153076,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:20:24.095894",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.526090383529663,
-              "peak_process_mb": 175.14453125,
-              "estimated_per_worker_mb": 17.514453125,
-              "peak_used_pct": 38.7,
-              "min_available_mb": 39987.3671875,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.1526090383529663,
-              "seconds_per_unit": 1.526090383529663,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:20:25.627981",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.530583381652832,
-              "peak_process_mb": 166.2578125,
-              "estimated_per_worker_mb": 16.62578125,
-              "peak_used_pct": 38.7,
-              "min_available_mb": 40035.21484375,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.1530583381652832,
-              "seconds_per_unit": 1.530583381652832,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
-            {
-              "utc": "2026-03-31T19:20:27.159585",
-              "success": true,
-              "workers": 10,
-              "duration_s": 1.5285913944244385,
-              "peak_process_mb": 189.140625,
-              "estimated_per_worker_mb": 18.9140625,
-              "peak_used_pct": 38.7,
-              "min_available_mb": 40010.078125,
-              "units": 1,
-              "unit_name": "step",
-              "seconds_per_worker": 0.15285913944244384,
-              "seconds_per_unit": 1.5285913944244385,
-              "metadata": {
-                "cmd0": "C:\\Program Files\\Python312\\python.exe",
-                "cwd": "D:\\astra\\tradebot"
-              }
-            },
             {
               "utc": "2026-03-31T19:20:28.694114",
               "success": true,
@@ -864,6 +702,384 @@
               "unit_name": "step",
               "seconds_per_worker": 0.15235254764556885,
               "seconds_per_unit": 1.5235254764556885,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:13:18.871022",
+              "success": true,
+              "workers": 10,
+              "duration_s": 7.110990285873413,
+              "peak_process_mb": 1167.875,
+              "estimated_per_worker_mb": 116.7875,
+              "peak_used_pct": 27.1,
+              "min_available_mb": 47559.8203125,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.7110990285873413,
+              "seconds_per_unit": 7.110990285873413,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:13:20.400918",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5253856182098389,
+              "peak_process_mb": 189.640625,
+              "estimated_per_worker_mb": 18.9640625,
+              "peak_used_pct": 25.6,
+              "min_available_mb": 48546.14453125,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15253856182098388,
+              "seconds_per_unit": 1.5253856182098389,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:13:21.928694",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5252716541290283,
+              "peak_process_mb": 190.5390625,
+              "estimated_per_worker_mb": 19.05390625,
+              "peak_used_pct": 25.6,
+              "min_available_mb": 48560.9140625,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15252716541290284,
+              "seconds_per_unit": 1.5252716541290283,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:13:23.463454",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.531250238418579,
+              "peak_process_mb": 191.640625,
+              "estimated_per_worker_mb": 19.1640625,
+              "peak_used_pct": 25.6,
+              "min_available_mb": 48583.80078125,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15312502384185792,
+              "seconds_per_unit": 1.531250238418579,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:13:25.000737",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5347766876220703,
+              "peak_process_mb": 190.35546875,
+              "estimated_per_worker_mb": 19.035546875,
+              "peak_used_pct": 25.5,
+              "min_available_mb": 48607.74609375,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15347766876220703,
+              "seconds_per_unit": 1.5347766876220703,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:13:26.540691",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5359296798706055,
+              "peak_process_mb": 191.63671875,
+              "estimated_per_worker_mb": 19.163671875,
+              "peak_used_pct": 25.6,
+              "min_available_mb": 48548.26953125,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15359296798706054,
+              "seconds_per_unit": 1.5359296798706055,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:13:28.074390",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5311882495880127,
+              "peak_process_mb": 189.79296875,
+              "estimated_per_worker_mb": 18.979296875,
+              "peak_used_pct": 25.6,
+              "min_available_mb": 48587.16015625,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15311882495880128,
+              "seconds_per_unit": 1.5311882495880127,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:50.692536",
+              "success": true,
+              "workers": 10,
+              "duration_s": 7.109981536865234,
+              "peak_process_mb": 1216.83984375,
+              "estimated_per_worker_mb": 121.683984375,
+              "peak_used_pct": 28.8,
+              "min_available_mb": 46470.1796875,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.7109981536865234,
+              "seconds_per_unit": 7.109981536865234,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:52.227466",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.531404972076416,
+              "peak_process_mb": 176.8203125,
+              "estimated_per_worker_mb": 17.68203125,
+              "peak_used_pct": 27.2,
+              "min_available_mb": 47490.2578125,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.1531404972076416,
+              "seconds_per_unit": 1.531404972076416,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:53.764855",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.534881830215454,
+              "peak_process_mb": 175.984375,
+              "estimated_per_worker_mb": 17.5984375,
+              "peak_used_pct": 27.2,
+              "min_available_mb": 47538.046875,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.1534881830215454,
+              "seconds_per_unit": 1.534881830215454,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:55.307050",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5386791229248047,
+              "peak_process_mb": 170.97265625,
+              "estimated_per_worker_mb": 17.097265625,
+              "peak_used_pct": 27.3,
+              "min_available_mb": 47476.33203125,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15386791229248048,
+              "seconds_per_unit": 1.5386791229248047,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:56.835560",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5269980430603027,
+              "peak_process_mb": 174.67578125,
+              "estimated_per_worker_mb": 17.467578125,
+              "peak_used_pct": 27.1,
+              "min_available_mb": 47589.609375,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15269980430603028,
+              "seconds_per_unit": 1.5269980430603027,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:58.369020",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.529442548751831,
+              "peak_process_mb": 189.66796875,
+              "estimated_per_worker_mb": 18.966796875,
+              "peak_used_pct": 27.1,
+              "min_available_mb": 47557.83984375,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.1529442548751831,
+              "seconds_per_unit": 1.529442548751831,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T01:28:59.902933",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5324084758758545,
+              "peak_process_mb": 179.96484375,
+              "estimated_per_worker_mb": 17.996484375,
+              "peak_used_pct": 27.1,
+              "min_available_mb": 47589.4453125,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15324084758758544,
+              "seconds_per_unit": 1.5324084758758545,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:23:07.446969",
+              "success": true,
+              "workers": 10,
+              "duration_s": 8.202009916305542,
+              "peak_process_mb": 1217.37890625,
+              "estimated_per_worker_mb": 121.737890625,
+              "peak_used_pct": 28.6,
+              "min_available_mb": 46590.6640625,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.8202009916305542,
+              "seconds_per_unit": 8.202009916305542,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:23:08.999093",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5466029644012451,
+              "peak_process_mb": 190.4375,
+              "estimated_per_worker_mb": 19.04375,
+              "peak_used_pct": 27.1,
+              "min_available_mb": 47567.94140625,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15466029644012452,
+              "seconds_per_unit": 1.5466029644012451,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:23:10.547756",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5443198680877686,
+              "peak_process_mb": 190.49609375,
+              "estimated_per_worker_mb": 19.049609375,
+              "peak_used_pct": 27.1,
+              "min_available_mb": 47578.6015625,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15443198680877684,
+              "seconds_per_unit": 1.5443198680877686,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:23:12.101099",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5483291149139404,
+              "peak_process_mb": 186.5078125,
+              "estimated_per_worker_mb": 18.65078125,
+              "peak_used_pct": 27.2,
+              "min_available_mb": 47526.50390625,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15483291149139405,
+              "seconds_per_unit": 1.5483291149139404,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:23:13.650204",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5443377494812012,
+              "peak_process_mb": 190.89453125,
+              "estimated_per_worker_mb": 19.089453125,
+              "peak_used_pct": 27.4,
+              "min_available_mb": 47388.8203125,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.1544337749481201,
+              "seconds_per_unit": 1.5443377494812012,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:23:15.203416",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5491955280303955,
+              "peak_process_mb": 163.6171875,
+              "estimated_per_worker_mb": 16.36171875,
+              "peak_used_pct": 27.5,
+              "min_available_mb": 47316.40234375,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15491955280303954,
+              "seconds_per_unit": 1.5491955280303955,
+              "metadata": {
+                "cmd0": "C:\\Program Files\\Python312\\python.exe",
+                "cwd": "D:\\astra\\tradebot"
+              }
+            },
+            {
+              "utc": "2026-04-02T02:23:16.754616",
+              "success": true,
+              "workers": 10,
+              "duration_s": 1.5461962223052979,
+              "peak_process_mb": 190.03125,
+              "estimated_per_worker_mb": 19.003125,
+              "peak_used_pct": 27.6,
+              "min_available_mb": 47290.921875,
+              "units": 1,
+              "unit_name": "step",
+              "seconds_per_worker": 0.15461962223052977,
+              "seconds_per_unit": 1.5461962223052979,
               "metadata": {
                 "cmd0": "C:\\Program Files\\Python312\\python.exe",
                 "cwd": "D:\\astra\\tradebot"

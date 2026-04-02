@@ -15,23 +15,28 @@
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
     />
-    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260331a" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}?v=20260126a" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260401b" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}?v=20260401b" />
 
     <style>
       .login-shell {
-        min-height: 100vh;
+        min-height: 100dvh;
         display: grid;
         place-items: center;
-        padding: 1.5rem;
+        padding:
+          max(1rem, env(safe-area-inset-top))
+          clamp(0.9rem, 2.2vw, 1.5rem)
+          max(1.25rem, env(safe-area-inset-bottom));
       }
 
       .login-card {
-        width: min(100%, 460px);
+        width: min(100%, 430px);
       }
 
       .login-subtitle {
         color: rgba(255, 255, 255, 0.68);
+        font-size: 0.96rem;
+        line-height: 1.6;
       }
 
       .form-control,
@@ -46,11 +51,27 @@
         color: rgba(255, 255, 255, 0.40);
       }
 
+      .login-card .card-body {
+        padding: clamp(1.15rem, 3vw, 2rem) !important;
+      }
+
+      .login-card .h2 {
+        font-size: clamp(1.55rem, 4vw, 2rem);
+        letter-spacing: -0.03em;
+      }
+
+      .login-card .form-control-lg {
+        min-height: 48px;
+        padding: 0.75rem 0.88rem;
+        font-size: 0.98rem;
+        border-radius: 14px;
+      }
+
       .login-label {
         color: rgba(255, 255, 255, 0.72);
-        font-size: 0.82rem;
+        font-size: 0.76rem;
         text-transform: uppercase;
-        letter-spacing: 0.04em;
+        letter-spacing: 0.06em;
         font-weight: 700;
       }
 
@@ -68,6 +89,21 @@
         background: rgba(255, 255, 255, 0.06);
         color: #fff;
         border-color: rgba(255, 255, 255, 0.20);
+      }
+
+      @media (max-width: 575.98px) {
+        .login-shell {
+          place-items: center;
+          padding-top: max(1rem, env(safe-area-inset-top));
+        }
+
+        .login-card {
+          width: 100%;
+        }
+
+        .login-subtitle {
+          font-size: 0.92rem;
+        }
       }
     </style>
   </head>

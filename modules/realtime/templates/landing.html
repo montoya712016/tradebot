@@ -18,7 +18,7 @@
     {% if performance_visual_html %}
     <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
     {% endif %}
-    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260331a" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='astra_shared.css') }}?v=20260401b" />
 
     <style>
       :root {
@@ -36,7 +36,7 @@
       }
 
       .site-shell {
-        max-width: 1680px;
+        max-width: 1440px;
         margin: 0 auto;
       }
 
@@ -62,8 +62,8 @@
       }
 
       .brand-mark {
-        width: 46px;
-        height: 46px;
+        width: 40px;
+        height: 40px;
         object-fit: contain;
         filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.22));
       }
@@ -83,14 +83,14 @@
       }
 
       .brand-name {
-        font-size: 1.08rem;
+        font-size: 1rem;
         font-weight: 700;
         letter-spacing: -0.02em;
         line-height: 1.05;
       }
 
       .hero-wrap {
-        padding: 88px 0 32px;
+        padding: 62px 0 28px;
       }
 
       .hero-grid {
@@ -108,7 +108,7 @@
         background: rgba(16, 19, 26, 0.62);
         border: 1px solid rgba(255, 255, 255, 0.08);
         backdrop-filter: blur(12px);
-        border-radius: 24px;
+        border-radius: 20px;
         box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
       }
 
@@ -116,13 +116,13 @@
         color: var(--text-muted);
         text-transform: uppercase;
         letter-spacing: 0.08em;
-        font-size: 0.78rem;
+        font-size: 0.72rem;
         font-weight: 700;
       }
 
       .hero-title {
-        font-size: clamp(3.2rem, 6vw, 5.9rem);
-        line-height: 0.94;
+        font-size: clamp(2.2rem, 5.4vw, 4.5rem);
+        line-height: 0.98;
         letter-spacing: -0.05em;
         font-weight: 850;
         margin: 0;
@@ -135,8 +135,8 @@
 
       .hero-copy {
         color: var(--text-muted);
-        font-size: 1.12rem;
-        line-height: 1.82;
+        font-size: 1rem;
+        line-height: 1.72;
         max-width: 920px;
       }
 
@@ -148,7 +148,7 @@
       }
 
       .hero-brand img {
-        width: clamp(96px, 10vw, 128px);
+        width: clamp(76px, 8vw, 110px);
         height: auto;
         object-fit: contain;
         filter: drop-shadow(0 18px 28px rgba(0, 0, 0, 0.24));
@@ -168,7 +168,7 @@
       }
 
       .hero-brand-copy .brand-statement {
-        font-size: 0.92rem;
+        font-size: 0.86rem;
         line-height: 1.55;
         color: rgba(255, 255, 255, 0.72);
         max-width: 420px;
@@ -229,7 +229,7 @@
 
       .performance-visual-card .plotly-graph-div {
         width: 100%;
-        min-height: 420px;
+        min-height: 360px;
       }
 
       .performance-visual-meta {
@@ -282,7 +282,7 @@
       }
 
       .performance-card .value {
-        font-size: 1.9rem;
+        font-size: 1.58rem;
         font-weight: 800;
         letter-spacing: -0.04em;
         line-height: 1;
@@ -337,7 +337,7 @@
       }
 
       .section-title {
-        font-size: 1.65rem;
+        font-size: 1.42rem;
         font-weight: 750;
         letter-spacing: -0.03em;
         margin: 0;
@@ -445,11 +445,26 @@
 
       @media (max-width: 620px) {
         .hero-wrap {
-          padding-top: 64px;
+          padding-top: 40px;
         }
 
         .stat-grid {
           grid-template-columns: 1fr;
+        }
+
+        .hero-actions,
+        .site-nav-actions {
+          gap: 8px;
+        }
+
+        .hero-actions .btn,
+        .site-nav-actions .btn {
+          width: auto;
+          max-width: 100%;
+          justify-content: center;
+          flex: 0 1 auto;
+          align-self: flex-start;
+          white-space: nowrap;
         }
       }
     </style>

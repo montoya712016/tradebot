@@ -36,6 +36,7 @@ from modules.realtime.auth import (
     set_user_enabled,
     verify_user_login,
 )
+from modules.realtime.remote_control import RemoteControlManager
 from modules.realtime.site_oos_assets import build_v5_site_snapshot
 
 # Reuse existing ngrok logic
@@ -80,6 +81,10 @@ class NgrokManager:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EQUITY_METRIC_CACHE: dict[str, dict] = {}
 SHARED_DASHBOARD_CSS = (REPO_ROOT / "modules" / "realtime" / "static" / "astra_shared.css")
+REMOTE_CONTROL = RemoteControlManager(
+    repo_root=REPO_ROOT,
+    storage_dir=REPO_ROOT / "local" / "remote_control",
+)
 app = Flask(
     __name__,
     template_folder=str(REPO_ROOT / "modules" / "realtime" / "templates"),
@@ -106,6 +111,13 @@ def _shared_dashboard_css_text() -> str:
         return SHARED_DASHBOARD_CSS.read_text(encoding="utf-8")
     except Exception:
         return ""
+
+
+def _require_assistant_admin() -> str:
+    current_user = session.get(AUTH_CFG.session_key)
+    if not session_is_admin(AUTH_CFG, current_user):
+        abort(403)
+    return str(current_user or "")
 
 
 @app.context_processor
@@ -721,8 +733,8 @@ def index():
                 color: var(--text-main);
                 font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             }
-            .site-shell { max-width: 1340px; margin: 0 auto; }
-            .hero-wrap { padding: 72px 0 28px; }
+            .site-shell { max-width: 1260px; margin: 0 auto; }
+            .hero-wrap { padding: 56px 0 24px; }
             .hero-grid {
                 display: grid;
                 grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
@@ -736,19 +748,19 @@ def index():
                 background: rgba(16, 19, 26, 0.62);
                 border: 1px solid rgba(255,255,255,0.08);
                 backdrop-filter: blur(12px);
-                border-radius: 20px;
+                border-radius: 18px;
                 box-shadow: 0 10px 30px rgba(0,0,0,0.22);
             }
             .eyebrow {
                 color: var(--text-muted);
                 text-transform: uppercase;
                 letter-spacing: 0.08em;
-                font-size: 0.78rem;
+                font-size: 0.72rem;
                 font-weight: 700;
             }
             .hero-title {
-                font-size: clamp(2.4rem, 5vw, 4.4rem);
-                line-height: 0.98;
+                font-size: clamp(2rem, 4.8vw, 3.5rem);
+                line-height: 1.0;
                 letter-spacing: -0.04em;
                 font-weight: 800;
                 margin: 0;
@@ -756,8 +768,8 @@ def index():
             .hero-title .accent { color: var(--accent-2); }
             .hero-copy {
                 color: var(--text-muted);
-                font-size: 1.05rem;
-                line-height: 1.7;
+                font-size: 0.98rem;
+                line-height: 1.65;
                 max-width: 760px;
             }
             .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
@@ -788,12 +800,12 @@ def index():
                 font-weight: 700;
             }
             .stat-value {
-                font-size: 1.45rem;
+                font-size: 1.3rem;
                 font-weight: 800;
                 letter-spacing: -0.03em;
             }
             .section-title {
-                font-size: 1.55rem;
+                font-size: 1.35rem;
                 font-weight: 700;
                 letter-spacing: -0.03em;
                 margin: 0;
@@ -809,7 +821,7 @@ def index():
                 gap: 18px;
             }
             .offer-card h3 {
-                font-size: 1rem;
+                font-size: 0.94rem;
                 font-weight: 700;
                 margin-bottom: 10px;
             }
@@ -829,7 +841,7 @@ def index():
                 border-radius: 999px;
                 padding: 0.4rem 0.8rem;
                 color: var(--text-muted);
-                font-size: 0.78rem;
+                font-size: 0.74rem;
             }
             .divider-line {
                 height: 1px;
@@ -840,6 +852,19 @@ def index():
                 .hero-grid,
                 .offer-grid,
                 .stat-grid { grid-template-columns: 1fr; }
+            }
+            @media (max-width: 767px) {
+                .hero-wrap { padding: 38px 0 20px; }
+                .hero-copy { font-size: 0.92rem; }
+                .hero-actions { gap: 8px; }
+                .hero-actions .btn {
+                    width: auto;
+                    max-width: 100%;
+                    justify-content: center;
+                    flex: 0 1 auto;
+                    align-self: flex-start;
+                    white-space: nowrap;
+                }
             }
         </style>
     </head>
@@ -1029,23 +1054,23 @@ def dashboard():
                 overflow-y: scroll;
                 font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             }
-            .page-shell { max-width: 1440px; margin: 0 auto; }
+            .page-shell { max-width: 1320px; margin: 0 auto; }
             .hero-card { margin-bottom: 1rem; }
-            .hero-meta { color: var(--text-muted); font-size: 0.95rem; }
+            .hero-meta { color: var(--text-muted); font-size: 0.88rem; }
             .hero-pill {
                 border: 1px solid rgba(255, 255, 255, 0.10);
                 background: rgba(255, 255, 255, 0.04);
                 border-radius: 999px;
                 padding: 0.35rem 0.75rem;
                 color: var(--text-muted);
-                font-size: 0.78rem;
+                font-size: 0.72rem;
                 display: inline-flex;
                 align-items: center;
                 gap: 0.45rem;
             }
             .hero-pill strong { color: var(--text-main); font-weight: 600; }
-            .brand-line { color: var(--text-muted); font-size: 0.82rem; letter-spacing: 0.04em; text-transform: uppercase; }
-            .hero-title { font-size: clamp(1.8rem, 3vw, 2.5rem); font-weight: 700; margin: 0; }
+            .brand-line { color: var(--text-muted); font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; }
+            .hero-title { font-size: clamp(1.55rem, 2.8vw, 2.15rem); font-weight: 700; margin: 0; }
             .hero-title .accent { color: var(--accent-2); }
             .status-pill {
                 border: 1px solid rgba(255, 255, 255, 0.10);
@@ -1059,10 +1084,10 @@ def dashboard():
             }
             .navbar-brand:hover { color: var(--text-main); }
             
-            .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }
-            .kpi-card { padding: 15px; border-radius: 14px; }
-            .kpi-label { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 700; letter-spacing: 0.04em; }
-            .kpi-value { font-size: 1.4rem; font-weight: 700; color: var(--text-main); font-family: 'JetBrains Mono', monospace; }
+            .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+            .kpi-card { padding: 13px; border-radius: 13px; }
+            .kpi-label { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em; }
+            .kpi-value { font-size: 1.24rem; font-weight: 700; color: var(--text-main); font-family: 'JetBrains Mono', monospace; }
 
             .tabs-shell { margin-bottom: 1rem; }
             .tabs { display: flex; gap: 10px; justify-content: center; margin-bottom: 0; padding: 14px 16px 10px; border-radius: 12px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: rgba(148, 163, 184, 0.55) rgba(255,255,255,0.05); }
@@ -1070,7 +1095,7 @@ def dashboard():
             .tabs::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 999px; }
             .tabs::-webkit-scrollbar-thumb { background: linear-gradient(90deg, rgba(148, 163, 184, 0.55), rgba(124, 92, 255, 0.45)); border-radius: 999px; border: 2px solid rgba(22, 28, 45, 0.95); }
             .tabs::-webkit-scrollbar-thumb:hover { background: linear-gradient(90deg, rgba(148, 163, 184, 0.7), rgba(124, 92, 255, 0.6)); }
-            .tab { padding: 10px 16px; border-radius: 10px; cursor: pointer; color: var(--text-muted); font-weight: 600; font-size: 0.9rem; transition: all 0.2s; white-space: nowrap; display: flex; align-items: center; border: 1px solid transparent; }
+            .tab { padding: 9px 14px; border-radius: 10px; cursor: pointer; color: var(--text-muted); font-weight: 600; font-size: 0.84rem; transition: all 0.2s; white-space: nowrap; display: flex; align-items: center; border: 1px solid transparent; }
             .tab:hover { background: rgba(255,255,255,0.05); color: var(--text-main); }
             .tab.active {
                 background: linear-gradient(135deg, rgba(124, 92, 255, 0.18), rgba(76, 58, 140, 0.34));
@@ -1091,13 +1116,17 @@ def dashboard():
             .step-panel { display: none; }
             .step-panel.active { display: block; }
 
+            .table-scroll { width: 100%; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; scrollbar-width: thin; scrollbar-color: rgba(148, 163, 184, 0.55) rgba(255,255,255,0.05); }
+            .table-scroll::-webkit-scrollbar { height: 10px; }
+            .table-scroll::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 999px; }
+            .table-scroll::-webkit-scrollbar-thumb { background: linear-gradient(90deg, rgba(148, 163, 184, 0.55), rgba(124, 92, 255, 0.45)); border-radius: 999px; border: 2px solid rgba(22, 28, 45, 0.95); }
             table { width: 100%; border-collapse: separate; border-spacing: 0; background: transparent; border-radius: 12px; border: 1px solid var(--surface-light); margin-bottom: 50px; overflow: hidden; }
-            th { background: rgba(255,255,255,0.05); padding: 12px 15px; text-align: left; color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 700; cursor: pointer; user-select: none; transition: color 0.2s; }
+            th { background: rgba(255,255,255,0.05); padding: 11px 13px; text-align: left; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; font-weight: 700; cursor: pointer; user-select: none; transition: color 0.2s; }
             th:hover { color: var(--accent); }
             th.sorted-asc::after { content: ' ↑'; color: var(--accent); }
             th.sorted-desc::after { content: ' ↓'; color: var(--accent); }
             
-            td { padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 0.9rem; background: rgba(16, 19, 26, 0.54); }
+            td { padding: 11px 13px; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 0.84rem; background: rgba(16, 19, 26, 0.54); }
             tr.row-clickable { cursor: pointer; transition: background 0.1s; }
             tr.row-clickable:hover td { background: rgba(255,255,255,0.03); }
             tr.row-active td { background: var(--accent-glow) !important; border-left: 2px solid var(--accent); }
@@ -1109,17 +1138,17 @@ def dashboard():
             .detail-shell { padding: 18px; background: linear-gradient(180deg, rgba(7, 11, 19, 0.96), rgba(3, 6, 11, 0.98)); }
             .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
             .detail-card { background: rgba(22, 28, 45, 0.96); border: 1px solid rgba(124, 92, 255, 0.15); border-radius: 12px; padding: 14px; min-width: 0; overflow: hidden; }
-            .detail-title { color: var(--accent); font-size: 0.78rem; text-transform: uppercase; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.04em; }
+            .detail-title { color: var(--accent); font-size: 0.72rem; text-transform: uppercase; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.05em; }
             .detail-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-            .detail-chip { padding: 4px 10px; border-radius: 999px; background: rgba(148, 163, 184, 0.12); color: var(--text-muted); font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; max-width: 100%; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+            .detail-chip { padding: 4px 10px; border-radius: 999px; background: rgba(148, 163, 184, 0.12); color: var(--text-muted); font-size: 0.68rem; font-family: 'JetBrains Mono', monospace; max-width: 100%; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
             .param-list { display: grid; gap: 8px; }
             .param-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: start; border-bottom: 1px solid rgba(148, 163, 184, 0.08); padding-bottom: 6px; }
-            .param-label { color: var(--text-muted); font-size: 0.78rem; min-width: 0; }
-            .param-value { color: var(--text-main); font-size: 0.8rem; text-align: right; font-family: 'JetBrains Mono', monospace; min-width: 0; max-width: 100%; word-break: break-word; overflow-wrap: anywhere; }
-            .param-empty { color: var(--text-muted); font-size: 0.8rem; font-style: italic; }
-            .iframe-container { width: 100%; height: 700px; border: none; }
+            .param-label { color: var(--text-muted); font-size: 0.74rem; min-width: 0; }
+            .param-value { color: var(--text-main); font-size: 0.76rem; text-align: right; font-family: 'JetBrains Mono', monospace; min-width: 0; max-width: 100%; word-break: break-word; overflow-wrap: anywhere; }
+            .param-empty { color: var(--text-muted); font-size: 0.76rem; font-style: italic; }
+            .iframe-container { width: 100%; height: 620px; border: none; }
             
-            .empty-state { padding: 100px; text-align: center; color: var(--text-muted); background: rgba(16, 19, 26, 0.58); border-radius: 12px; border: 1px solid var(--surface-light); }
+            .empty-state { padding: 72px; text-align: center; color: var(--text-muted); background: rgba(16, 19, 26, 0.58); border-radius: 12px; border: 1px solid var(--surface-light); }
 
             @media (max-width: 1100px) {
                 .kpi-row { grid-template-columns: repeat(2, 1fr); }
@@ -1131,8 +1160,13 @@ def dashboard():
                 .tabs { justify-content: flex-start; }
                 .tabs { padding: 12px 12px 8px; }
                 .tab { padding: 9px 14px; }
+                .table-scroll { margin: 0 -6px 12px; padding: 0 6px 8px; }
+                table { min-width: 720px; }
                 .param-row { grid-template-columns: 1fr; }
                 .param-value { text-align: left; }
+                .hero-meta { font-size: 0.82rem; }
+                .iframe-container { height: 460px; }
+                .empty-state { padding: 36px 18px; }
             }
         </style>
     </head>
@@ -1162,6 +1196,12 @@ def dashboard():
                     <a href="{{ url_for('admin_users') }}" class="btn btn-sm btn-outline-secondary">
                         <i class="bi bi-people"></i>
                         <span class="d-none d-sm-inline ms-1">Usuários</span>
+                    </a>
+                    {% endif %}
+                    {% if auth_enabled and auth_is_admin %}
+                    <a href="{{ url_for('assistant') }}" class="btn btn-sm btn-outline-secondary">
+                        <i class="bi bi-robot"></i>
+                        <span class="d-none d-sm-inline ms-1">Assistant</span>
                     </a>
                     {% endif %}
                     {% if auth_enabled %}
@@ -1289,6 +1329,18 @@ def dashboard():
                 localStorage.setItem('fair_sortKey', state.sortKey);
                 localStorage.setItem('fair_sortDir', state.sortDir);
                 render();
+            }
+
+            function compactTrialLabel(row) {
+                const trainId = String(row.train_id || '');
+                const backtestId = String(row.backtest_id || '');
+                const labelMatch = trainId.match(/label_(\\d+)/i);
+                const modelMatch = trainId.match(/model_(\\d+)/i);
+                const btMatch = backtestId.match(/bt_(\\d+)/i);
+                const labelNum = labelMatch ? String(Number(labelMatch[1])).padStart(2, '0') : '--';
+                const modelNum = modelMatch ? String(Number(modelMatch[1])).padStart(2, '0') : '--';
+                const btNum = btMatch ? String(Number(btMatch[1])).padStart(2, '0') : '--';
+                return `${labelNum}/${modelNum}/${btNum}`;
             }
 
             function togglePlot(id) {
@@ -1423,6 +1475,7 @@ def dashboard():
                 }
 
                 const table = `
+                    <div class="table-scroll">
                     <table
                         id="main-table"
                         data-step="${step}"
@@ -1432,8 +1485,6 @@ def dashboard():
                     >
                         <thead>
                             <tr>
-                                <th onclick="setSort('generation')">Gen</th>
-                                <th onclick="setSort('phase')">Phase</th>
                                 <th onclick="setSort('backtest_id')">Trial</th>
                                 <th style="text-align: right" onclick="setSort('score')" class="${state.sortKey==='score'?'sorted-'+state.sortDir:''}">Score</th>
                                 <th style="text-align: right" onclick="setSort('ret_pct')" class="${state.sortKey==='ret_pct'?'sorted-'+state.sortDir:''}">Return %</th>
@@ -1447,11 +1498,11 @@ def dashboard():
                             ${rows.map((r, i) => {
                                 const id = `${step}-${r.backtest_id}-${r.train_id}`;
                                 const isExpanded = state.expandedPlotId === id;
+                                const compactTrial = compactTrialLabel(r);
+                                const fullTrial = `${r.train_id}/${r.backtest_id}`;
                                 return `
                                     <tr class="row-clickable ${isExpanded?'row-active':''}" onclick="togglePlot('${id}')" id="row-${id}">
-                                        <td class="metric text-muted">G${r.generation || 1}</td>
-                                        <td class="metric text-muted">${r.phase || 'broad'}</td>
-                                        <td class="metric" style="color: var(--text-muted)">${r.backtest_id}/${r.train_id}</td>
+                                        <td class="metric text-muted" title="${fullTrial}">${compactTrial}</td>
                                         <td style="text-align: right"><span class="score-pill" id="score-${id}">${asNumber(r.score).toFixed(4)}</span></td>
                                         <td style="text-align: right; color: var(--green)" class="metric" id="ret-${id}">+${(asNumber(r.ret_pct) * 100).toFixed(1)}%</td>
                                         <td style="text-align: right; color: var(--red)" class="metric" id="dd-${id}">${(asNumber(r.max_dd) * 100).toFixed(2)}%</td>
@@ -1460,7 +1511,7 @@ def dashboard():
                                         <td style="text-align: right" class="metric text-muted" id="trades-${id}">${r.trades}</td>
                                     </tr>
                                     <tr class="iframe-row" id="iframe-row-${id}" style="display: ${isExpanded?'table-row':'none'}">
-                                        <td colspan="9" style="padding: 0;">
+                                        <td colspan="7" style="padding: 0;">
                                             ${isExpanded ? `
                                                 <div class="detail-shell">
                                                     <div class="detail-grid">
@@ -1477,6 +1528,7 @@ def dashboard():
                             }).join('')}
                         </tbody>
                     </table>
+                    </div>
                 `;
                 container.innerHTML = table;
             }
@@ -1495,6 +1547,92 @@ def dashboard():
     </html>
     """
     return render_template_string(html, shared_css=shared_css)
+
+
+@app.get("/assistant")
+def assistant():
+    _require_assistant_admin()
+    return render_template("fair_assistant.html", shared_css=_shared_dashboard_css_text())
+
+
+@app.get("/api/assistant/capabilities")
+def assistant_capabilities_api():
+    _require_assistant_admin()
+    return jsonify(REMOTE_CONTROL.capabilities())
+
+
+@app.get("/api/assistant/conversations")
+def assistant_conversations_api():
+    _require_assistant_admin()
+    return jsonify({"conversations": REMOTE_CONTROL.list_conversations(limit=30)})
+
+
+@app.get("/api/assistant/conversations/<conversation_id>")
+def assistant_conversation_detail_api(conversation_id):
+    _require_assistant_admin()
+    payload = REMOTE_CONTROL.get_conversation(conversation_id)
+    if not payload:
+        return jsonify({"ok": False, "error": "Conversa não encontrada."}), 404
+    return jsonify({"ok": True, **payload})
+
+
+@app.route("/api/assistant/jobs", methods=["GET", "POST"])
+def assistant_jobs_api():
+    current_user = _require_assistant_admin()
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        prompt = str(payload.get("prompt", "") or "")
+        model = str(payload.get("model", "") or "")
+        reasoning_effort = str(payload.get("reasoning_effort", "") or "")
+        access_mode = str(payload.get("access_mode", "") or "")
+        conversation_id = str(payload.get("conversation_id", "") or "")
+        try:
+            job = REMOTE_CONTROL.create_codex_job(
+                prompt=prompt,
+                created_by=current_user,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                access_mode=access_mode,
+                conversation_id=conversation_id,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except RuntimeError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "job": job})
+    return jsonify({"jobs": REMOTE_CONTROL.list_jobs(limit=30)})
+
+
+@app.get("/api/assistant/jobs/<job_id>")
+def assistant_job_detail_api(job_id):
+    _require_assistant_admin()
+    job = REMOTE_CONTROL.get_job(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "Job não encontrado."}), 404
+    return jsonify({"ok": True, "job": job, "transcript": REMOTE_CONTROL.transcript(job_id)})
+
+
+@app.get("/api/assistant/jobs/<job_id>/log")
+def assistant_job_log_api(job_id):
+    _require_assistant_admin()
+    job = REMOTE_CONTROL.get_job(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "Job não encontrado."}), 404
+    return jsonify({"ok": True, "log": REMOTE_CONTROL.filtered_log(job_id)})
+
+
+@app.post("/api/assistant/jobs/<job_id>/cancel")
+def assistant_job_cancel_api(job_id):
+    _require_assistant_admin()
+    try:
+        job = REMOTE_CONTROL.cancel_job(job_id)
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 409
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+    return jsonify({"ok": True, "job": job})
 
 @app.route("/artifact/<path:relpath>")
 def artifact(relpath):

@@ -32,6 +32,9 @@ Fluxo principal
 4. **Exploração fair por steps**
    - `python scripts/run_independent_step_explores.py`
    - dashboard automático: `python scripts/fair_dashboard.py`
+   - assistant remoto no mesmo app: `/assistant`
+   - o assistant agora suporta escolha de `model`, `reasoning` e modo de acesso do Codex CLI
+   - quando uma conversa está aberta, novas mensagens continuam a mesma thread via `codex exec resume`; use `Nova conversa` para abrir outra
    - o orquestrador agora roda em 5 fases fixas:
      - build global do cache OHLC `1m`
      - build global do cache OHLC `5m`
@@ -124,6 +127,12 @@ Convensões de storage
 
 Observações
 -----------
+- o `fair_dashboard.py` agora também expõe uma área administrativa `/assistant` para disparar prompts do `codex exec` no repositório local; o acesso fica restrito a usuários admin.
+- o `assistant` foi redesenhado como chat: mensagem do usuário, resposta final do Codex e um stream de atividade separado para reduzir ruído visual.
+- o assistant agora renderiza markdown das respostas do Codex com tipografia própria, code spans e blocos mais legíveis; links locais do repositório aparecem como referências formatadas em vez de markdown bruto.
+- o histórico do assistant agora é orientado a conversa, não a job: cada novo envio continua a thread aberta e o backend usa `codex exec resume` quando já existe `session_id` anterior.
+- o remote do Codex agora aceita seleção de `model`, `reasoning_effort` e `access_mode`, incluindo `danger-full-access` quando você quiser rodar sem sandbox.
+- o runner remoto agora injeta explicitamente `rg.exe` e `git.exe` no `PATH` do subprocesso para evitar buscas lentas por fallback quando o tool-use nasce sem o mesmo ambiente do terminal.
 - `scripts/backtest.py`, `scripts/train.py` e `scripts/refresh_labels.py` são entrypoints úteis, mas hoje carregam presets opinativos; o workflow fair principal é dado por `run_independent_step_explores.py` + `run_oos_walkforward.py`.
 - o `duckdb` foi adotado para leitura de `explore_runs.csv` e acompanhamento do progresso do orchestrator/explorer; isso reduz overhead de CSV, mas o hot path ainda continua sendo refresh de features, montagem do dataset e treino XGBoost.
 - paralelização agora segue um padrão único:

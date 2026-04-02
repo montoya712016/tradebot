@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="pt-br" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Astra - Codex Remote</title>
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+    crossorigin="anonymous"
+  />
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+  />
+  <style>
+    {{ shared_css|safe }}
+    :root {
+      --surface: rgba(16, 19, 26, 0.74);
+      --surface-soft: rgba(255, 255, 255, 0.03);
+      --surface-line: rgba(255, 255, 255, 0.08);
+      --text-main: #f8fafc;
+      --text-muted: rgba(255, 255, 255, 0.62);
+      --green: #00ffb3;
+      --orange: #ffc85c;
+      --red: #ff5c7a;
+      --accent: #7c5cff;
+    }
+    html, body { height: 100%; }
+    body {
+      color: var(--text-main);
+      font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      overflow: hidden;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+      min-height: 100dvh;
+    }
+    .page-shell { width: 100%; margin: 0; height: 100%; min-height: 0; }
+    .surface-card { background: var(--surface); border: 1px solid var(--surface-line); border-radius: 18px; box-shadow: 0 20px 42px rgba(0, 0, 0, 0.24); }
+    .minor { color: var(--text-muted); font-size: 0.78rem; }
+    .eyebrow { color: var(--text-muted); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; }
+    .hero-title { font-size: clamp(1.55rem, 2.8vw, 2.3rem); font-weight: 700; letter-spacing: -0.03em; }
+    .hero-title .accent { color: var(--green); }
+    .assistant-main {
+      flex: 1 1 auto;
+      min-height: 0;
+      padding: 12px;
+      overflow: hidden;
+    }
+    .assistant-app {
+      display: grid;
+      grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) minmax(280px, 340px);
+      gap: 16px;
+      height: 100%;
+      min-height: 0;
+      align-items: stretch;
+    }
+    .assistant-sidebar {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+    }
+    .assistant-main-column {
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 16px;
+    }
+    .assistant-inspector {
+      height: 100%;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      overflow: hidden;
+    }
+    .assistant-hero { padding: 1.05rem 1.35rem; }
+    .assistant-conversation-panel {
+      height: 100%;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      overflow: hidden;
+    }
+    .conversation-panel-head {
+      padding: 16px 18px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .conversation-scroll {
+      min-height: 0;
+      overflow: auto;
+      padding: 16px 18px 20px;
+      scrollbar-gutter: stable;
+    }
+    .assistant-composer-panel {
+      padding: 8px 12px 10px;
+      position: relative;
+    }
+    .inspector-head {
+      padding: 14px 16px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .inspector-meta {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .inspector-stat {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+      padding: 0.45rem 0.7rem;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    .inspector-scroll {
+      min-height: 0;
+      overflow: auto;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .inspector-stack { display: grid; gap: 10px; }
+    .inspector-empty {
+      min-height: 200px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      color: var(--text-muted);
+      border: 1px dashed rgba(255,255,255,0.10);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.02);
+      padding: 18px;
+    }
+    .status-row { display: flex; justify-content: space-between; gap: 12px; font-size: 0.82rem; }
+    .status-value, .mono { font-family: "JetBrains Mono", monospace; overflow-wrap: anywhere; }
+    .history-list, .activity-list { display: grid; gap: 10px; }
+    .history-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-gutter: stable;
+      padding-right: 14px;
+      margin-right: -4px;
+    }
+    .history-card, .detail-block { background: var(--surface-soft); border: 1px solid rgba(255,255,255,0.06); border-radius: 14px; padding: 12px 14px; min-width: 0; }
+    .history-card { margin-right: 2px; }
+    .history-card { cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease; }
+    .history-card.active { border-color: rgba(0,255,179,0.24); background: rgba(0,255,179,0.08); }
+    .history-card:hover { border-color: rgba(124,92,255,0.24); }
+    .history-title, .activity-text, .trace { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .history-title { margin-top: 8px; font-size: 0.9rem; line-height: 1.45; }
+    .history-preview { margin-top: 6px; color: var(--text-muted); font-size: 0.78rem; line-height: 1.45; }
+    .history-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .composer-controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .composer-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .composer-actions .btn { padding-top: 0.42rem; padding-bottom: 0.42rem; }
+    .bubble-row { display: flex; width: 100%; }
+    .bubble-row.user { justify-content: flex-end; }
+    .bubble-row.assistant { justify-content: flex-start; }
+    .bubble { max-width: min(100%, 760px); border-radius: 18px; border: 1px solid rgba(255,255,255,0.08); padding: 14px 16px; box-shadow: 0 12px 26px rgba(0,0,0,0.16); }
+    .bubble.user { background: linear-gradient(180deg, rgba(0,255,179,0.12), rgba(0,255,179,0.06)); border-color: rgba(0,255,179,0.24); }
+    .bubble.assistant { background: linear-gradient(180deg, rgba(124,92,255,0.16), rgba(18,22,34,0.88)); border-color: rgba(124,92,255,0.24); }
+    .bubble-role, .section-title { color: var(--text-muted); font-size: 0.72rem; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 8px; }
+    .bubble-text { overflow-wrap: anywhere; }
+    .bubble-markdown { font-size: 0.94rem; line-height: 1.7; color: var(--text-main); }
+    .bubble-markdown > *:first-child { margin-top: 0; }
+    .bubble-markdown > *:last-child { margin-bottom: 0; }
+    .bubble-markdown p { margin: 0 0 1rem; }
+    .bubble-markdown ul, .bubble-markdown ol { margin: 0 0 1rem; padding-left: 1.2rem; }
+    .bubble-markdown li + li { margin-top: 0.28rem; }
+    .bubble-markdown h1, .bubble-markdown h2, .bubble-markdown h3, .bubble-markdown h4 {
+      margin: 1.1rem 0 0.65rem;
+      font-size: 1rem;
+      line-height: 1.35;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .bubble-markdown strong { color: #ffffff; font-weight: 700; }
+    .bubble-markdown em { color: rgba(255,255,255,0.88); }
+    .bubble-markdown code {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.84em;
+      padding: 0.12rem 0.36rem;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: #f8fafc;
+    }
+    .bubble-markdown pre {
+      margin: 0 0 1rem;
+      padding: 0.9rem 1rem;
+      border-radius: 12px;
+      background: rgba(7, 11, 19, 0.92);
+      border: 1px solid rgba(255,255,255,0.08);
+      overflow: auto;
+    }
+    .bubble-markdown pre code {
+      background: transparent;
+      border: none;
+      padding: 0;
+      font-size: 0.84rem;
+      line-height: 1.6;
+      display: block;
+    }
+    .bubble-markdown blockquote {
+      margin: 0 0 1rem;
+      padding: 0.2rem 0 0.2rem 0.9rem;
+      border-left: 3px solid rgba(0,255,179,0.28);
+      color: rgba(255,255,255,0.82);
+    }
+    .bubble-markdown hr {
+      border: 0;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      margin: 1rem 0;
+    }
+    .bubble-markdown a {
+      color: #9b8bff;
+      text-decoration: none;
+      border-bottom: 1px solid rgba(155,139,255,0.22);
+    }
+    .bubble-markdown a:hover { color: #c7bfff; border-bottom-color: rgba(199,191,255,0.42); }
+    .bubble-markdown .md-local-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.38rem;
+      padding: 0.14rem 0.42rem;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.9);
+      font-size: 0.84em;
+    }
+    .bubble-markdown .md-local-link i { color: var(--text-muted); }
+    .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 0.2rem 0.56rem; font-size: 0.68rem; border: 1px solid transparent; }
+    .meta-pill { background: rgba(255,255,255,0.04); color: var(--text-muted); border-color: rgba(255,255,255,0.06); }
+    .status-queued, .status-cancelling { color: var(--orange); background: rgba(255,200,92,0.12); border-color: rgba(255,200,92,0.20); }
+    .status-running { color: var(--green); background: rgba(0,255,179,0.12); border-color: rgba(0,255,179,0.20); }
+    .status-completed { color: var(--green); background: rgba(0,255,179,0.12); border-color: rgba(0,255,179,0.22); }
+    .status-failed { color: var(--red); background: rgba(255,92,122,0.12); border-color: rgba(255,92,122,0.22); }
+    .activity-item { padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .activity-item:last-child { padding-bottom: 0; border-bottom: none; }
+    .activity-live-card {
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+      padding: 16px 18px;
+      transition: border-color 0.22s ease, background 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease;
+    }
+    .activity-live-card.is-updating {
+      border-color: rgba(0,255,179,0.24);
+      background: linear-gradient(180deg, rgba(0,255,179,0.10), rgba(255,255,255,0.03));
+      box-shadow: 0 10px 26px rgba(0,255,179,0.08);
+      animation: activityPulse 0.5s ease;
+    }
+    .activity-live-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+    .activity-live-copy { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.92rem; line-height: 1.55; }
+    .activity-inline-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .activity-summary-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 12px;
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      cursor: pointer;
+      user-select: none;
+    }
+    .activity-summary-toggle:hover { color: var(--text-main); }
+    @keyframes activityPulse {
+      0% { opacity: 0.58; transform: translateY(8px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+    .trace { font-size: 0.76rem; line-height: 1.55; }
+    textarea.prompt-box, .form-select {
+      background: rgba(7, 11, 19, 0.94);
+      color: var(--text-main);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 14px;
+    }
+    .form-select { min-height: 40px; padding-top: 0.4rem; padding-bottom: 0.4rem; }
+    textarea.prompt-box {
+      min-height: 46px;
+      max-height: 172px;
+      height: 46px;
+      resize: none;
+      overflow-y: hidden;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.88rem;
+      line-height: 1.5;
+      padding-top: 0.7rem;
+      padding-bottom: 0.7rem;
+    }
+    textarea.prompt-box:focus, .form-select:focus { border-color: rgba(0,255,179,0.28); box-shadow: 0 0 0 0.22rem rgba(0,255,179,0.08); }
+    .composer-grid { display: grid; gap: 7px; }
+    .composer-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .scroll-skin {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(148, 163, 184, 0.52) rgba(255,255,255,0.04);
+    }
+    .scroll-skin::-webkit-scrollbar { width: 10px; height: 10px; }
+    .scroll-skin::-webkit-scrollbar-track {
+      background: rgba(255,255,255,0.04);
+      border-radius: 999px;
+    }
+    .scroll-skin::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, rgba(148, 163, 184, 0.58), rgba(124, 92, 255, 0.42));
+      border-radius: 999px;
+      border: 2px solid rgba(15, 18, 25, 0.92);
+    }
+    .scroll-skin::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, rgba(173, 186, 205, 0.68), rgba(124, 92, 255, 0.56));
+    }
+    details { border-radius: 16px; background: var(--surface-soft); border: 1px solid rgba(255,255,255,0.06); padding: 0 16px; }
+    details.activity-details { margin-top: 12px; }
+    details + details { margin-top: 10px; }
+    summary { cursor: pointer; list-style: none; padding: 14px 0; color: var(--text-muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    summary::-webkit-details-marker { display: none; }
+    .trace-wrap { padding: 0 0 14px; }
+    .empty { min-height: 420px; display: grid; place-items: center; text-align: center; color: var(--text-muted); border: 1px dashed rgba(255,255,255,0.10); border-radius: 18px; background: rgba(255,255,255,0.02); padding: 28px; }
+    @media (max-width: 1199.98px) {
+      body { overflow: auto; min-height: 100vh; display: block; }
+      .page-shell { height: auto; min-height: 0; }
+      .assistant-main { display: block; height: auto; min-height: calc(100vh - 68px); overflow: visible; }
+      .assistant-app { grid-template-columns: 1fr; height: auto; }
+      .assistant-sidebar { order: 2; }
+      .assistant-main-column { order: 1; }
+      .assistant-inspector { order: 3; height: auto; }
+      .assistant-sidebar { border-radius: 18px; }
+      .assistant-main-column { height: auto; grid-template-rows: auto auto auto; }
+      .assistant-conversation-panel { height: auto; min-height: 520px; }
+      .inspector-scroll { overflow: visible; }
+      .history-list { max-height: 260px; }
+      .empty { min-height: 320px; }
+    }
+    @media (max-width: 767.98px) {
+      body { overflow: auto; min-height: 100vh; display: block; }
+      .page-shell { max-width: none; }
+      .surface-card { border-radius: 16px; }
+      .assistant-main { padding: 10px; height: auto; min-height: calc(100vh - 64px); }
+      .assistant-app { gap: 12px; }
+      .assistant-main-column { gap: 12px; }
+      .assistant-sidebar { border-radius: 16px; }
+      .assistant-hero { padding: 1rem 1.05rem; }
+      .conversation-panel-head { padding: 14px 14px 10px; }
+      .conversation-scroll { padding: 14px 14px 18px; max-height: none; overflow: visible; }
+      .assistant-conversation-panel { min-height: auto; }
+      .inspector-head { padding: 12px 14px 10px; }
+      .inspector-scroll { padding: 12px 14px 14px; }
+      .assistant-composer-panel { padding: 10px 12px 12px; }
+      .composer-controls { grid-template-columns: 1fr; }
+      .hero-title { font-size: 1.55rem; }
+      .minor { font-size: 0.74rem; }
+      .history-list { max-height: none; }
+      .history-card, .detail-block { padding: 11px 12px; }
+      .bubble { max-width: 100%; padding: 13px 14px; }
+      .bubble-markdown { font-size: 0.9rem; line-height: 1.65; }
+      .activity-live-copy { font-size: 0.88rem; }
+      textarea.prompt-box { min-height: 46px; max-height: 172px; }
+      details { padding: 0 12px; }
+      .empty { min-height: 250px; padding: 22px; }
+    }
+  </style>
+</head>
+<body class="astra-body">
+  <header class="navbar navbar-expand-lg navbar-glass sticky-top">
+    <div class="container-fluid px-3">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
+        <span class="brand-lockup">
+          <img class="brand-symbol" src="{{ url_for('static', filename='branding/astra-tradebot-symbol-light.svg') }}" alt="Astra symbol" />
+          <span class="brand-copy">
+            <span class="brand-kicker">Astra Tradebot</span>
+            <span class="brand-title">Codex Remote</span>
+          </span>
+        </span>
+        <span class="badge text-bg-secondary ms-1">Assistant</span>
+      </a>
+      <div class="d-flex align-items-center gap-2">
+        <a href="{{ url_for('dashboard') }}" class="btn btn-sm btn-outline-secondary"><i class="bi bi-graph-up-arrow"></i><span class="d-none d-sm-inline ms-1">Dashboard</span></a>
+        {% if auth_enabled and auth_is_admin %}
+        <a href="{{ url_for('admin_users') }}" class="btn btn-sm btn-outline-secondary"><i class="bi bi-people"></i><span class="d-none d-sm-inline ms-1">Usuarios</span></a>
+        {% endif %}
+        {% if auth_enabled %}
+        <form method="post" action="{{ url_for('logout') }}" class="m-0">
+          <button class="btn btn-sm btn-outline-secondary" type="submit"><i class="bi bi-box-arrow-right"></i><span class="d-none d-sm-inline ms-1">Sair</span></button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </header>
+
+  <main class="assistant-main">
+    <div class="page-shell">
+      <div class="assistant-app">
+        <aside class="surface-card assistant-sidebar p-3">
+          <div class="history-toolbar mb-3">
+            <div>
+              <div class="eyebrow">Conversas recentes</div>
+              <h2 class="h5 mb-0">Historico</h2>
+            </div>
+            <button id="new-conversation" class="btn btn-sm btn-outline-secondary" type="button"><i class="bi bi-plus-lg"></i><span class="d-none d-sm-inline ms-1">Nova conversa</span></button>
+          </div>
+          <div id="history-list" class="history-list scroll-skin">
+            <div class="empty" style="min-height: 220px;">Nenhuma conversa criada ainda.</div>
+          </div>
+        </aside>
+
+        <section class="assistant-main-column">
+          <section class="surface-card assistant-hero">
+            <div class="eyebrow mb-2">Remote control plane for the local repo</div>
+            <div class="hero-title">Codex <span class="accent">Remote</span></div>
+          </section>
+
+          <section class="surface-card assistant-conversation-panel">
+            <div class="conversation-panel-head">
+              <div class="eyebrow">Conversa selecionada</div>
+              <h2 class="h4 mb-1">Conversa</h2>
+              <div id="selected-subtitle" class="minor">Selecione uma conversa ou inicie uma nova.</div>
+            </div>
+            <div id="conversation-shell" class="conversation-scroll scroll-skin">
+              <div class="empty">
+                <div>
+                  <div class="h5 mb-2">Pronto para conversar com o Codex</div>
+                  <div>Seu prompt fica a direita. A resposta final fica a esquerda. Enquanto o trabalho roda, o stream de atividade aparece abaixo sem lotar a tela.</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="surface-card assistant-composer-panel">
+            <form id="assistant-form" class="composer-grid">
+              <div class="composer-toolbar">
+                <div class="d-flex gap-2 align-items-center">
+                  <div id="form-message" class="minor text-end"></div>
+                </div>
+                <div class="d-flex gap-2">
+                  <button id="refresh-jobs" class="btn btn-sm btn-outline-secondary" type="button"><i class="bi bi-arrow-clockwise"></i></button>
+                </div>
+              </div>
+
+              <div>
+                <textarea id="prompt" class="form-control prompt-box scroll-skin" rows="1" maxlength="12000"></textarea>
+              </div>
+
+              <div class="composer-controls">
+                <select id="model-select" class="form-select" aria-label="Modelo"></select>
+                <select id="reasoning-select" class="form-select" aria-label="Reasoning"></select>
+                <select id="access-select" class="form-select" aria-label="Acesso"></select>
+              </div>
+
+              <div class="composer-actions">
+                <button id="submit-job" class="btn btn-success" type="submit"><i class="bi bi-send"></i><span class="ms-1">Executar</span></button>
+                <button id="cancel-job" class="btn btn-outline-danger ms-auto" type="button" disabled><i class="bi bi-stop-circle"></i><span class="ms-1">Cancelar</span></button>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <aside class="surface-card assistant-inspector">
+          <div class="inspector-head">
+            <div class="eyebrow">Inspector</div>
+            <h2 class="h5 mb-1">Contexto da conversa</h2>
+            <div class="minor">Status, atividade e diff do último turno ficam aqui.</div>
+            <div class="inspector-meta">
+              <div class="inspector-stat"><span class="minor">Codex CLI</span><span id="cap-codex" class="status-value">--</span></div>
+              <div class="inspector-stat"><span class="minor">Repo</span><span id="cap-repo" class="status-value">--</span></div>
+              <div class="inspector-stat"><span class="minor">Jobs</span><span id="cap-running" class="status-value">--</span></div>
+            </div>
+          </div>
+          <div id="inspector-shell" class="inspector-scroll scroll-skin">
+            <div class="inspector-empty">
+              <div>Selecione uma conversa para ver atividade, execução e mudanças do repositório.</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script>
+    const state = {
+      capabilities: null,
+      conversations: [],
+      selectedConversationId: null,
+      selectedConversation: null,
+      selectedLatestJobId: null,
+      composerBootstrapped: false,
+      pollTimer: null,
+      lastActivitySignature: "",
+      openDetails: {},
+      forceNewConversation: false,
+      forceConversationStick: false,
+    };
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function isProbablyLocalPath(href) {
+      const value = String(href || "").trim();
+      return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("/") || value.startsWith(".\\") || value.startsWith("./");
+    }
+
+    function previewText(value) {
+      return String(value || "")
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/\*([^*]+)\*/g, "$1")
+        .replace(/^#{1,6}\s+/gm, "")
+        .replace(/^\s*[-*+]\s+/gm, "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\n{2,}/g, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+    }
+
+    function renderMarkdownToHtml(markdown) {
+      const source = String(markdown || "").trim();
+      if (!source) return "";
+      if (window.marked && typeof window.marked.use === "function" && !window.__astraMarkedConfigured) {
+        const renderer = new window.marked.Renderer();
+        renderer.link = (...args) => {
+          let href = "";
+          let title = "";
+          let text = "";
+          if (args.length === 1 && args[0] && typeof args[0] === "object") {
+            href = String(args[0].href || "").trim();
+            title = String(args[0].title || "").trim();
+            text = String(args[0].text || args[0].raw || "").trim();
+          } else {
+            href = String(args[0] || "").trim();
+            title = String(args[1] || "").trim();
+            text = String(args[2] || "").trim();
+          }
+          const safeHref = href;
+          const safeText = text || safeHref || "link";
+          if (!safeHref || isProbablyLocalPath(safeHref)) {
+            return `<span class="md-local-link" title="${escapeHtml(safeHref)}"><i class="bi bi-file-earmark-text"></i><span>${escapeHtml(safeText)}</span></span>`;
+          }
+          const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+          return `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer nofollow"${titleAttr}>${escapeHtml(safeText)}</a>`;
+        };
+        window.marked.use({
+          gfm: true,
+          breaks: true,
+          renderer,
+        });
+        window.__astraMarkedConfigured = true;
+      }
+      const html = window.marked ? window.marked.parse(source) : escapeHtml(source).replace(/\n/g, "<br>");
+      if (window.DOMPurify) {
+        return window.DOMPurify.sanitize(html, {
+          USE_PROFILES: { html: true },
+          ALLOWED_ATTR: ["href", "target", "rel", "title", "class"],
+        });
+      }
+      return html;
+    }
+
+    function statusClass(status) {
+      const raw = String(status || "queued").toLowerCase();
+      if (["queued", "running", "completed", "failed", "cancelling"].includes(raw)) return "status-" + raw;
+      return "status-queued";
+    }
+
+    function statusLabel(status) {
+      const raw = String(status || "queued").toLowerCase();
+      const labels = { queued: "Na fila", running: "Executando", completed: "Concluido", failed: "Falhou", cancelling: "Cancelando" };
+      return labels[raw] || raw;
+    }
+
+    function formatDate(value) {
+      if (!value) return "--";
+      const dt = new Date(value);
+      if (Number.isNaN(dt.getTime())) return String(value);
+      return dt.toLocaleString("pt-BR");
+    }
+
+    function formatClock(value) {
+      if (!value) return "";
+      const dt = new Date(value);
+      if (Number.isNaN(dt.getTime())) return "";
+      return dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function setSelectOptions(selectId, options, selectedValue) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      const current = selectedValue || select.value;
+      select.innerHTML = options.map((item) => {
+        const id = item.id || item.label || "";
+        const label = item.label || id;
+        return `<option value="${escapeHtml(id)}" ${id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      }).join("");
+    }
+
+    function ensureComposerDefaults() {
+      if (!state.capabilities) return;
+      const defaults = state.capabilities.defaults || {};
+      setSelectOptions("model-select", state.capabilities.supported_models || [], state.composerBootstrapped ? document.getElementById("model-select").value : defaults.model);
+      setSelectOptions("reasoning-select", state.capabilities.supported_reasoning_efforts || [], state.composerBootstrapped ? document.getElementById("reasoning-select").value : defaults.reasoning_effort);
+      setSelectOptions("access-select", state.capabilities.supported_access_modes || [], state.composerBootstrapped ? document.getElementById("access-select").value : defaults.access_mode);
+      state.composerBootstrapped = true;
+    }
+
+    async function fetchCapabilities() {
+      const res = await fetch("{{ url_for('assistant_capabilities_api') }}");
+      if (!res.ok) throw new Error("Falha ao consultar capabilities.");
+      state.capabilities = await res.json();
+      const capCodex = document.getElementById("cap-codex");
+      const capRepo = document.getElementById("cap-repo");
+      const capRunning = document.getElementById("cap-running");
+      if (capCodex) capCodex.textContent = state.capabilities.codex_available ? "online" : "nao encontrado";
+      if (capRepo) capRepo.textContent = state.capabilities.repo_root || "--";
+      if (capRunning) capRunning.textContent = String(state.capabilities.running_jobs || 0);
+      ensureComposerDefaults();
+    }
+
+    function formatTurnLabel(turnCount) {
+      const value = Number(turnCount || 0);
+      if (value <= 1) return "1 turno";
+      return `${value} turnos`;
+    }
+
+    function updateComposerTarget() {
+      const root = document.getElementById("composer-target");
+      if (!root) return;
+      if (state.forceNewConversation || !state.selectedConversationId) {
+        root.innerHTML = '<span class="pill meta-pill">Nova conversa</span><span>O proximo envio abre uma thread nova.</span>';
+        return;
+      }
+      const conversation = state.conversations.find((item) => item.id === state.selectedConversationId) || state.selectedConversation;
+      if (!conversation) {
+        root.innerHTML = '<span class="pill meta-pill">Nova conversa</span><span>O proximo envio abre uma thread nova.</span>';
+        return;
+      }
+      root.innerHTML = `
+        <span class="pill meta-pill">Continuando conversa</span>
+        <span>${escapeHtml(conversation.id)}</span>
+        <span class="pill meta-pill">${escapeHtml(formatTurnLabel(conversation.turn_count || 0))}</span>
+      `;
+    }
+
+    function autosizePrompt() {
+      const prompt = document.getElementById("prompt");
+      if (!prompt) return;
+      prompt.style.height = "46px";
+      const nextHeight = Math.min(prompt.scrollHeight, 172);
+      prompt.style.height = `${Math.max(nextHeight, 46)}px`;
+      prompt.style.overflowY = prompt.scrollHeight > 172 ? "auto" : "hidden";
+    }
+
+    async function fetchConversations() {
+      const res = await fetch("{{ url_for('assistant_conversations_api') }}");
+      if (!res.ok) throw new Error("Falha ao listar conversas.");
+      const data = await res.json();
+      state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
+      if (state.selectedConversationId && !state.conversations.some((conversation) => conversation.id === state.selectedConversationId)) {
+        state.selectedConversationId = null;
+        state.selectedConversation = null;
+        state.selectedLatestJobId = null;
+      }
+      if (!state.forceNewConversation && !state.selectedConversationId && state.conversations.length) {
+        state.selectedConversationId = state.conversations[0].id;
+      }
+      renderHistory();
+      updateComposerTarget();
+    }
+
+    function renderHistory() {
+      const root = document.getElementById("history-list");
+      if (!state.conversations.length) {
+        root.innerHTML = '<div class="empty" style="min-height: 220px;">Nenhuma conversa criada ainda.</div>';
+        return;
+      }
+      root.innerHTML = state.conversations.map((conversation) => `
+        <div class="history-card ${conversation.id === state.selectedConversationId && !state.forceNewConversation ? "active" : ""}" data-conversation-id="${escapeHtml(conversation.id)}">
+          <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="minor mono">${escapeHtml(formatDate(conversation.updated_at || conversation.created_at))}</div>
+            <span class="pill ${statusClass(conversation.status)}">${escapeHtml(statusLabel(conversation.status))}</span>
+          </div>
+          <div class="d-flex flex-wrap gap-2 mt-2">
+            <span class="pill meta-pill">${escapeHtml(conversation.model || "--")}</span>
+            <span class="pill meta-pill">${escapeHtml(conversation.reasoning_effort || "--")}</span>
+            <span class="pill meta-pill">${escapeHtml(formatTurnLabel(conversation.turn_count || 0))}</span>
+          </div>
+          <div class="history-title">${escapeHtml(conversation.prompt || conversation.latest_prompt || "")}</div>
+          <div class="history-preview">${escapeHtml(previewText(conversation.response_preview || conversation.status_line || "Sem resposta final ainda."))}</div>
+        </div>
+      `).join("");
+      root.querySelectorAll(".history-card").forEach((node) => {
+        node.addEventListener("click", async () => {
+          state.forceNewConversation = false;
+          state.forceConversationStick = true;
+          state.selectedConversationId = node.getAttribute("data-conversation-id");
+          renderHistory();
+          updateComposerTarget();
+          await refreshSelectedConversation();
+        });
+      });
+    }
+
+    function activityKindLabel(kind) {
+      if (kind === "tool") return "Ferramenta";
+      if (kind === "assistant") return "Assistente";
+      return "Sistema";
+    }
+
+    function activityStatusLabel(status) {
+      const raw = String(status || "info").toLowerCase();
+      const labels = { running: "Rodando", completed: "Concluido", failed: "Falhou", info: "Info" };
+      return labels[raw] || raw;
+    }
+
+    function captureOpenDetailsState() {
+      document.querySelectorAll("details[data-detail-key]").forEach((node) => {
+        const key = node.getAttribute("data-detail-key");
+        if (key) state.openDetails[key] = !!node.open;
+      });
+    }
+
+    function shouldStickConversationScroll() {
+      const root = document.getElementById("conversation-shell");
+      if (!root) return true;
+      const distanceToBottom = root.scrollHeight - root.scrollTop - root.clientHeight;
+      return distanceToBottom < 140;
+    }
+
+    function renderTurn(job, transcript) {
+      const finalResponse = String((transcript && transcript.final_response) || job.final_response || "").trim();
+      const statusLine = String((transcript && transcript.status_line) || "").trim();
+      const assistantText = finalResponse || statusLine || job.error || "Aguardando resposta do Codex.";
+      return `
+        <div class="bubble-row user">
+          <div class="bubble user">
+            <div class="bubble-role">Voce</div>
+            <div class="bubble-text bubble-markdown">${renderMarkdownToHtml(job.prompt || "")}</div>
+            <div class="d-flex flex-wrap gap-2 mt-3">
+              <span class="pill meta-pill">${escapeHtml(formatDate(job.created_at))}</span>
+              <span class="pill meta-pill">${escapeHtml(job.created_by || "--")}</span>
+            </div>
+          </div>
+        </div>
+        <div class="bubble-row assistant">
+          <div class="bubble assistant">
+            <div class="bubble-role">Codex</div>
+            <div class="bubble-text bubble-markdown">${renderMarkdownToHtml(assistantText)}</div>
+            <div class="d-flex flex-wrap gap-2 mt-3">
+              <span class="pill ${statusClass(job.status)}">${escapeHtml(statusLabel(job.status))}</span>
+              <span class="pill meta-pill">${escapeHtml(job.model || "--")}</span>
+              <span class="pill meta-pill">${escapeHtml(job.reasoning_effort || "--")}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderConversation(payload) {
+      const root = document.getElementById("conversation-shell");
+      const keepAtBottom = state.forceConversationStick || shouldStickConversationScroll();
+      if (!payload || !payload.conversation) {
+        state.lastActivitySignature = "";
+        root.innerHTML = '<div class="empty"><div><div class="h5 mb-2">Nada selecionado</div><div>Escolha uma conversa no historico ou clique em "Nova conversa" para abrir uma thread nova.</div></div></div>';
+        state.forceConversationStick = false;
+        return;
+      }
+      const conversation = payload.conversation || {};
+      const turns = Array.isArray(payload.turns) ? payload.turns : [];
+      const latestTurn = turns.length ? turns[turns.length - 1] : null;
+      const job = latestTurn ? (latestTurn.job || null) : null;
+      const transcript = latestTurn ? (latestTurn.transcript || {}) : {};
+      if (!job) {
+        state.lastActivitySignature = "";
+        root.innerHTML = '<div class="empty"><div><div class="h5 mb-2">Conversa vazia</div><div>Essa conversa ainda nao tem turnos visiveis.</div></div></div>';
+        return;
+      }
+      const statusLine = String((transcript && transcript.status_line) || "").trim();
+      root.innerHTML = `
+        <div class="d-grid gap-3">
+          ${turns.map((turn) => renderTurn(turn.job || {}, turn.transcript || {})).join("")}
+        </div>
+      `;
+      if (keepAtBottom) {
+        root.scrollTop = root.scrollHeight;
+      }
+      state.forceConversationStick = false;
+    }
+
+    function renderInspector(payload) {
+      const root = document.getElementById("inspector-shell");
+      if (!payload || !payload.conversation) {
+        state.lastActivitySignature = "";
+        root.innerHTML = '<div class="inspector-empty"><div>Selecione uma conversa para ver atividade, execução e mudanças do repositório.</div></div>';
+        return;
+      }
+      const turns = Array.isArray(payload.turns) ? payload.turns : [];
+      const latestTurn = turns.length ? turns[turns.length - 1] : null;
+      const job = latestTurn ? (latestTurn.job || null) : null;
+      const transcript = latestTurn ? (latestTurn.transcript || {}) : {};
+      if (!job) {
+        root.innerHTML = '<div class="inspector-empty"><div>Essa conversa ainda não tem detalhes operacionais disponíveis.</div></div>';
+        return;
+      }
+      const statusLine = String((transcript && transcript.status_line) || "").trim();
+      const activity = Array.isArray(transcript && transcript.activity) ? transcript.activity : [];
+      const latestActivity = activity.length ? activity[activity.length - 1] : null;
+      const latestActivityText = String((latestActivity && latestActivity.text) || statusLine || "Nenhuma atividade registrada ainda.").trim();
+      const latestActivityKind = String((latestActivity && latestActivity.kind) || "system");
+      const latestActivityStatus = String((latestActivity && latestActivity.status) || (job.status === "running" ? "running" : "info"));
+      const latestActivityTime = formatClock((latestActivity && latestActivity.timestamp) || "");
+      const latestActivitySignature = latestActivity ? `${latestActivity.kind}|${latestActivity.status}|${latestActivity.text}` : `${job.id}|${job.status}|${statusLine}`;
+      const activityUpdated = state.lastActivitySignature && state.lastActivitySignature !== latestActivitySignature;
+      state.lastActivitySignature = latestActivitySignature;
+      const usage = transcript && transcript.usage ? transcript.usage : {};
+      const filteredTrace = String((transcript && transcript.filtered_trace) || "").trim() || "Sem trace filtrado.";
+      const changedFiles = Array.isArray(job.changed_files) && job.changed_files.length ? job.changed_files.join("\n") : "Nenhum arquivo novo detectado.";
+      const diffText = String(job.diff_stat || "").trim() || "Sem diff disponivel.";
+      const commandText = String(job.command || "").trim() || "--";
+      root.innerHTML = `
+        <div class="inspector-stack">
+          <div class="detail-block">
+            <div class="section-title">Sessão</div>
+            <div class="d-flex flex-wrap gap-2">
+              <span class="pill ${statusClass(job.status)}">${escapeHtml(statusLabel(job.status))}</span>
+              <span class="pill meta-pill">${escapeHtml(job.model || "--")}</span>
+              <span class="pill meta-pill">${escapeHtml(job.reasoning_effort || "--")}</span>
+              <span class="pill meta-pill">${escapeHtml(job.access_mode || "--")}</span>
+            </div>
+            <div class="minor mt-2">${escapeHtml(payload.conversation.id || "")}</div>
+          </div>
+          <div class="detail-block">
+            <div class="section-title">Atividade</div>
+            <div class="activity-live-card ${activityUpdated ? "is-updating" : ""}">
+              <div class="activity-live-head">
+                <div class="eyebrow">${escapeHtml(activityKindLabel(latestActivityKind))}</div>
+                <div class="d-flex flex-wrap gap-2 align-items-center">
+                  ${latestActivityTime ? `<span class="pill meta-pill">${escapeHtml(latestActivityTime)}</span>` : ""}
+                  <span class="pill ${statusClass(latestActivityStatus)}">${escapeHtml(activityStatusLabel(latestActivityStatus))}</span>
+                </div>
+              </div>
+              <div class="activity-live-copy">${escapeHtml(latestActivityText)}</div>
+              <div class="activity-inline-meta">
+                <span class="pill meta-pill">${escapeHtml(activity.length ? `${activity.length} eventos` : "sem eventos")}</span>
+                ${job.status === "running" ? '<span class="pill meta-pill">ao vivo</span>' : ""}
+              </div>
+            </div>
+          </div>
+          ${activity.length > 1 ? `
+            <details class="activity-details" data-detail-key="activity-history" ${state.openDetails["activity-history"] ? "open" : ""}>
+              <summary>Histórico da atividade</summary>
+              <div class="trace-wrap">
+                <div class="activity-list">
+                  ${activity.map((item) => `
+                    <div class="activity-item">
+                      <div class="d-flex justify-content-between align-items-start gap-2 mb-1">
+                        <div class="eyebrow">${escapeHtml(activityKindLabel(item.kind))}</div>
+                        <div class="d-flex flex-wrap gap-2 align-items-center">
+                          ${formatClock(item.timestamp || "") ? `<span class="pill meta-pill">${escapeHtml(formatClock(item.timestamp || ""))}</span>` : ""}
+                          <span class="pill ${statusClass(item.status || "queued")}">${escapeHtml(activityStatusLabel(item.status || "info"))}</span>
+                        </div>
+                      </div>
+                      <div class="activity-text">${escapeHtml(item.text || "")}</div>
+                    </div>
+                  `).join("")}
+                </div>
+              </div>
+            </details>
+          ` : ""}
+          ${(usage.input_tokens || usage.output_tokens || usage.cached_input_tokens) ? `
+            <div class="detail-block">
+              <div class="section-title">Uso</div>
+              <div class="d-flex flex-wrap gap-2">
+                <span class="pill meta-pill">input ${escapeHtml(String(usage.input_tokens || 0))}</span>
+                <span class="pill meta-pill">cached ${escapeHtml(String(usage.cached_input_tokens || 0))}</span>
+                <span class="pill meta-pill">output ${escapeHtml(String(usage.output_tokens || 0))}</span>
+              </div>
+            </div>
+          ` : ""}
+          <details data-detail-key="execution-details" ${state.openDetails["execution-details"] ? "open" : ""}>
+            <summary>Execução</summary>
+            <div class="trace-wrap"><div class="trace mono">${escapeHtml(commandText)}</div></div>
+          </details>
+          <details data-detail-key="git-details" ${state.openDetails["git-details"] ? "open" : ""}>
+            <summary>Git e arquivos</summary>
+            <div class="trace-wrap"><div class="trace mono">${escapeHtml(changedFiles)}\n\n${escapeHtml(diffText)}</div></div>
+          </details>
+          <details data-detail-key="trace-details" ${state.openDetails["trace-details"] ? "open" : ""}>
+            <summary>Trace filtrado</summary>
+            <div class="trace-wrap"><div class="trace mono">${escapeHtml(filteredTrace)}</div></div>
+          </details>
+        </div>
+      `;
+    }
+
+    async function refreshSelectedConversation() {
+      if (state.forceNewConversation || !state.selectedConversationId) {
+        state.selectedConversation = null;
+        state.selectedLatestJobId = null;
+        document.getElementById("selected-subtitle").textContent = "O proximo envio abre uma nova conversa.";
+        document.getElementById("cancel-job").disabled = true;
+        renderConversation(null);
+        renderInspector(null);
+        return;
+      }
+      captureOpenDetailsState();
+      const res = await fetch(`/api/assistant/conversations/${encodeURIComponent(state.selectedConversationId)}`);
+      if (!res.ok) throw new Error("Falha ao carregar conversa.");
+      const payload = await res.json();
+      const conversation = payload.conversation || null;
+      const turns = Array.isArray(payload.turns) ? payload.turns : [];
+      const latestTurn = turns.length ? turns[turns.length - 1] : null;
+      const latestJob = latestTurn ? (latestTurn.job || null) : null;
+      state.selectedConversation = conversation;
+      state.selectedLatestJobId = latestJob ? latestJob.id : null;
+      document.getElementById("selected-subtitle").textContent = conversation
+        ? `${conversation.id} - ${formatTurnLabel(conversation.turn_count || 0)} - atualizada ${formatDate(conversation.updated_at || conversation.created_at)}`
+        : "Selecione uma conversa ou inicie uma nova.";
+      document.getElementById("cancel-job").disabled = !latestJob || String(latestJob.status) !== "running";
+      renderConversation(payload);
+      renderInspector(payload);
+      updateComposerTarget();
+    }
+
+    async function submitJob(event) {
+      event.preventDefault();
+      const prompt = document.getElementById("prompt").value.trim();
+      const model = document.getElementById("model-select").value;
+      const reasoning_effort = document.getElementById("reasoning-select").value;
+      const access_mode = document.getElementById("access-select").value;
+      if (!prompt) {
+        document.getElementById("form-message").textContent = "Digite um prompt antes de enviar.";
+        return;
+      }
+      const submitButton = document.getElementById("submit-job");
+      submitButton.disabled = true;
+      document.getElementById("form-message").textContent = "Criando job...";
+      try {
+        const conversation_id = state.forceNewConversation ? "" : (state.selectedConversationId || "");
+        const res = await fetch("{{ url_for('assistant_jobs_api') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, model, reasoning_effort, access_mode, conversation_id }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Falha ao criar job.");
+        state.forceNewConversation = false;
+        state.forceConversationStick = true;
+        state.selectedConversationId = data.job.conversation_id || data.job.session_id || data.job.id;
+        state.selectedLatestJobId = data.job.id;
+        document.getElementById("prompt").value = "";
+        autosizePrompt();
+        document.getElementById("form-message").textContent = conversation_id ? "Mensagem enviada para a conversa atual." : "Nova conversa iniciada.";
+        await refreshAll();
+      } catch (err) {
+        document.getElementById("form-message").textContent = err.message || String(err);
+      } finally {
+        submitButton.disabled = false;
+      }
+    }
+
+    async function cancelSelectedJob() {
+      if (!state.selectedLatestJobId) return;
+      const res = await fetch(`/api/assistant/jobs/${encodeURIComponent(state.selectedLatestJobId)}/cancel`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        document.getElementById("form-message").textContent = data.error || "Falha ao cancelar.";
+        return;
+      }
+      document.getElementById("form-message").textContent = "Cancelamento solicitado.";
+      await refreshAll();
+    }
+
+    async function refreshAll() {
+      try {
+        await fetchCapabilities();
+        await fetchConversations();
+        await refreshSelectedConversation();
+      } catch (err) {
+        document.getElementById("form-message").textContent = err.message || String(err);
+      }
+    }
+
+    function startNewConversation() {
+      state.forceNewConversation = true;
+      state.forceConversationStick = true;
+      state.selectedConversationId = null;
+      state.selectedConversation = null;
+      state.selectedLatestJobId = null;
+      state.lastActivitySignature = "";
+      renderHistory();
+      updateComposerTarget();
+      refreshSelectedConversation();
+      document.getElementById("form-message").textContent = "Nova conversa pronta.";
+      document.getElementById("prompt").focus();
+      autosizePrompt();
+    }
+
+    document.getElementById("assistant-form").addEventListener("submit", submitJob);
+    document.getElementById("cancel-job").addEventListener("click", cancelSelectedJob);
+    document.getElementById("refresh-jobs").addEventListener("click", refreshAll);
+    document.getElementById("new-conversation").addEventListener("click", startNewConversation);
+    document.getElementById("prompt").addEventListener("input", autosizePrompt);
+    autosizePrompt();
+    refreshAll();
+    state.pollTimer = window.setInterval(refreshAll, 4000);
+  </script>
+</body>
+</html>

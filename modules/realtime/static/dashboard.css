@@ -25,6 +25,8 @@
 #main-tabs .nav-link,
 #side-tabs .nav-link {
   border-radius: 10px;
+  font-size: 0.9rem;
+  line-height: 1.2;
 }
 
 #side-tabs .nav-link {
@@ -102,7 +104,7 @@
 }
 
 .chart-wrap {
-  height: 260px;
+  height: 240px;
 }
 
 tr.detail-row td {
@@ -172,4 +174,76 @@ tr.row-expanded td {
 .table tbody tr:not(.expanded-chart-row):hover {
   cursor: pointer;
   background: rgba(255, 255, 255, 0.04);
+}
+
+.dashboard-sidebar .card-body {
+  padding: 0.95rem !important;
+}
+
+@media (max-width: 991.98px) {
+  .sticky-tabs {
+    top: 0.45rem;
+    padding-bottom: 0.2rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+
+  #main-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    gap: 0.5rem;
+    padding-bottom: 0.2rem;
+    scrollbar-width: thin;
+  }
+
+  #main-tabs .nav-item {
+    flex: 0 0 auto;
+  }
+
+  #main-tabs .nav-link {
+    white-space: nowrap;
+    padding: 0.58rem 0.78rem;
+  }
+
+  .chart-wrap {
+    height: 220px;
+  }
+}
+
+@media (max-width: 767.98px) {
+  .sticky-tabs {
+    top: 0.3rem;
+  }
+
+  .kpi-card .kpi-value {
+    font-size: 1.28rem;
+  }
+
+  .kpi-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+  }
+
+  .kpi-icon i {
+    font-size: 1rem;
+  }
+
+  .chart-wrap {
+    height: 205px;
+  }
+
+  .card .card-header,
+  .card .card-body {
+    padding-left: 0.9rem !important;
+    padding-right: 0.9rem !important;
+  }
+
+  .table td,
+  .table th {
+    padding: 0.68rem 0.72rem;
+  }
+
+  .table-responsive {
+    font-size: 0.85rem;
+  }
 }

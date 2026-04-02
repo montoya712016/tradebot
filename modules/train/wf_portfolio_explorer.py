@@ -233,6 +233,14 @@ def _read_results_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, low_memory=False)
 
 
+def _csv_key_str(value: object) -> str:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if lowered in {"nan", "none", "<na>", "nat"}:
+        return ""
+    return text
+
+
 def _append_csv(path: Path, row: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     last_err: Exception | None = None

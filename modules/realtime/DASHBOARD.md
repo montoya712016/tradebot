@@ -1,8 +1,8 @@
 # Dashboard Guide
 
-Visão consolidada do sistema de dashboards do Tradebot.
+Visao consolidada do sistema de dashboards do Tradebot.
 
-## Superfícies atuais
+## Superficies atuais
 
 ### 1. Dashboard do bot
 - entrypoint: `python scripts/bot_dashboard.py`
@@ -10,7 +10,7 @@ Visão consolidada do sistema de dashboards do Tradebot.
 - templates: `modules/realtime/templates/`
 - assets: `modules/realtime/static/`
 - fluxo web:
-  - `/` = landing pública da Astra/Tradebot
+  - `/` = landing publica da Astra/Tradebot
   - `/login` = login
   - `/dashboard` = dashboard realtime protegido
 
@@ -19,35 +19,47 @@ Visão consolidada do sistema de dashboards do Tradebot.
 - app Flask inline: `scripts/fair_dashboard.py`
 - reutiliza os mesmos templates e assets compartilhados do realtime
 - fluxo web:
-  - `/` = landing pública da Astra/Tradebot
+  - `/` = landing publica da Astra/Tradebot
   - `/login` = login
   - `/dashboard` = dashboard do explore protegido
+  - `/assistant` = painel administrativo para controle remoto do Codex local
 
 ## Identidade visual
 
-Os dois dashboards agora compartilham a mesma base visual:
+Os dois dashboards compartilham a mesma base visual:
 - branding `Astra Tradebot`
 - navbar glass
 - cards e hero shell no mesmo estilo
 - paleta, spacing e atmosfera visual compartilhados
 - CSS base comum em `modules/realtime/static/astra_shared.css`
-- landing pública compartilhada em `modules/realtime/templates/landing.html`
-- a landing pública já expõe o logo SVG institucional e um bloco de métricas comerciais ilustrativas para mock de posicionamento
-- as superfícies protegidas também passaram a usar o símbolo SVG da Astra no navbar, em vez do antigo `brand-dot`
+- landing publica compartilhada em `modules/realtime/templates/landing.html`
+- superficies protegidas com o simbolo SVG da Astra no navbar
 
-O conteúdo e layout mudam por dashboard, mas a identidade visual é a mesma.
+Tambem foi consolidado um ajuste de escala e responsividade:
+- tipografia e paddings mais compactos
+- cards e badges em escala menos inflada
+- melhor leitura em laptop e desktop sem desperdiçar altura
+- comportamento mobile revisado para login, cadastro, admin, dashboard e `/assistant`
+- navegação lateral do dashboard realtime escondida em mobile, mantendo as tabs principais no topo
+- no `/assistant`, conversa e composer aparecem antes do histórico em telas pequenas
 
-## Autenticação
+- na landing mobile, CTAs deixam de ocupar 100% da largura sem necessidade
+- no login mobile, o card volta a ficar centrado verticalmente dentro da viewport util
+- no Fair Explore mobile, a tabela principal fica contida em wrapper com scroll horizontal; as metricas seguem visiveis e o campo `Trial` foi compactado para `label/model/bt`
 
-O login foi movido para dentro da aplicação.
+O conteudo e layout mudam por dashboard, mas a identidade visual e a mesma.
 
-### O que existe hoje
-- landing pública institucional antes do login
+## Autenticacao
+
+O login foi movido para dentro da aplicacao.
+
+Hoje existe:
+- landing publica institucional antes do login
 - tela oficial de login
 - tela oficial de cadastro
-- sessão por cookie
-- logout pela própria UI
-- proteção de rotas no backend
+- sessao por cookie
+- logout pela propria UI
+- protecao de rotas no backend
 
 Arquivos principais:
 - `modules/realtime/auth.py`
@@ -55,14 +67,12 @@ Arquivos principais:
 - `modules/realtime/templates/register.html`
 - `modules/realtime/templates/admin_users.html`
 
-## Base local de usuários
+## Base local de usuarios
 
-Os usuários ficam em arquivo local:
+Os usuarios ficam em:
 - `local/dashboard_users.json`
 
-Esse arquivo não deve ir para o GitHub e é ignorado pelo repositório.
-
-Cada usuário pode ter:
+Cada usuario pode ter:
 - `full_name`
 - `cpf`
 - `phone`
@@ -76,38 +86,37 @@ Cada usuário pode ter:
 - `approved_at`
 - `notes`
 
-As senhas são salvas com hash, não em texto puro.
+As senhas sao salvas com hash, nao em texto puro.
 
-## Cadastro e aprovação
+## Cadastro e aprovacao
 
 Fluxo atual:
-1. o usuário abre `/login`
+1. o usuario abre `/login`
 2. clica em `Criar conta`
 3. preenche o cadastro
 4. a conta entra na base local com `enabled=false`
-5. um admin/owner aprova ou bloqueia pela UI de usuários
+5. um admin/owner aprova ou bloqueia pela UI de usuarios
 
-Sem aprovação, o login mostra que a conta foi cadastrada mas ainda não foi liberada.
+Sem aprovacao, o login informa que a conta ainda nao foi liberada.
 
-## Papéis
-
-Hoje existem 3 níveis:
+## Papeis
 
 ### User
-- consegue entrar no dashboard se `enabled=true`
-- não administra outros usuários
+- entra no dashboard se `enabled=true`
+- nao administra outros usuarios
 
 ### Admin
-- vê a tela `Usuários`
-- pode liberar, bloquear e excluir usuários comuns
-- pode promover/remover admins, respeitando as proteções do sistema
+- ve a tela `Usuarios`
+- pode liberar, bloquear e excluir usuarios comuns
+- pode promover/remover admins respeitando as protecoes do sistema
+- no Fair Explore, tambem acessa `/assistant`
 
 ### Owner
-- nível máximo
+- nivel maximo
 - pode gerenciar owners
 - nenhum admin comum pode agir contra uma conta owner
-- o owner não pode remover o próprio papel de owner
-- o sistema não permite remover o último owner
+- o owner nao pode remover o proprio papel de owner
+- o sistema nao permite remover o ultimo owner
 
 ## Admin panel
 
@@ -120,37 +129,38 @@ A tela mostra:
 - liberadas
 - admins
 - owners
-- lista completa de usuários
+- lista completa de usuarios
 - status e papel
-- ações de liberar, bloquear, excluir, promover admin e promover owner
+- acoes de liberar, bloquear, excluir, promover admin e promover owner
 
-Somente admins enxergam o botão `Usuários`.
-As rotas também validam permissão no backend, então esconder o botão não é a única proteção.
+Somente admins enxergam o botao `Usuarios`.
+As rotas tambem validam permissao no backend.
 
-## Segurança prática
+## Seguranca pratica
 
-Abrir DevTools no navegador não concede acesso extra por si só.
+Abrir DevTools no navegador nao concede acesso extra por si so.
 
-O importante é que:
-- os dados administrativos não sejam enviados para usuários comuns
+O importante e que:
+- os dados administrativos nao sejam enviados para usuarios comuns
 - as rotas de admin validem o papel no servidor
 
-Hoje a proteção principal está no backend:
-- páginas privadas exigem sessão válida
+Protecoes principais hoje:
+- paginas privadas exigem sessao valida
 - `/admin/users` exige admin
-- ações sensíveis exigem admin
-- ações contra owner exigem owner
+- acoes sensiveis exigem admin
+- acoes contra owner exigem owner
+- `/assistant` exige admin
 
-## Bootstrap do primeiro usuário
+## Bootstrap do primeiro usuario
 
-O modo padrão atual não cria conta bootstrap automaticamente.
+O modo padrao atual nao cria conta bootstrap automaticamente.
 
-Então o primeiro acesso administrativo pode exigir uma liberação inicial manual no JSON local:
+O primeiro acesso administrativo pode exigir uma liberacao inicial manual no JSON local:
 - marcar `enabled=true`
 - marcar `is_admin=true`
 - marcar `is_owner=true`
 
-Depois disso, os próximos usuários já podem ser aprovados pela interface.
+Depois disso, os proximos usuarios podem ser aprovados pela interface.
 
 ## Endpoints relevantes
 
@@ -174,11 +184,22 @@ Depois disso, os próximos usuários já podem ser aprovados pela interface.
 - `/api/data`
 - `/artifact/<path>`
 
+### Assistant remoto do Fair Explore
+- `GET /assistant`
+- `GET /api/assistant/capabilities`
+- `GET /api/assistant/conversations`
+- `GET /api/assistant/conversations/<conversation_id>`
+- `GET /api/assistant/jobs`
+- `POST /api/assistant/jobs`
+- `GET /api/assistant/jobs/<job_id>`
+- `GET /api/assistant/jobs/<job_id>/log`
+- `POST /api/assistant/jobs/<job_id>/cancel`
+
 ## Ngrok
 
-O Fair Explore pode abrir ngrok pelo próprio script.
+O Fair Explore pode abrir ngrok pelo proprio script.
 
-O `basic auth` do ngrok deixou de ser a camada principal de login. A autenticação agora vive dentro da UI do dashboard.
+O basic auth do ngrok deixou de ser a camada principal de login. A autenticacao vive dentro da UI do dashboard.
 
 ## Arquivos principais
 
@@ -189,6 +210,10 @@ O `basic auth` do ngrok deixou de ser a camada principal de login. A autenticaç
 
 ### Fair Explore
 - `scripts/fair_dashboard.py`
+
+### Assistant remoto
+- `modules/realtime/remote_control.py`
+- `modules/realtime/templates/fair_assistant.html`
 
 ### Auth e UI compartilhados
 - `modules/realtime/auth.py`
@@ -201,14 +226,24 @@ O `basic auth` do ngrok deixou de ser a camada principal de login. A autenticaç
 
 ## Landing publica
 
-As duas landings publicas agora usam artefatos reais do OOS walk-forward `v5`:
+As duas landings publicas usam artefatos reais do OOS walk-forward `v5`:
 - metricas carregadas de `data/generated/fair_wf_explore_v5/robustness_report`
 - curva stitched OOS embutida em Plotly para uso visual no site
 - mesma imagem e mesmo bloco de metricas tanto no realtime quanto no Fair Explore
-- o bloco de performance ganhou protagonismo visual e a copy foi simplificada para enfatizar robustez, drawdown e validade comercial do processo
 
-## Observações
+## Observacoes
 
-- O dashboard do bot e o Fair Explore já estão no mesmo padrão visual.
-- O painel de usuários hoje é compartilhado entre os dois.
-- O runtime do bot ainda tem partes legadas no backend que merecem refatoração futura, mas a camada de dashboard/auth já foi centralizada.
+- O dashboard do bot e o Fair Explore ja estao no mesmo padrao visual.
+- O painel de usuarios hoje e compartilhado entre os dois.
+- O `/assistant` agora funciona como uma superficie de chat para o `codex exec`: mensagem do usuario, resposta final do Codex e atividade operacional separada.
+- As respostas finais do `/assistant` agora renderizam markdown com tipografia dedicada; referencias locais do repositório deixam de aparecer como markdown cru.
+- O historico do `/assistant` agora e por conversa; com uma thread selecionada, o proximo envio continua a mesma sessao via `codex exec resume`.
+- No desktop, o `/assistant` agora usa layout de app: sidebar de historico na esquerda em altura integral, conversa com scroll proprio e composer fixado no rodape do painel principal.
+- O contexto operacional do ultimo turno foi movido para uma sidebar na direita; o centro do `/assistant` fica mais proximo de um chat, com conversa e composer.
+- O composer do `/assistant` foi reduzido ao essencial: campo de mensagem com auto-expansao ate algumas linhas, selects compactos sem legendas redundantes e menos ruido visual persistente.
+- Os painéis rolaveis do `/assistant` usam scrollbar vertical padronizada; o historico deixa de exibir scroll horizontal.
+- O remote expõe controle de `model`, `reasoning_effort` e `access_mode`, incluindo execucao sem sandbox por `danger-full-access`.
+- O runner do remote injeta `rg.exe` e `git.exe` no `PATH` do subprocesso para aproximar o ambiente do dashboard ao ambiente do terminal/VS Code.
+- Jobs do `/assistant` agora fazem reconciliacao de estado: se um job marcado como `running` perder o processo vivo ou ficar sem atividade nova por tempo demais, ele sai automaticamente de `running` e vira falha stale, evitando travas falsas na UI.
+- O assistant controla o CLI local, nao a interface do VS Code.
+- O runtime do bot ainda tem partes legadas no backend que merecem refatoracao futura, mas a camada de dashboard/auth ja foi centralizada.

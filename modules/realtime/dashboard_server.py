@@ -431,8 +431,8 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                     color: var(--text-main);
                     font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                   }
-                  .site-shell { max-width: 1340px; margin: 0 auto; }
-                  .hero-wrap { padding: 72px 0 28px; }
+                  .site-shell { max-width: 1260px; margin: 0 auto; }
+                  .hero-wrap { padding: 56px 0 24px; }
                   .hero-grid {
                     display: grid;
                     grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
@@ -446,19 +446,19 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                     background: rgba(16, 19, 26, 0.62);
                     border: 1px solid rgba(255,255,255,0.08);
                     backdrop-filter: blur(12px);
-                    border-radius: 20px;
+                    border-radius: 18px;
                     box-shadow: 0 10px 30px rgba(0,0,0,0.22);
                   }
                   .eyebrow {
                     color: var(--text-muted);
                     text-transform: uppercase;
                     letter-spacing: 0.08em;
-                    font-size: 0.78rem;
+                    font-size: 0.72rem;
                     font-weight: 700;
                   }
                   .hero-title {
-                    font-size: clamp(2.4rem, 5vw, 4.4rem);
-                    line-height: 0.98;
+                    font-size: clamp(2rem, 4.8vw, 3.5rem);
+                    line-height: 1.0;
                     letter-spacing: -0.04em;
                     font-weight: 800;
                     margin: 0;
@@ -466,8 +466,8 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                   .hero-title .accent { color: var(--accent-2); }
                   .hero-copy {
                     color: var(--text-muted);
-                    font-size: 1.05rem;
-                    line-height: 1.7;
+                    font-size: 0.98rem;
+                    line-height: 1.65;
                     max-width: 760px;
                   }
                   .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
@@ -498,12 +498,12 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                     font-weight: 700;
                   }
                   .stat-value {
-                    font-size: 1.45rem;
+                    font-size: 1.3rem;
                     font-weight: 800;
                     letter-spacing: -0.03em;
                   }
                   .section-title {
-                    font-size: 1.55rem;
+                    font-size: 1.35rem;
                     font-weight: 700;
                     letter-spacing: -0.03em;
                     margin: 0;
@@ -519,7 +519,7 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                     gap: 18px;
                   }
                   .offer-card h3 {
-                    font-size: 1rem;
+                    font-size: 0.94rem;
                     font-weight: 700;
                     margin-bottom: 10px;
                   }
@@ -539,7 +539,7 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                     border-radius: 999px;
                     padding: 0.4rem 0.8rem;
                     color: var(--text-muted);
-                    font-size: 0.78rem;
+                    font-size: 0.74rem;
                   }
                   .divider-line {
                     height: 1px;
@@ -550,6 +550,11 @@ def create_app(*, demo: bool = True, refresh_sec: float = 2.0) -> tuple[Flask, S
                     .hero-grid,
                     .offer-grid,
                     .stat-grid { grid-template-columns: 1fr; }
+                  }
+                  @media (max-width: 767px) {
+                    .hero-wrap { padding: 38px 0 20px; }
+                    .hero-copy { font-size: 0.92rem; }
+                    .hero-actions .btn { width: 100%; justify-content: center; }
                   }
                 </style>
             </head>
