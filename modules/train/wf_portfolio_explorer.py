@@ -1234,16 +1234,16 @@ def run(settings: ExploreSettings | None = None) -> None:
     if results_csv.exists():
         try:
             df_old = _read_results_csv(results_csv)
-            # Ensure columns are treated as strings to avoid issues
+            # Use _csv_key_str to normalise NULL/None/NaN from duckdb reads
             for _, row in df_old.iterrows():
-                st = str(row.get("stage", ""))
-                lid = str(row.get("label_id", ""))
-                mid = str(row.get("model_id", "")).replace("nan", "")
-                bid = str(row.get("backtest_id", "")).replace("nan", "")
-                if str(row.get("status", "")) == "ok":
+                st = _csv_key_str(row.get("stage"))
+                lid = _csv_key_str(row.get("label_id"))
+                mid = _csv_key_str(row.get("model_id"))
+                bid = _csv_key_str(row.get("backtest_id"))
+                if _csv_key_str(row.get("status")) == "ok":
                     finished_set.add((st, lid, mid, bid))
                     if st == "train" and lid and mid:
-                        train_run_dirs[(lid, mid)] = str(row.get("train_run_dir", ""))
+                        train_run_dirs[(lid, mid)] = str(row.get("train_run_dir") or "")
             log.write(f"[explore] Loaded {len(finished_set)} existing successful stages from CSV.")
         except Exception as e:
             log.write(f"[explore] Warning: Could not load existing CSV for resume: {e}")

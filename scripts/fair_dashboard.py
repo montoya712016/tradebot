@@ -37,7 +37,7 @@ from modules.realtime.auth import (
     verify_user_login,
 )
 from modules.realtime.remote_control import RemoteControlManager
-from modules.realtime.site_oos_assets import build_v5_site_snapshot
+from modules.realtime.site_oos_assets import build_site_snapshot
 
 # Reuse existing ngrok logic
 @dataclass
@@ -102,7 +102,7 @@ ensure_user_store(AUTH_CFG)
 
 
 def _fair_root() -> Path:
-    raw = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v5") or "fair_wf_explore_v5").strip()
+    raw = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v6") or "fair_wf_explore_v6").strip()
     return REPO_ROOT / "data" / "generated" / raw
 
 
@@ -597,7 +597,7 @@ def api_data():
 def index():
     contact_email = os.getenv("ASTRA_CONTACT_EMAIL", "astraquantlab@gmail.com").strip() or "astraquantlab@gmail.com"
     try:
-        oos_snapshot = build_v5_site_snapshot(REPO_ROOT)
+        oos_snapshot = build_site_snapshot(_fair_root())
     except Exception:
         oos_snapshot = None
     return render_template(

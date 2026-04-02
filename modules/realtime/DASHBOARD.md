@@ -235,13 +235,14 @@ As duas landings publicas usam artefatos reais do OOS walk-forward `v5`:
 
 - O dashboard do bot e o Fair Explore ja estao no mesmo padrao visual.
 - O painel de usuarios hoje e compartilhado entre os dois.
-- O `/assistant` agora funciona como uma superficie de chat para o `codex exec`: mensagem do usuario, resposta final do Codex e atividade operacional separada.
+- O `/assistant` agora funciona como uma superficie de chat para o Codex local via `codex app-server`: mensagem do usuario, resposta final do Codex e atividade operacional separada.
 - As respostas finais do `/assistant` agora renderizam markdown com tipografia dedicada; referencias locais do repositório deixam de aparecer como markdown cru.
-- O historico do `/assistant` agora e por conversa; com uma thread selecionada, o proximo envio continua a mesma sessao via `codex exec resume`.
+- O historico do `/assistant` agora e por conversa; com uma thread selecionada, o proximo envio continua a mesma sessao via `threadId` persistido no `codex app-server`.
 - No desktop, o `/assistant` agora usa layout de app: sidebar de historico na esquerda em altura integral, conversa com scroll proprio e composer fixado no rodape do painel principal.
 - O contexto operacional do ultimo turno foi movido para uma sidebar na direita; o centro do `/assistant` fica mais proximo de um chat, com conversa e composer.
 - O composer do `/assistant` foi reduzido ao essencial: campo de mensagem com auto-expansao ate algumas linhas, selects compactos sem legendas redundantes e menos ruido visual persistente.
 - Os painéis rolaveis do `/assistant` usam scrollbar vertical padronizada; o historico deixa de exibir scroll horizontal.
+- O runner do `/assistant` agora fala com o `codex app-server`, o mesmo stack local usado pela extensao OpenAI no VS Code, em vez de depender de `codex exec --json`.
 - O remote expõe controle de `model`, `reasoning_effort` e `access_mode`, incluindo execucao sem sandbox por `danger-full-access`.
 - O runner do remote injeta `rg.exe` e `git.exe` no `PATH` do subprocesso para aproximar o ambiente do dashboard ao ambiente do terminal/VS Code.
 - Jobs do `/assistant` agora fazem reconciliacao de estado: se um job marcado como `running` perder o processo vivo ou ficar sem atividade nova por tempo demais, ele sai automaticamente de `running` e vira falha stale, evitando travas falsas na UI.

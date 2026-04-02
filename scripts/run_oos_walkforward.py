@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -68,7 +70,7 @@ FAMILY_PARAM_COLS = [
 
 
 def _fair_root() -> Path:
-    raw = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v5") or "fair_wf_explore_v5").strip()
+    raw = str(os.getenv("WF_FAIR_ROOT", "fair_wf_explore_v6") or "fair_wf_explore_v6").strip()
     return repo_root / "data" / "generated" / raw
 
 
@@ -1105,6 +1107,16 @@ def _selector_score_mode() -> str:
     return "survival"
 
 
+def _parse_window_info(window_info: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    raw = str(window_info or "").strip()
+    if not raw:
+        return None
+    match = re.search(r"window=(?P<start>\d{4}-\d{2}-\d{2})\.\.(?P<end>\d{4}-\d{2}-\d{2})", raw)
+    if not match:
+        return None
+    return pd.to_datetime(match.group("start")), pd.to_datetime(match.group("end"))
+
+
 def build_train_env_from_row(row, oos_target_tail: int):
     return {
         "CRYPTO_PIPELINE_CANDLE_SEC": "300",
@@ -1177,7 +1189,10 @@ def main():
     if mode == "retrain":
         source_steps = [m for m in MILESTONES[:-2] if m in completed_steps]
     else:
-        source_steps = [m for m in MILESTONES[:-1] if m in completed_steps]
+        # Reuse estrito: escolher no step T e aplicar somente no bloco do
+        # step seguinte. No workflow padrao da v6 isso para em 540d -> 360d;
+        # 360d nao tem mais uma perna comparavel seguinte dentro da grade.
+        source_steps = [m for m in MILESTONES[:-3] if m in completed_steps]
     if not source_steps:
         print("[ERROR] No completed source steps found.")
         return
@@ -1269,10 +1284,62 @@ def main():
                 retrain_minutes = 0.0
                 plot_out = str(report_dir / f"oos_segment_reuse_{m_test_start}d_to_{m_target}d_from_{m_source}d.html")
 
+            # Resolve the source window from the selected model meta.
+            # For reuse, the real OOS must be the NEXT 180d block after the
+            # backtest window used inside the source step.
+            forced_period = 180  # All fair-step explores use 180-day periods
+            period_train_end = None
+            period_test_end = None
+            source_window_start = None
+            source_window_end = None
+            try:
+                # Ensure period_180d exists (may only have period_0d)
+                period_dir = Path(run_dir) / f"period_{forced_period}d"
+                meta_path = period_dir / "meta.json"
+                if not meta_path.exists():
+                    alias_src = Path(run_dir) / "period_0d"
+                    if alias_src.exists() and not period_dir.exists():
+                        shutil.copytree(str(alias_src), str(period_dir))
+                    meta_path = period_dir / "meta.json"
+                if meta_path.exists():
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    train_end_raw = str(meta.get("train_end_utc") or "").strip()
+                    if train_end_raw:
+                        source_window_start = pd.to_datetime(train_end_raw)
+                        source_window_end = source_window_start + pd.Timedelta(days=days)
+                        if mode == "retrain":
+                            period_train_end = source_window_start
+                            period_test_end = source_window_end
+                        else:
+                            period_train_end = source_window_end
+                            period_test_end = period_train_end + pd.Timedelta(days=days)
+                        print(
+                            f"  [window] source={source_window_start}..{source_window_end} "
+                            f"oos={period_train_end}..{period_test_end}"
+                        )
+            except Exception as e:
+                print(f"  [WARN] Could not resolve period window from model meta: {e}")
+
+            if period_train_end is None or period_test_end is None:
+                print(f"  [SKIP] Cannot determine test window for {m_source}d model (run_dir={run_dir})")
+                continue
+
+            source_row_window = _parse_window_info(str(best.get("window_info") or ""))
+            if source_row_window is not None:
+                source_window_start, source_window_end = source_row_window
+            if mode == "reuse":
+                if source_window_end is None:
+                    print(f"  [SKIP] Missing source backtest window for {m_source}d selection")
+                    continue
+                if period_train_end <= source_window_end:
+                    print(
+                        f"  [ERROR] Invalid OOS window overlap for {m_source}d: "
+                        f"source={source_window_start}..{source_window_end} "
+                        f"oos={period_train_end}..{period_test_end}"
+                    )
+                    continue
+
             # Mirror the explore pipeline as closely as possible.
-            # The previous OOS path used align_global_window_use_max_end=True,
-            # which shifts the effective test window and skips symbols, causing
-            # large divergences versus the metrics recorded in explore_runs.csv.
             prepare_cfg = _default_portfolio_cfg()
             prepare_cfg.corr_filter_enabled = False
             prepare_cfg.corr_open_filter_enabled = False
@@ -1293,8 +1360,10 @@ def main():
                 require_feature_cache=True,
                 rebuild_on_score_error=False,
                 align_global_window=True,
-                align_global_window_use_max_end=False,
-                feature_preset=str(os.getenv("WF_PORTFOLIO_FEATURE_PRESET", os.getenv("WF_EXPLORE_FEATURE_PRESET", "full")) or "full"),
+                force_period_days=(int(forced_period),),
+                explicit_window_start=str(period_train_end),
+                explicit_window_end=str(period_test_end),
+                feature_preset=str(os.getenv("WF_PORTFOLIO_FEATURE_PRESET", os.getenv("WF_EXPLORE_FEATURE_PRESET", "core80")) or "core80"),
                 feature_remove_tail_days=0,
             )
             prepared = prepare_portfolio_data(settings)
@@ -1351,6 +1420,9 @@ def main():
                     "trades": trades,
                     "plot_out": plot_out,
                     "window_info": res.get("window_info", ""),
+                    "source_window_info": str(best.get("window_info") or ""),
+                    "oos_window_start_utc": str(period_train_end),
+                    "oos_window_end_utc": str(period_test_end),
                     "symbols_total": int(getattr(prepared, "symbols_total", 0)),
                     "symbols_skipped_window": int(getattr(prepared, "symbols_skipped_window", 0)),
                 }

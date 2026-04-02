@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import tomllib
 import uuid
 from datetime import datetime, timezone
@@ -24,6 +26,106 @@ CURATED_MODELS = [
     "gpt-5.2-codex",
     "gpt-5.1-codex-mini",
 ]
+
+
+class _AppServerClient:
+    def __init__(self, *, codex_exe: str, cwd: Path, env: dict[str, str]) -> None:
+        self.codex_exe = codex_exe
+        self.cwd = Path(cwd)
+        self.env = dict(env)
+        self.initialized = False
+        self.proc = subprocess.Popen(
+            [codex_exe, "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            cwd=str(cwd),
+            env=env,
+        )
+        self.stdout_queue: queue.Queue[str] = queue.Queue()
+        self.stderr_lines: list[str] = []
+        self.req_id = 0
+        threading.Thread(target=self._stdout_reader, daemon=True).start()
+        threading.Thread(target=self._stderr_reader, daemon=True).start()
+
+    def _stdout_reader(self) -> None:
+        assert self.proc.stdout is not None
+        for line in self.proc.stdout:
+            line = line.strip()
+            if line:
+                self.stdout_queue.put(line)
+
+    def _stderr_reader(self) -> None:
+        assert self.proc.stderr is not None
+        for line in self.proc.stderr:
+            text = str(line or "").rstrip("\n")
+            if text:
+                self.stderr_lines.append(text)
+            if len(self.stderr_lines) > 200:
+                self.stderr_lines = self.stderr_lines[-200:]
+
+    def send(self, method: str, params: dict[str, Any]) -> str:
+        self.req_id += 1
+        req_id = str(self.req_id)
+        payload = {"id": req_id, "method": method, "params": params}
+        assert self.proc.stdin is not None
+        self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self.proc.stdin.flush()
+        return req_id
+
+    def wait_for(self, req_id: str | None = None, timeout: float = 10.0) -> dict[str, Any]:
+        deadline = time.time() + timeout
+        notifications: list[dict[str, Any]] = []
+        seen: list[dict[str, Any]] = []
+        while time.time() < deadline:
+            try:
+                raw = self.stdout_queue.get(timeout=0.5)
+            except queue.Empty:
+                if self.proc.poll() is not None:
+                    return {
+                        "process_exit": self.proc.returncode,
+                        "notifications": notifications,
+                        "seen": seen,
+                        "stderr_tail": self.stderr_lines[-20:],
+                    }
+                continue
+            parsed = _safe_json_loads(raw)
+            if parsed is None:
+                seen.append({"raw": raw})
+                continue
+            seen.append(parsed)
+            if "method" in parsed and "id" not in parsed:
+                notifications.append(parsed)
+            if req_id is not None and parsed.get("id") == req_id:
+                return {
+                    "message": parsed,
+                    "notifications": notifications,
+                    "seen": seen,
+                    "stderr_tail": self.stderr_lines[-20:],
+                }
+        return {
+            "timeout": True,
+            "notifications": notifications,
+            "seen": seen,
+            "stderr_tail": self.stderr_lines[-20:],
+        }
+
+    def close(self) -> None:
+        try:
+            self.proc.terminate()
+        except Exception:
+            return
+        try:
+            self.proc.wait(timeout=5)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
 
 
 def _utc_now_iso() -> str:
@@ -328,6 +430,84 @@ def _filtered_activity_text(item: dict[str, Any]) -> str:
     return text
 
 
+def _response_error_text(snapshot: dict[str, Any]) -> str:
+    message = snapshot.get("message")
+    if not isinstance(message, dict):
+        if snapshot.get("timeout"):
+            return "Timeout aguardando resposta do Codex app-server."
+        if "process_exit" in snapshot:
+            return f"Codex app-server encerrou antes da resposta (exit={snapshot.get('process_exit')})."
+        return "Resposta invalida do Codex app-server."
+    error = message.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message", "") or error)
+    return ""
+
+
+def _extract_thread_id(snapshot: dict[str, Any]) -> str:
+    message = snapshot.get("message")
+    if not isinstance(message, dict):
+        return ""
+    result = message.get("result")
+    if not isinstance(result, dict):
+        return ""
+    thread = result.get("thread")
+    if isinstance(thread, dict):
+        thread_id = str(thread.get("id", "") or "").strip()
+        if thread_id:
+            return thread_id
+    return str(result.get("threadId", "") or "").strip()
+
+
+def _extract_turn_usage(notification: dict[str, Any]) -> dict[str, int]:
+    params = notification.get("params")
+    if not isinstance(params, dict):
+        return {}
+    turn = params.get("turn")
+    raw_usage = turn.get("usage") if isinstance(turn, dict) else params.get("usage")
+    if not isinstance(raw_usage, dict):
+        return {}
+    return {
+        "input_tokens": int(raw_usage.get("input_tokens", 0) or 0),
+        "cached_input_tokens": int(raw_usage.get("cached_input_tokens", 0) or 0),
+        "output_tokens": int(raw_usage.get("output_tokens", 0) or 0),
+    }
+
+
+def _normalize_app_server_item(raw_item: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(raw_item, dict):
+        return None
+    item_type = str(raw_item.get("type", "") or "").strip()
+    normalized_type = item_type.replace("-", "_")
+    if normalized_type.lower() in {"agentmessage", "agent_message"}:
+        return None
+    if "command" in normalized_type.lower():
+        return {
+            "type": "command_execution",
+            "command": str(
+                raw_item.get("command", "")
+                or raw_item.get("rawCommand", "")
+                or raw_item.get("title", "")
+                or raw_item.get("text", "")
+                or ""
+            ),
+            "exit_code": int(raw_item.get("exitCode", raw_item.get("exit_code", 0)) or 0),
+        }
+    if normalized_type.lower() in {"mcptoolcall", "mcp_tool_call"}:
+        name = str(raw_item.get("toolName", "") or raw_item.get("serverName", "") or "MCP tool")
+        return {"type": "command_execution", "command": name, "exit_code": int(raw_item.get("exitCode", 0) or 0)}
+    return None
+
+
+def _access_mode_to_turn_sandbox_policy(access_mode: str) -> dict[str, Any]:
+    mapping = {
+        "danger-full-access": {"type": "dangerFullAccess"},
+        "workspace-write": {"type": "workspaceWrite"},
+        "read-only": {"type": "readOnly"},
+    }
+    return dict(mapping.get(str(access_mode or "").strip().lower(), {"type": "dangerFullAccess"}))
+
+
 def _build_transcript(job: dict[str, Any], raw_log: str) -> dict[str, Any]:
     agent_messages: list[str] = []
     activity: list[dict[str, Any]] = []
@@ -442,6 +622,7 @@ class RemoteControlManager:
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = self._load_jobs()
         self._procs: dict[str, subprocess.Popen[str]] = {}
+        self._app_server: _AppServerClient | None = None
 
     def _reconcile_job_state(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -547,6 +728,8 @@ class RemoteControlManager:
             resolved = self._resolved_conversation_id(job, transcript)
             if resolved != target:
                 continue
+            if str(job.get("backend", "") or "codex-exec") != "codex-app-server":
+                continue
             session_id = str(job.get("session_id", "") or transcript.get("session_id", "") or "").strip()
             if not session_id:
                 continue
@@ -581,6 +764,20 @@ class RemoteControlManager:
         if git_exe:
             env.setdefault("ASTRA_REMOTE_GIT", git_exe)
         return env
+
+    def _get_app_server(self, codex_exe: str) -> _AppServerClient:
+        with self._lock:
+            current = self._app_server
+            if current is not None and current.proc.poll() is None:
+                return current
+            if current is not None:
+                try:
+                    current.close()
+                except Exception:
+                    pass
+            current = _AppServerClient(codex_exe=codex_exe, cwd=self.repo_root, env=self._build_subprocess_env(codex_exe))
+            self._app_server = current
+            return current
 
     def capabilities(self) -> dict[str, Any]:
         self._reconcile_all_running_jobs()
@@ -825,6 +1022,7 @@ class RemoteControlManager:
 
         job = {
             "id": job_id,
+            "backend": "codex-app-server",
             "conversation_id": local_conversation_id,
             "session_id": resume_session_id,
             "resume_session_id": resume_session_id,
@@ -855,52 +1053,8 @@ class RemoteControlManager:
         thread.start()
         return job
 
-    def _build_codex_command(self, job: dict[str, Any], codex_exe: str) -> list[str]:
-        model = str(job.get("model", "") or _default_model())
-        reasoning_effort = str(job.get("reasoning_effort", "") or _default_reasoning_effort())
-        access_mode = str(job.get("access_mode", "") or _default_access_mode())
-        resume_session_id = str(job.get("resume_session_id", "") or "").strip()
-        if resume_session_id:
-            cmd = [
-                codex_exe,
-                "exec",
-                "resume",
-                "--json",
-                "-m",
-                model,
-                "-c",
-                f'model_reasoning_effort="{reasoning_effort}"',
-                "-c",
-                "shell_environment_policy.inherit=all",
-            ]
-            if access_mode == "danger-full-access":
-                cmd.append("--dangerously-bypass-approvals-and-sandbox")
-            elif access_mode == "workspace-write":
-                cmd.append("--full-auto")
-            cmd.extend([resume_session_id, str(job.get("prompt", "") or "")])
-            return cmd
-
-        cmd = [
-            codex_exe,
-            "exec",
-            "--json",
-            "--color",
-            "never",
-            "-C",
-            str(self.repo_root),
-            "-m",
-            model,
-            "-c",
-            f'model_reasoning_effort="{reasoning_effort}"',
-            "-c",
-            "shell_environment_policy.inherit=all",
-        ]
-        if access_mode == "danger-full-access":
-            cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        else:
-            cmd.extend(["-s", access_mode])
-        cmd.append(str(job.get("prompt", "") or ""))
-        return cmd
+    def _build_codex_command(self, _job: dict[str, Any], codex_exe: str) -> list[str]:
+        return [codex_exe, "app-server", "--listen", "stdio://"]
 
     def _run_codex_job(self, job_id: str) -> None:
         job = self.get_job(job_id)
@@ -944,19 +1098,9 @@ class RemoteControlManager:
             log_fh.write(f"[remote] path_head={os.pathsep.join(str(env.get('PATH', '')).split(os.pathsep)[:6])}\n\n")
             log_fh.flush()
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(self.repo_root),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
-                )
+                client = self._get_app_server(codex_exe)
             except Exception as exc:
-                log_fh.write(f"[remote][error] failed to start codex: {type(exc).__name__}: {exc}\n")
+                log_fh.write(f"[remote][error] failed to start codex app-server: {type(exc).__name__}: {exc}\n")
                 log_fh.flush()
                 self._update_job(
                     job_id,
@@ -965,18 +1109,201 @@ class RemoteControlManager:
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 return
+            stderr_start = len(client.stderr_lines)
             with self._lock:
-                self._procs[job_id] = proc
-            self._update_job(job_id, pid=int(proc.pid or 0))
-            if proc.stdout is not None:
-                for line in proc.stdout:
-                    timestamp = _utc_now_iso()
-                    log_fh.write(f"[ts={timestamp}] {line}")
-                    log_fh.flush()
-                proc.stdout.close()
-            exit_code = proc.wait()
-            log_fh.write(f"\n[remote] job={job_id} exit_code={exit_code}\n")
-            log_fh.flush()
+                self._procs[job_id] = client.proc
+            self._update_job(job_id, pid=int(client.proc.pid or 0))
+
+            def emit(event: dict[str, Any]) -> None:
+                log_fh.write(f"[ts={_utc_now_iso()}] {json.dumps(event, ensure_ascii=False)}\n")
+                log_fh.flush()
+
+            def emit_trace(message: str) -> None:
+                log_fh.write(f"[ts={_utc_now_iso()}] [remote] {message}\n")
+                log_fh.flush()
+
+            def process_notifications(
+                notifications: list[dict[str, Any]],
+                *,
+                agent_chunks: list[str],
+                state: dict[str, Any],
+            ) -> None:
+                for note in notifications:
+                    method = str(note.get("method", "") or "")
+                    params = note.get("params")
+                    if not isinstance(params, dict):
+                        continue
+                    if method == "thread/started":
+                        thread_id = str(params.get("threadId", "") or "").strip()
+                        if not thread_id:
+                            thread = params.get("thread")
+                            if isinstance(thread, dict):
+                                thread_id = str(thread.get("id", "") or "").strip()
+                        if thread_id:
+                            state["thread_id"] = thread_id
+                            emit({"type": "thread.started", "thread_id": thread_id})
+                        continue
+                    if method == "turn/started":
+                        emit({"type": "turn.started"})
+                        continue
+                    if method == "item/started":
+                        item = _normalize_app_server_item(params.get("item") or {})
+                        if item is not None:
+                            emit({"type": "item.started", "item": item})
+                        continue
+                    if method == "item/completed":
+                        item = _normalize_app_server_item(params.get("item") or {})
+                        if item is not None:
+                            emit({"type": "item.completed", "item": item})
+                        continue
+                    if method == "item/agentMessage/delta":
+                        delta = str(params.get("delta", "") or "")
+                        if delta:
+                            agent_chunks.append(delta)
+                        continue
+                    if method == "turn/completed":
+                        usage = _extract_turn_usage(note)
+                        if usage:
+                            state["usage"] = usage
+                        state["completed"] = True
+                        emit({"type": "turn.completed", "usage": usage})
+                        continue
+                    if method == "error":
+                        emit_trace(f"app-server notification error: {json.dumps(params, ensure_ascii=False)}")
+                        continue
+                    if method in {"mcpServer/startupStatus/updated", "thread/status/changed", "account/updated"}:
+                        continue
+                    if method in {"item/commandExecution/outputDelta", "command/exec/outputDelta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
+                        continue
+                    emit_trace(f"notify {method}")
+
+            state: dict[str, Any] = {"thread_id": str(job.get("resume_session_id", "") or "").strip(), "completed": False, "usage": {}}
+            agent_chunks: list[str] = []
+            exit_code = 1
+            error_text = ""
+
+            try:
+                if not client.initialized:
+                    init_id = client.send(
+                        "initialize",
+                        {
+                            "clientInfo": {"name": "astra-remote", "title": "Astra Remote", "version": "1.0"},
+                            "capabilities": {"experimentalApi": True},
+                        },
+                    )
+                    init_snapshot = client.wait_for(init_id, timeout=15)
+                    process_notifications(init_snapshot.get("notifications", []), agent_chunks=agent_chunks, state=state)
+                    init_error = _response_error_text(init_snapshot)
+                    if init_error:
+                        raise RuntimeError(init_error)
+                    client.initialized = True
+
+                thread_id = str(job.get("resume_session_id", "") or "").strip()
+                if not thread_id:
+                    start_id = client.send(
+                        "thread/start",
+                        {
+                            "cwd": str(self.repo_root),
+                            "approvalPolicy": "never",
+                            "sandbox": str(job.get("access_mode", "") or _default_access_mode()),
+                            "model": str(job.get("model", "") or _default_model()),
+                            "modelProvider": "openai",
+                            "experimentalRawEvents": False,
+                            "persistExtendedHistory": True,
+                            "ephemeral": False,
+                        },
+                    )
+                    start_snapshot = client.wait_for(start_id, timeout=20)
+                    process_notifications(start_snapshot.get("notifications", []), agent_chunks=agent_chunks, state=state)
+                    start_error = _response_error_text(start_snapshot)
+                    if start_error:
+                        raise RuntimeError(start_error)
+                    thread_id = _extract_thread_id(start_snapshot)
+                    if not thread_id:
+                        raise RuntimeError("thread/start nao retornou thread id.")
+                    state["thread_id"] = thread_id
+                    self._update_job(job_id, session_id=thread_id)
+
+                turn_params = {
+                    "threadId": thread_id,
+                    "input": [{"type": "text", "text": str(job.get("prompt", "") or ""), "text_elements": []}],
+                    "model": str(job.get("model", "") or _default_model()),
+                    "effort": str(job.get("reasoning_effort", "") or _default_reasoning_effort()),
+                    "approvalPolicy": "never",
+                    "sandboxPolicy": _access_mode_to_turn_sandbox_policy(str(job.get("access_mode", "") or _default_access_mode())),
+                }
+                turn_id = client.send("turn/start", turn_params)
+                turn_snapshot = client.wait_for(turn_id, timeout=20)
+                process_notifications(turn_snapshot.get("notifications", []), agent_chunks=agent_chunks, state=state)
+                turn_error = _response_error_text(turn_snapshot)
+                if turn_error:
+                    if str(job.get("resume_session_id", "") or "").strip():
+                        emit_trace(f"resume thread failed; criando nova thread: {turn_error}")
+                        start_id = client.send(
+                            "thread/start",
+                            {
+                                "cwd": str(self.repo_root),
+                                "approvalPolicy": "never",
+                                "sandbox": str(job.get("access_mode", "") or _default_access_mode()),
+                                "model": str(job.get("model", "") or _default_model()),
+                                "modelProvider": "openai",
+                                "experimentalRawEvents": False,
+                                "persistExtendedHistory": True,
+                                "ephemeral": False,
+                            },
+                        )
+                        start_snapshot = client.wait_for(start_id, timeout=20)
+                        process_notifications(start_snapshot.get("notifications", []), agent_chunks=agent_chunks, state=state)
+                        start_error = _response_error_text(start_snapshot)
+                        if start_error:
+                            raise RuntimeError(start_error)
+                        thread_id = _extract_thread_id(start_snapshot)
+                        if not thread_id:
+                            raise RuntimeError("thread/start nao retornou thread id.")
+                        state["thread_id"] = thread_id
+                        self._update_job(job_id, session_id=thread_id)
+                        turn_id = client.send(
+                            "turn/start",
+                            {
+                                **turn_params,
+                                "threadId": thread_id,
+                            },
+                        )
+                        turn_snapshot = client.wait_for(turn_id, timeout=20)
+                        process_notifications(turn_snapshot.get("notifications", []), agent_chunks=agent_chunks, state=state)
+                        retry_error = _response_error_text(turn_snapshot)
+                        if retry_error:
+                            raise RuntimeError(retry_error)
+                    else:
+                        raise RuntimeError(turn_error)
+
+                deadline = time.time() + 1800
+                while time.time() < deadline:
+                    snapshot = client.wait_for(None, timeout=5)
+                    process_notifications(snapshot.get("notifications", []), agent_chunks=agent_chunks, state=state)
+                    if state.get("completed"):
+                        break
+                    if snapshot.get("process_exit") is not None:
+                        break
+
+                if state.get("completed"):
+                    exit_code = 0
+                else:
+                    error_text = "Codex app-server nao concluiu o turno dentro do tempo esperado."
+                    emit_trace(error_text)
+
+            except Exception as exc:
+                error_text = f"{type(exc).__name__}: {exc}"
+                emit_trace(f"error: {error_text}")
+            finally:
+                final_text = "".join(agent_chunks).strip()
+                if final_text:
+                    emit({"type": "item.completed", "item": {"type": "agent_message", "text": final_text}})
+                for stderr_line in client.stderr_lines[stderr_start:][-12:]:
+                    emit_trace(f"stderr: {stderr_line}")
+                exit_code = 0 if exit_code == 0 else 1
+                log_fh.write(f"\n[remote] job={job_id} exit_code={exit_code}\n")
+                log_fh.flush()
 
         with self._lock:
             self._procs.pop(job_id, None)
@@ -1007,9 +1334,8 @@ class RemoteControlManager:
             diff_stat = "Nenhuma mudanca nova detectada neste job."
 
         final_status = "completed" if int(exit_code) == 0 else "failed"
-        error_text = "" if int(exit_code) == 0 else f"Codex terminou com exit code {exit_code}."
         if int(exit_code) != 0 and not error_text:
-            error_text = "Falha sem resposta final do Codex."
+            error_text = f"Codex app-server terminou com exit code {exit_code}."
 
         self._update_job(
             job_id,
@@ -1020,6 +1346,7 @@ class RemoteControlManager:
             changed_files=changed_files,
             diff_stat=diff_stat,
             error=error_text,
+            session_id=str(state.get("thread_id", "") or job.get("session_id", "") or "").strip() if 'state' in locals() else str(job.get("session_id", "") or ""),
         )
         transcript = self.transcript(job_id)
         self._update_job(
@@ -1035,6 +1362,9 @@ class RemoteControlManager:
             raise RuntimeError("Job nao esta em execucao.")
         try:
             proc.terminate()
+            with self._lock:
+                if self._app_server is not None and self._app_server.proc.pid == proc.pid:
+                    self._app_server = None
         except Exception as exc:
             raise RuntimeError(f"Falha ao cancelar job: {type(exc).__name__}: {exc}") from exc
         self._update_job(

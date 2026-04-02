@@ -14,6 +14,17 @@ Estas regras valem para mudanças de código, scripts, dashboards, workflow, bac
 - Se algo ficou obsoleto, remova em vez de esconder.
 - Se uma decisão de produto/processo mudou, a documentação deve mudar junto.
 
+## Performance de dados
+
+Este repositório lida com volumes grandes de dados em explores, backtests, OOS e análises operacionais.
+
+Como padrão:
+- prefira bibliotecas, engines e consultas mais otimizadas para leitura, agregação, join e scan de datasets grandes
+- para análise ad hoc e scripts auxiliares, prefira `duckdb`, queries vetorizadas e abordagens de baixo overhead antes de soluções mais pesadas
+- evite `pandas` em cargas, merges ou scans grandes quando houver alternativa claramente mais eficiente
+- ao escrever código novo, considere custo de CPU, RAM e I/O como parte do design, não otimização tardia
+- ao rodar comandos de investigação, prefira ferramentas rápidas e orientadas a volume de dados
+
 ## Disciplina de documentação
 
 Toda mudança relevante de código deve revisar a documentação afetada no mesmo trabalho.

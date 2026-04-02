@@ -1,0 +1,7 @@
+source: 1440d -> test: 1260d to 1080d | Window: window=2022-10-18..2023-04-16 fixed=1 explicit=1
+source: 1260d -> test: 1080d to 900d | Window: window=2023-03-28..2023-09-24 fixed=1 explicit=1
+source: 1080d -> test: 900d to 720d | Window: window=2023-09-24..2024-03-22 fixed=1 explicit=1
+source: 900d -> test: 720d to 540d | Window: window=2024-04-10..2024-10-07 fixed=1 explicit=1
+source: 720d -> test: 540d to 360d | Window: window=2024-10-07..2025-04-05 fixed=1 explicit=1
+source: 540d -> test: 360d to 180d | Window: window=2025-04-05..2025-10-02 fixed=1 explicit=1
+source: 360d -> test: 180d to 0d | Window: window=2025-10-02..2026-03-31 fixed=1 explicit=1

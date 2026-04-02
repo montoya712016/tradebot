@@ -143,12 +143,12 @@ def _build_summary_plotly_html(equity: pd.Series) -> str:
     )
 
 
-def build_v5_site_snapshot(repo_root: Path) -> SiteOosSnapshot:
-    report_dir = repo_root / "data" / "generated" / "fair_wf_explore_v5" / "robustness_report"
+def build_site_snapshot(fair_root: Path) -> SiteOosSnapshot:
+    report_dir = fair_root / "robustness_report"
     equity_csv = report_dir / "walkforward_oos_equity_reuse.csv"
     segments_csv = report_dir / "walkforward_oos_segments_reuse.csv"
     if not equity_csv.exists() or not segments_csv.exists():
-        raise FileNotFoundError("missing v5 robustness artifacts")
+        raise FileNotFoundError(f"missing robustness artifacts in {report_dir}")
 
     equity = _read_equity_series(equity_csv)
     ret_total = float((equity.iloc[-1] / equity.iloc[0]) - 1.0)
@@ -196,7 +196,7 @@ def build_v5_site_snapshot(repo_root: Path) -> SiteOosSnapshot:
             {"label": "OOS semesters", "value": str(semesters)},
             {"label": "Avg return / semester", "value": f"{avg_sem_ret * 100:+.1f}%"},
             {"label": "Selected OOS trades", "value": f"{trades:d}"},
-            {"label": "Report source", "value": "WF v5 reuse"},
+            {"label": "Report source", "value": f"WF {fair_root.name} reuse"},
         ],
         summary_copy=(
             "These numbers come directly from the stored out-of-sample report and are presented here as evidence of a "

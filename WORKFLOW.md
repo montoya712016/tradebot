@@ -105,6 +105,7 @@ python scripts/run_oos_walkforward.py
 Esse script:
 - lê os pools já explorados
 - seleciona representantes por step
+- no modo `reuse`, aplica cada representante somente no bloco de 180 dias seguinte ao backtest IS do step fonte
 - costura os segmentos OOS em uma curva única
 
 Seleção padrão atual no OOS:
@@ -114,6 +115,7 @@ Seleção padrão atual no OOS:
 - a seleção agora monta shortlist por família, aplica continuidade causal entre steps e escolhe a variante mais prudente dentro da família
 - o score legado ainda pode ser reativado com `WF_OOS_SCORE_MODE=legacy`
 - a leitura de `explore_runs.csv` no OOS usa `duckdb` em vez de `pandas.read_csv`
+- o `reuse` estrito da `v6` para em `540d -> 360d`; `360d` nao gera mais um segmento proprio, porque nao existe um step seguinte comparavel dentro da grade padrao
 
 Saída padrão:
 - `data/generated/fair_wf_explore_v6/robustness_report/`
